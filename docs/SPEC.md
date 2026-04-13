@@ -104,14 +104,73 @@ Bifrost가 구현하는 MCP 메서드:
 
 ### Admin UI
 
-독립적인 관리 웹 인터페이스 (:3101 또는 같은 포트의 /admin):
+독립적인 관리 웹 인터페이스 (:3101 또는 같은 포트의 /admin).
+SPA로 구현, 빌드 스텝 없이 vanilla HTML/CSS/JS.
 
-- 워크스페이스 목록 (provider별 그룹)
-- 각 워크스페이스 연결 상태 (healthy / expired / error)
-- 워크스페이스 추가/수정/삭제
-- 토큰 갱신 (OAuth flow 또는 수동 입력)
-- 연결 테스트 (health check)
-- 도구 목록 미리보기 (어떤 이름으로 노출되는지)
+#### 화면 구성
+
+**1. Dashboard (메인)**
+- 연결된 워크스페이스 카드 그리드 (provider 아이콘 + alias + 상태 뱃지)
+- 상태 뱃지: `● Connected` (green) / `● Expired` (amber) / `● Error` (red) / `○ Disabled` (gray)
+- 카드 클릭 → 상세/편집 패널
+- 우측 상단 "+ Add Workspace" 버튼
+- 빈 상태(워크스페이스 0개)일 때 → Setup Wizard로 자동 진입
+
+**2. Setup Wizard (온보딩)**
+첫 실행 또는 워크스페이스가 없을 때 표시되는 단계별 가이드:
+
+```
+Step 1: Provider 선택
+  → Notion / Slack / (추후 확장) 카드 UI로 선택
+
+Step 2: 워크스페이스 정보 입력
+  → alias (영문, URL-safe), displayName (자유)
+  → Provider별 필수 필드 자동 표시
+    - Notion: Integration Token (+ 발급 가이드 링크)
+    - Slack: Bot Token + Team ID (+ 발급 가이드 링크)
+
+Step 3: 연결 테스트
+  → "Test Connection" 버튼 → healthCheck 실행
+  → 성공: ✓ 연결됨 + 접근 가능한 리소스 요약 (e.g., "12 pages accessible")
+  → 실패: 구체적 에러 메시지 + 해결 가이드
+    - 401: "토큰이 유효하지 않습니다. [토큰 재발급 →]"
+    - 403: "권한이 부족합니다. Notion Integration에 페이지 공유가 필요합니다. [설정 방법 →]"
+    - Network: "서버에 연결할 수 없습니다. URL과 네트워크를 확인하세요."
+
+Step 4: 완료
+  → 노출될 도구 이름 미리보기 (e.g., notion_personal__search_pages)
+  → "Add Another Workspace" / "Go to Dashboard"
+```
+
+**3. Workspace Detail (편집)**
+- 기본 정보 수정 (alias, displayName)
+- 토큰 갱신 (마스킹 표시, 변경 시에만 입력)
+- 연결 상태 + 마지막 health check 시간
+- "Test Connection" 버튼
+- 노출 도구 목록 (체크박스로 개별 도구 활성화/비활성화)
+- Enable/Disable 토글
+- 삭제 (확인 다이얼로그 필수)
+
+**4. Tools Overview**
+- 전체 워크스페이스의 노출 도구를 한눈에 보는 테이블
+- 컬럼: Provider | Workspace | Tool Name | MCP Name | Status
+- 검색/필터 지원
+- 각 도구의 inputSchema를 펼쳐볼 수 있는 accordion
+
+**5. Connect Guide (연동 가이드)**
+- 현재 서버 상태 (port, tunnel URL 등) 표시
+- 연동 대상별 탭:
+  - **claude.ai**: Tunnel URL 원클릭 복사 + 스크린샷 포함 단계별 안내
+  - **Claude Code**: `.mcp.json` 설정 코드블록 + 복사 버튼
+  - **기타**: 일반 MCP 엔드포인트 정보
+
+#### UX 원칙
+
+- **에러는 해결책과 함께**: 모든 에러 메시지에 "왜 발생했는지 + 어떻게 해결하는지" 포함
+- **위험 동작은 확인 필수**: 삭제, 토큰 변경 시 확인 다이얼로그
+- **상태는 항상 시각적으로**: 연결 상태를 색상 뱃지로 즉시 인지 가능
+- **복사 가능한 모든 값**: URL, 토큰(마스킹), 도구 이름 등 클릭 투 카피
+- **Progressive disclosure**: 기본 뷰는 단순하게, 상세 정보는 펼쳐서 확인
 
 ### Security
 
@@ -175,30 +234,36 @@ npm run tunnel
 
 ## Roadmap
 
-### Phase 1 — Core
+### Phase 1 — Core + Minimal Admin
 - [ ] MCP 프로토콜 핸들러 (Streamable HTTP + SSE)
 - [ ] Workspace manager + tool registry
 - [ ] Notion provider (search, read page, list databases)
 - [ ] Slack provider (search messages, read channel, list channels)
 - [ ] 기본 설정 파일 로딩
+- [ ] Admin REST API (CRUD workspaces, health check)
+- [ ] Admin UI — Dashboard + Setup Wizard + Workspace Detail
+- [ ] 토큰 유효성 검증 + health check (연결 테스트 버튼)
+- [ ] 에러 메시지에 해결 가이드 포함
 
-### Phase 2 — Admin & Auth
-- [ ] Admin REST API (CRUD workspaces)
-- [ ] Admin UI (워크스페이스 관리)
-- [ ] 토큰 유효성 검증 + health check
-- [ ] OAuth flow 지원 (Notion, Slack)
+### Phase 2 — Auth & Connect Guide
+- [ ] OAuth flow 지원 (Notion — 토큰 수동 입력 대체)
+- [ ] OAuth flow 지원 (Slack — Bot Token 자동 발급)
+- [ ] Admin UI — Connect Guide 탭 (claude.ai, Claude Code 연동 안내)
+- [ ] Admin UI — Tools Overview (전체 도구 테이블 + 검색)
+- [ ] 워크스페이스별 도구 필터링 (개별 도구 활성화/비활성화)
 
 ### Phase 3 — Tunnel & Distribution
 - [ ] Cloudflare Tunnel 통합
-- [ ] claude.ai remote connector 등록 가이드
-- [ ] Claude Code .mcp.json 설정 가이드
+- [ ] Connect Guide에 Tunnel URL 자동 반영 + 원클릭 복사
+- [ ] Claude Code .mcp.json 자동 생성 기능
 - [ ] Palantir Console 연동 가이드
 
 ### Phase 4 — Advanced
 - [ ] 추가 provider (Google Drive, GitHub, Linear, ...)
-- [ ] 워크스페이스별 도구 필터링 (일부 도구만 노출)
 - [ ] 사용량 로깅 / audit trail
 - [ ] 토큰 자동 갱신 (OAuth refresh)
+- [ ] 설정 export/import (환경 간 이동)
+- [ ] 워크스페이스 삭제 undo (soft delete + 30일 보관)
 
 ## Integration Points
 
