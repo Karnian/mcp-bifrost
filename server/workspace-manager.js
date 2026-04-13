@@ -1,0 +1,256 @@
+import { readFile, writeFile, rename, copyFile, watch } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { NotionProvider } from '../providers/notion.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONFIG_DIR = join(__dirname, '..', 'config');
+const CONFIG_PATH = join(CONFIG_DIR, 'workspaces.json');
+const BACKUP_PATH = join(CONFIG_DIR, 'workspaces.backup.json');
+const TMP_PATH = join(CONFIG_DIR, 'workspaces.tmp.json');
+
+const PROVIDERS = { notion: NotionProvider };
+
+function generateId(provider, alias) {
+  return `${provider}-${alias}`;
+}
+
+function aliasFromDisplayName(displayName) {
+  return displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '') || 'workspace';
+}
+
+function maskCredentials(credentials) {
+  const masked = {};
+  for (const [key, value] of Object.entries(credentials)) {
+    if (typeof value === 'string' && value.length > 4) {
+      const prefix = value.slice(0, value.indexOf('_') + 1) || '';
+      masked[key] = `${prefix}***${value.slice(-4)}`;
+    } else {
+      masked[key] = '***';
+    }
+  }
+  return masked;
+}
+
+export class WorkspaceManager {
+  constructor() {
+    this.config = { workspaces: [], server: { port: 3100 }, tunnel: { enabled: false, fixedDomain: '' } };
+    this.providers = new Map();
+    this.healthCache = new Map();
+    this._writeLock = Promise.resolve();
+    this._onChange = null;
+  }
+
+  async load() {
+    if (!existsSync(CONFIG_PATH)) {
+      await this._save();
+      return;
+    }
+    try {
+      const raw = await readFile(CONFIG_PATH, 'utf-8');
+      this.config = JSON.parse(raw);
+    } catch {
+      if (existsSync(BACKUP_PATH)) {
+        const backup = await readFile(BACKUP_PATH, 'utf-8');
+        this.config = JSON.parse(backup);
+        console.error('[WorkspaceManager] Loaded from backup');
+      } else {
+        console.error('[WorkspaceManager] No valid config found, using defaults');
+      }
+    }
+    if (!this.config.workspaces) this.config.workspaces = [];
+    await this._initProviders();
+  }
+
+  async _initProviders() {
+    this.providers.clear();
+    for (const ws of this.config.workspaces) {
+      this._createProvider(ws);
+    }
+  }
+
+  _createProvider(ws) {
+    const ProviderClass = PROVIDERS[ws.provider];
+    if (ProviderClass) {
+      this.providers.set(ws.id, new ProviderClass(ws));
+    }
+  }
+
+  async _save() {
+    this._writeLock = this._writeLock.then(async () => {
+      if (existsSync(CONFIG_PATH)) {
+        await copyFile(CONFIG_PATH, BACKUP_PATH);
+      }
+      await writeFile(TMP_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
+      await rename(TMP_PATH, CONFIG_PATH);
+    });
+    return this._writeLock;
+  }
+
+  getWorkspaces({ masked = true } = {}) {
+    return this.config.workspaces.map(ws => {
+      const health = this.healthCache.get(ws.id);
+      const result = { ...ws, status: this._computeStatus(ws, health) };
+      if (masked) {
+        result.credentials = maskCredentials(ws.credentials || {});
+      }
+      return result;
+    });
+  }
+
+  getWorkspace(id, { masked = true } = {}) {
+    const ws = this.config.workspaces.find(w => w.id === id);
+    if (!ws) return null;
+    const health = this.healthCache.get(ws.id);
+    const result = { ...ws, status: this._computeStatus(ws, health) };
+    if (masked) {
+      result.credentials = maskCredentials(ws.credentials || {});
+    }
+    return result;
+  }
+
+  _getRawWorkspace(id) {
+    return this.config.workspaces.find(w => w.id === id);
+  }
+
+  async addWorkspace(data) {
+    let alias = data.alias || aliasFromDisplayName(data.displayName || '');
+    // Deduplicate alias
+    const existing = this.config.workspaces.map(w => w.alias);
+    let candidate = alias;
+    let counter = 1;
+    while (existing.includes(candidate)) {
+      candidate = `${alias}-${++counter}`;
+    }
+    alias = candidate;
+
+    const namespace = alias; // namespace = alias at creation time, immutable
+    const id = data.id || generateId(data.provider, namespace);
+
+    // Check id uniqueness
+    if (this.config.workspaces.some(w => w.id === id)) {
+      throw new Error(`Workspace ID '${id}' already exists`);
+    }
+
+    const ws = {
+      id,
+      provider: data.provider,
+      namespace,
+      alias,
+      displayName: data.displayName || alias,
+      credentials: data.credentials || {},
+      enabled: data.enabled !== false,
+      toolFilter: data.toolFilter || { mode: 'all', enabled: [] },
+    };
+
+    this.config.workspaces.push(ws);
+    this._createProvider(ws);
+    await this._save();
+    this._notifyChange();
+    return ws;
+  }
+
+  async updateWorkspace(id, data) {
+    const idx = this.config.workspaces.findIndex(w => w.id === id);
+    if (idx === -1) throw new Error(`Workspace '${id}' not found`);
+
+    const ws = this.config.workspaces[idx];
+
+    // namespace is immutable
+    if (data.namespace && data.namespace !== ws.namespace) {
+      throw new Error('namespace is immutable and cannot be changed');
+    }
+
+    if (data.displayName !== undefined) ws.displayName = data.displayName;
+    if (data.alias !== undefined) ws.alias = data.alias;
+    if (data.enabled !== undefined) ws.enabled = data.enabled;
+    if (data.toolFilter !== undefined) ws.toolFilter = data.toolFilter;
+
+    // Credentials: only update if provided and non-empty
+    if (data.credentials) {
+      for (const [key, value] of Object.entries(data.credentials)) {
+        if (value && !value.includes('***')) {
+          ws.credentials[key] = value;
+        }
+      }
+    }
+
+    this._createProvider(ws); // re-create provider with updated config
+    await this._save();
+    this._notifyChange();
+    return ws;
+  }
+
+  async deleteWorkspace(id) {
+    const idx = this.config.workspaces.findIndex(w => w.id === id);
+    if (idx === -1) throw new Error(`Workspace '${id}' not found`);
+    this.config.workspaces.splice(idx, 1);
+    this.providers.delete(id);
+    this.healthCache.delete(id);
+    await this._save();
+    this._notifyChange();
+  }
+
+  async testConnection(id) {
+    const provider = this.providers.get(id);
+    if (!provider) throw new Error(`No provider for workspace '${id}'`);
+    const health = await provider.healthCheck();
+    this.healthCache.set(id, { ...health, checkedAt: new Date().toISOString() });
+    return health;
+  }
+
+  async testAll() {
+    const results = {};
+    for (const [id, provider] of this.providers) {
+      try {
+        const health = await provider.healthCheck();
+        this.healthCache.set(id, { ...health, checkedAt: new Date().toISOString() });
+        results[id] = health;
+      } catch (err) {
+        const health = { ok: false, message: err.message, checkedAt: new Date().toISOString() };
+        this.healthCache.set(id, health);
+        results[id] = health;
+      }
+    }
+    return results;
+  }
+
+  getProvider(id) {
+    return this.providers.get(id);
+  }
+
+  getEnabledWorkspaces() {
+    return this.config.workspaces.filter(w => w.enabled);
+  }
+
+  getServerConfig() {
+    return this.config.server || { port: 3100 };
+  }
+
+  getAdminToken() {
+    return process.env.BIFROST_ADMIN_TOKEN || this.config.server?.adminToken;
+  }
+
+  getMcpToken() {
+    return process.env.BIFROST_MCP_TOKEN || null;
+  }
+
+  _computeStatus(ws, health) {
+    if (!ws.enabled) return 'disabled';
+    if (!health) return 'healthy'; // not checked yet, assume healthy
+    if (!health.ok) return 'error';
+    return 'healthy';
+  }
+
+  onWorkspaceChange(callback) {
+    this._onChange = callback;
+  }
+
+  _notifyChange() {
+    if (this._onChange) this._onChange();
+  }
+}

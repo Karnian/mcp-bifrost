@@ -10,6 +10,15 @@
     "test": "node --test tests/",
     "tunnel": "node scripts/tunnel.js"
   },
-  "keywords": ["mcp", "notion", "slack", "multi-workspace", "bridge"],
-  "license": "MIT"
+  "keywords": [
+    "mcp",
+    "notion",
+    "slack",
+    "multi-workspace",
+    "bridge"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
 }

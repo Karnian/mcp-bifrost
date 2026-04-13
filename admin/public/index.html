@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bifrost Admin</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Login Screen -->
+    <div id="login-screen" class="screen">
+      <div class="login-card">
+        <h1>Bifrost</h1>
+        <p class="subtitle">Multi-workspace MCP Bridge</p>
+        <form id="login-form">
+          <label for="admin-token">Admin Token</label>
+          <input type="password" id="admin-token" placeholder="BIFROST_ADMIN_TOKEN" required>
+          <div id="login-error" class="error-msg hidden"></div>
+          <button type="submit" class="btn btn-primary">Login</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <h2>Bifrost</h2>
+        </div>
+        <div class="topbar-right">
+          <span id="tool-count-badge" class="badge"></span>
+          <button id="btn-test-all" class="btn btn-sm">Test All</button>
+          <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
+        </div>
+      </nav>
+
+      <!-- Needs Attention -->
+      <div id="attention-area" class="attention-area hidden"></div>
+
+      <!-- Workspace Grid -->
+      <div class="dashboard-header">
+        <h3>Workspaces</h3>
+        <button id="btn-add-ws" class="btn btn-primary btn-sm">+ Add Workspace</button>
+      </div>
+      <div id="workspace-grid" class="workspace-grid"></div>
+      <div id="empty-state" class="empty-state hidden">
+        <p>No workspaces configured yet.</p>
+        <button id="btn-add-ws-empty" class="btn btn-primary">+ Add Your First Workspace</button>
+      </div>
+    </div>
+
+    <!-- Add/Edit Drawer -->
+    <div id="drawer-overlay" class="drawer-overlay hidden">
+      <div class="drawer">
+        <div class="drawer-header">
+          <h3 id="drawer-title">Add Workspace</h3>
+          <button id="btn-close-drawer" class="btn btn-icon">&times;</button>
+        </div>
+        <form id="workspace-form">
+          <input type="hidden" id="ws-edit-id">
+
+          <label for="ws-provider">Provider</label>
+          <select id="ws-provider" required>
+            <option value="notion">Notion</option>
+            <option value="slack">Slack</option>
+          </select>
+
+          <label for="ws-displayname">Display Name</label>
+          <input type="text" id="ws-displayname" placeholder="My Notion" required>
+
+          <label for="ws-alias">Alias</label>
+          <input type="text" id="ws-alias" placeholder="auto-generated from display name">
+          <small>Used for identification. Auto-generated if empty.</small>
+
+          <div id="notion-fields">
+            <label for="ws-notion-token">Integration Token</label>
+            <input type="password" id="ws-notion-token" placeholder="ntn_...">
+            <small>notion.so/my-integrations &rarr; New &rarr; Token</small>
+          </div>
+
+          <div id="slack-fields" class="hidden">
+            <label for="ws-slack-token">Bot Token</label>
+            <input type="password" id="ws-slack-token" placeholder="xoxb-...">
+            <small>api.slack.com/apps &rarr; Create &rarr; Bot Token</small>
+
+            <label for="ws-slack-teamid">Team ID</label>
+            <input type="text" id="ws-slack-teamid" placeholder="T0001 (auto-detected if possible)">
+          </div>
+
+          <label class="toggle-label">
+            <input type="checkbox" id="ws-enabled" checked>
+            <span>Enabled</span>
+          </label>
+
+          <div id="ws-form-error" class="error-msg hidden"></div>
+
+          <div class="drawer-actions">
+            <button type="button" id="btn-delete-ws" class="btn btn-danger hidden">Delete</button>
+            <div class="spacer"></div>
+            <button type="button" id="btn-test-ws" class="btn btn-outline">Test Connection</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Delete Confirmation -->
+    <div id="confirm-overlay" class="drawer-overlay hidden">
+      <div class="confirm-dialog">
+        <h3>Delete Workspace</h3>
+        <p id="confirm-message"></p>
+        <div id="confirm-tools-list" class="tools-list"></div>
+        <div class="drawer-actions">
+          <button id="btn-confirm-cancel" class="btn btn-outline">Cancel</button>
+          <button id="btn-confirm-delete" class="btn btn-danger">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
