@@ -184,8 +184,16 @@ LLM의 도구 선택 정확도는 도구 수에 반비례한다:
 ```
 1. workspace.enabled === true        (워크스페이스 활성화)
 2. toolFilter 통과                    (mode:"all" → 통과, mode:"include" → enabled 배열에 포함)
-3. 해당 도구의 capabilityCheck 결과가 usable === true  (도구별 개별 판정)
+3. 해당 도구의 capabilityCheck 결과가 usable !== "unavailable"  (도구별 개별 판정)
 ```
+
+capabilityCheck 도구 상태는 3가지:
+- `usable`: 정상 동작 → MCP 노출 O, 호출 O
+- `limited`: 제약 있지만 동작 가능 → MCP 노출 O, 호출 O (description에 제약 사항 명시)
+- `unavailable`: 사용 불가 → MCP 노출 X, 호출 시 isError
+
+Admin UI에서는 세 가지 상태를 모두 표시 (usable/limited/unavailable).
+MCP `tools/list`에는 usable + limited만 노출, unavailable은 제외.
 
 호출(`tools/call`) 시에도 동일 규칙 재검사. 노출되지 않은 도구를 호출하면 `isError: true` + "이 도구는 현재 비활성화되어 있습니다" 반환.
 
@@ -210,8 +218,14 @@ Disabled는 수동 override로, 다른 조건보다 우선 적용된다.
 예시:
 - enabled: false → Disabled (수동 override, 다른 조건 평가하지 않음)
 - enabled: true + healthCheck 실패 → Error
-- enabled: true + healthCheck 성공 + 토큰 만료 7일 이내 → Action Needed
-- enabled: true + healthCheck 성공 + 만료 아님 + 일부 도구 usable=false → Limited
+- enabled: true + healthCheck 성공 + 토큰 만료 7일 이내 → Action Needed (시간 기반 선제 경고)
+- enabled: true + healthCheck 성공 + 만료 아님 + 일부 도구 usable=false → Limited (현재 기능 제한)
+
+※ Action Needed vs Limited 구분 기준:
+  - Action Needed: "지금은 동작하지만 곧 문제가 될 것" (만료 임박, 권한 변경 감지)
+  - Limited: "지금 이미 일부 기능이 제한됨" (scope 부족으로 특정 도구 unavailable)
+  - scope 부족은 Limited (현재 이미 제한). 토큰 만료 임박은 Action Needed (선제 경고)
+  - 둘 다 해당하면 Action Needed 우선 (더 심각)
 - enabled: true + healthCheck 성공 + 만료 아님 + 전체 도구 usable=true → Healthy
 ```
 
@@ -455,12 +469,14 @@ Step 4: 완료
 ```
 
 **3. Workspace Detail (편집)**
-- 기본 정보 수정 (displayName, alias — 자유롭게 변경 가능)
+- 기본 정보 수정 (displayName, alias — 자유롭게 변경 가능, MCP 도구 이름에 영향 없음)
 - **namespace는 읽기 전용** 표시 (불변, MCP 도구 이름의 안정성 보장)
   ```
   Namespace: personal (변경 불가 — MCP 도구 이름에 사용)
-  Display Name: [김팀장 메모장] (자유 변경)
-  → MCP 이름: notion_personal__search_pages (namespace 기반, 변경 없음)
+  Display Name: [김팀장 메모장] (자유 변경 — Admin UI 표시용)
+  Alias: kimteam-memo (자유 변경 — Admin UI 표시용)
+  → MCP 이름: notion_personal__search_pages (namespace 기반, 항상 고정)
+  ※ alias/displayName 변경은 description 자동 갱신에만 반영, MCP 도구 이름 불변
   ```
 - 토큰 갱신 (API 응답에서 항상 마스킹, 변경 시에만 입력)
 - 연결 상태 + 마지막 health check + capability check 결과
@@ -503,7 +519,7 @@ Step 4: 완료
 #### UX 원칙
 
 - **에러는 해결책과 함께**: 에러 분류 체계에 따라 "왜 + 어떻게" 항상 포함
-- **위험 동작은 확인 필수**: 삭제, alias 변경, 토큰 변경 시 영향 범위를 보여주는 확인 다이얼로그
+- **위험 동작은 확인 필수**: 삭제, 토큰 변경 시 확인 다이얼로그 (alias/displayName 변경은 MCP에 영향 없으므로 확인 불필요)
 - **상태는 다중 채널로**: 색상 + 아이콘 + 텍스트 레이블 병행 (색각 접근성)
 - **복사 가능한 모든 값**: URL, 도구 이름, 설정 코드 등 클릭 투 카피
 - **Progressive disclosure**: 기본 뷰는 단순하게, 상세 정보는 펼쳐서 확인
