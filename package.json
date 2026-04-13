@@ -1,0 +1,15 @@
+{
+  "name": "mcp-bifrost",
+  "version": "0.1.0",
+  "description": "Multi-workspace MCP bridge — connect multiple Notion, Slack, and other workspaces through a single MCP endpoint",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test tests/",
+    "tunnel": "node scripts/tunnel.js"
+  },
+  "keywords": ["mcp", "notion", "slack", "multi-workspace", "bridge"],
+  "license": "MIT"
+}

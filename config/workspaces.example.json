@@ -1,0 +1,55 @@
+{
+  "workspaces": [
+    {
+      "id": "notion-personal",
+      "provider": "notion",
+      "alias": "personal",
+      "displayName": "My Notion",
+      "credentials": {
+        "token": "ntn_YOUR_TOKEN_HERE"
+      },
+      "enabled": true
+    },
+    {
+      "id": "notion-work",
+      "provider": "notion",
+      "alias": "work",
+      "displayName": "Work Notion",
+      "credentials": {
+        "token": "ntn_YOUR_TOKEN_HERE"
+      },
+      "enabled": true
+    },
+    {
+      "id": "slack-personal",
+      "provider": "slack",
+      "alias": "personal",
+      "displayName": "My Slack",
+      "credentials": {
+        "botToken": "xoxb-YOUR_TOKEN_HERE",
+        "teamId": "T0001"
+      },
+      "enabled": true
+    },
+    {
+      "id": "slack-work",
+      "provider": "slack",
+      "alias": "work",
+      "displayName": "Work Slack",
+      "credentials": {
+        "botToken": "xoxb-YOUR_TOKEN_HERE",
+        "teamId": "T0002"
+      },
+      "enabled": true
+    }
+  ],
+  "server": {
+    "port": 3100,
+    "adminPort": 3101,
+    "adminToken": "change-this-to-a-secure-token"
+  },
+  "tunnel": {
+    "enabled": false,
+    "fixedDomain": ""
+  }
+}
