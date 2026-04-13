@@ -8,8 +8,9 @@ export class McpHandler {
     this.tr = toolRegistry;
   }
 
-  async handle(request) {
+  async handle(request, options = {}) {
     const { method, params, id } = request;
+    const { profile } = options;
 
     try {
       let result;
@@ -18,7 +19,7 @@ export class McpHandler {
           result = this._initialize(params);
           break;
         case 'tools/list':
-          result = this._toolsList();
+          result = this._toolsList(profile);
           break;
         case 'tools/call':
           result = await this._toolsCall(params);
@@ -55,13 +56,28 @@ export class McpHandler {
     };
   }
 
-  _toolsList() {
-    const tools = this.tr.getTools().map(t => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }));
-    return { tools };
+  _toolsList(profile) {
+    let tools = this.tr.getTools();
+
+    // Profile filtering: 'read-only' only shows read-only tools
+    if (profile === 'read-only') {
+      tools = tools.filter(t => {
+        // Meta tools are always shown
+        if (!t._workspace) return true;
+        const provider = this.wm.getProvider(t._workspace);
+        if (!provider) return false;
+        const rawTool = provider.getTools().find(rt => rt.name === t._originalName);
+        return rawTool?.readOnly !== false;
+      });
+    }
+
+    return {
+      tools: tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+      })),
+    };
   }
 
   async _toolsCall(params) {

@@ -27,9 +27,12 @@
       <nav class="topbar">
         <div class="topbar-left">
           <h2>Bifrost</h2>
+          <span id="session-count" class="session-badge"></span>
         </div>
         <div class="topbar-right">
           <span id="tool-count-badge" class="badge"></span>
+          <button id="btn-nav-tools" class="btn btn-sm btn-outline">Tools</button>
+          <button id="btn-nav-connect" class="btn btn-sm btn-outline">Connect</button>
           <button id="btn-test-all" class="btn btn-sm">Test All</button>
           <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
         </div>
@@ -50,6 +53,243 @@
       </div>
     </div>
 
+    <!-- Workspace Detail Screen -->
+    <div id="detail-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-dashboard" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2 id="detail-title"></h2>
+        </div>
+        <div class="topbar-right">
+          <button id="btn-detail-test" class="btn btn-sm">Test Connection</button>
+        </div>
+      </nav>
+      <div class="detail-content">
+        <div class="detail-section">
+          <h4>Basic Info</h4>
+          <div class="detail-field">
+            <span class="detail-label">Namespace</span>
+            <span id="detail-namespace" class="detail-value mono"></span>
+            <small>immutable — used in MCP tool names</small>
+          </div>
+          <div class="detail-field">
+            <span class="detail-label">Display Name</span>
+            <input type="text" id="detail-displayname" class="detail-input">
+          </div>
+          <div class="detail-field">
+            <span class="detail-label">Alias</span>
+            <input type="text" id="detail-alias" class="detail-input">
+          </div>
+          <div class="detail-field">
+            <span class="detail-label">Status</span>
+            <span id="detail-status"></span>
+          </div>
+          <div class="detail-field">
+            <label class="toggle-label">
+              <input type="checkbox" id="detail-enabled">
+              <span>Enabled</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <h4>Credentials</h4>
+          <div id="detail-cred-fields"></div>
+          <small>Leave empty to keep current value. Masked for security.</small>
+        </div>
+
+        <div class="detail-section">
+          <h4>Tools</h4>
+          <div id="detail-tools-list" class="tools-grid"></div>
+        </div>
+
+        <div class="detail-section">
+          <h4>Health Check History</h4>
+          <div id="detail-health-info" class="health-info"></div>
+        </div>
+
+        <div class="detail-actions">
+          <button id="btn-detail-save" class="btn btn-primary">Save Changes</button>
+          <button id="btn-detail-delete" class="btn btn-danger">Delete Workspace</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Setup Wizard -->
+    <div id="wizard-screen" class="screen hidden">
+      <div class="wizard-container">
+        <div class="wizard-steps">
+          <div class="wizard-step active" data-step="1">1. Provider</div>
+          <div class="wizard-step" data-step="2">2. Connection</div>
+          <div class="wizard-step" data-step="3">3. Test</div>
+          <div class="wizard-step" data-step="4">4. Complete</div>
+        </div>
+        <div class="wizard-body">
+          <!-- Step 1: Provider Selection -->
+          <div id="wizard-step-1" class="wizard-panel">
+            <h3>Select Provider</h3>
+            <div class="provider-cards">
+              <div class="provider-card" data-provider="notion">
+                <div class="provider-icon">N</div>
+                <div class="provider-name">Notion</div>
+                <div class="provider-desc">Pages, databases, search</div>
+              </div>
+              <div class="provider-card" data-provider="slack">
+                <div class="provider-icon">S</div>
+                <div class="provider-name">Slack</div>
+                <div class="provider-desc">Messages, channels, search</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 2: Connection Info -->
+          <div id="wizard-step-2" class="wizard-panel hidden">
+            <h3>Connection Details</h3>
+            <label for="wiz-displayname">Display Name</label>
+            <input type="text" id="wiz-displayname" placeholder="My Notion">
+            <label for="wiz-alias">Alias (optional)</label>
+            <input type="text" id="wiz-alias" placeholder="auto-generated">
+            <div id="wiz-notion-fields">
+              <label for="wiz-notion-token">Integration Token</label>
+              <input type="password" id="wiz-notion-token" placeholder="ntn_...">
+              <small>notion.so/my-integrations &rarr; New &rarr; Copy Token</small>
+            </div>
+            <div id="wiz-slack-fields" class="hidden">
+              <label for="wiz-slack-token">Bot Token</label>
+              <input type="password" id="wiz-slack-token" placeholder="xoxb-...">
+              <small>api.slack.com/apps &rarr; Create &rarr; Bot Token</small>
+              <label for="wiz-slack-teamid">Team ID</label>
+              <input type="text" id="wiz-slack-teamid" placeholder="T0001">
+            </div>
+            <div class="wizard-nav">
+              <button type="button" class="btn btn-outline wiz-prev">Back</button>
+              <button type="button" class="btn btn-primary wiz-next">Next</button>
+            </div>
+          </div>
+
+          <!-- Step 3: Test Connection -->
+          <div id="wizard-step-3" class="wizard-panel hidden">
+            <h3>Testing Connection</h3>
+            <div id="wiz-test-progress" class="test-progress">
+              <div class="test-step" id="wiz-ts-validate">
+                <span class="test-icon">...</span>
+                <span>Validating credentials</span>
+              </div>
+              <div class="test-step" id="wiz-ts-capability">
+                <span class="test-icon">...</span>
+                <span>Checking capabilities</span>
+              </div>
+              <div class="test-step" id="wiz-ts-sample">
+                <span class="test-icon">...</span>
+                <span>Sample tool call</span>
+              </div>
+            </div>
+            <div id="wiz-test-result" class="hidden"></div>
+            <div class="wizard-nav">
+              <button type="button" class="btn btn-outline wiz-prev">Back</button>
+              <button type="button" class="btn btn-primary wiz-next" disabled>Next</button>
+            </div>
+          </div>
+
+          <!-- Step 4: Complete -->
+          <div id="wizard-step-4" class="wizard-panel hidden">
+            <h3>Setup Complete</h3>
+            <div id="wiz-summary"></div>
+            <div class="wizard-complete-actions">
+              <button type="button" id="wiz-add-another" class="btn btn-outline">Add Another Workspace</button>
+              <button type="button" id="wiz-go-dashboard" class="btn btn-primary">Go to Dashboard</button>
+            </div>
+          </div>
+        </div>
+        <button type="button" id="wiz-skip" class="btn btn-sm btn-outline wizard-skip">Skip</button>
+      </div>
+    </div>
+
+    <!-- Tools Overview -->
+    <div id="tools-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-tools" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Tools Overview</h2>
+        </div>
+        <div class="topbar-right">
+          <span id="tools-total-badge" class="badge"></span>
+        </div>
+      </nav>
+      <div class="tools-overview-content">
+        <div class="tools-filters">
+          <input type="text" id="tools-search" placeholder="Search tools..." class="tools-search-input">
+        </div>
+        <table id="tools-table" class="tools-table">
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>Workspace</th>
+              <th>Tool Name</th>
+              <th>MCP Name</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="tools-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Connect Guide -->
+    <div id="connect-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-connect" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Connect Guide</h2>
+        </div>
+      </nav>
+      <div class="connect-content">
+        <div class="connect-tabs">
+          <button class="connect-tab active" data-tab="claudeai">claude.ai</button>
+          <button class="connect-tab" data-tab="claudecode">Claude Code</button>
+          <button class="connect-tab" data-tab="other">Other</button>
+        </div>
+        <div id="connect-claudeai" class="connect-panel">
+          <h3>claude.ai (Remote Connector)</h3>
+          <div class="connect-steps">
+            <ol>
+              <li>Start Bifrost with a Tunnel or on a public URL</li>
+              <li>Go to claude.ai &rarr; Settings &rarr; Connectors &rarr; Add Custom Connector</li>
+              <li>Paste the MCP endpoint URL:</li>
+            </ol>
+            <div class="connect-url-box">
+              <code id="connect-claudeai-url"></code>
+              <button class="btn btn-sm btn-outline copy-btn" data-copy="connect-claudeai-url">Copy</button>
+            </div>
+            <p class="connect-note">Note: Requires a public HTTPS URL. Use <code>npm run tunnel</code> for development.</p>
+          </div>
+        </div>
+        <div id="connect-claudecode" class="connect-panel hidden">
+          <h3>Claude Code (.mcp.json)</h3>
+          <p>Add this to your project's <code>.mcp.json</code>:</p>
+          <div class="connect-code-box">
+            <pre id="connect-mcp-json"></pre>
+            <button class="btn btn-sm btn-outline copy-btn" data-copy="connect-mcp-json">Copy</button>
+          </div>
+        </div>
+        <div id="connect-other" class="connect-panel hidden">
+          <h3>Generic MCP Endpoint</h3>
+          <div class="connect-info-grid">
+            <div><strong>Streamable HTTP:</strong></div>
+            <div><code id="connect-mcp-url"></code></div>
+            <div><strong>SSE:</strong></div>
+            <div><code id="connect-sse-url"></code></div>
+            <div><strong>Auth:</strong></div>
+            <div><code>Authorization: Bearer &lt;BIFROST_MCP_TOKEN&gt;</code></div>
+          </div>
+        </div>
+        <div class="connect-server-status">
+          <h4>Server Status</h4>
+          <div id="connect-status-info"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Add/Edit Drawer -->
     <div id="drawer-overlay" class="drawer-overlay hidden">
       <div class="drawer">
@@ -59,42 +299,33 @@
         </div>
         <form id="workspace-form">
           <input type="hidden" id="ws-edit-id">
-
           <label for="ws-provider">Provider</label>
           <select id="ws-provider" required>
             <option value="notion">Notion</option>
             <option value="slack">Slack</option>
           </select>
-
           <label for="ws-displayname">Display Name</label>
           <input type="text" id="ws-displayname" placeholder="My Notion" required>
-
           <label for="ws-alias">Alias</label>
           <input type="text" id="ws-alias" placeholder="auto-generated from display name">
           <small>Used for identification. Auto-generated if empty.</small>
-
           <div id="notion-fields">
             <label for="ws-notion-token">Integration Token</label>
             <input type="password" id="ws-notion-token" placeholder="ntn_...">
             <small>notion.so/my-integrations &rarr; New &rarr; Token</small>
           </div>
-
           <div id="slack-fields" class="hidden">
             <label for="ws-slack-token">Bot Token</label>
             <input type="password" id="ws-slack-token" placeholder="xoxb-...">
             <small>api.slack.com/apps &rarr; Create &rarr; Bot Token</small>
-
             <label for="ws-slack-teamid">Team ID</label>
             <input type="text" id="ws-slack-teamid" placeholder="T0001 (auto-detected if possible)">
           </div>
-
           <label class="toggle-label">
             <input type="checkbox" id="ws-enabled" checked>
             <span>Enabled</span>
           </label>
-
           <div id="ws-form-error" class="error-msg hidden"></div>
-
           <div class="drawer-actions">
             <button type="button" id="btn-delete-ws" class="btn btn-danger hidden">Delete</button>
             <div class="spacer"></div>

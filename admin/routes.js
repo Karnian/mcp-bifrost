@@ -16,7 +16,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-export function createAdminRoutes(wm, tr) {
+export function createAdminRoutes(wm, tr, sse) {
   return async (req, res, url) => {
     const path = url.pathname;
     const method = req.method;
@@ -53,6 +53,12 @@ export function createAdminRoutes(wm, tr) {
         const body = await readBody(req);
         const ws = await wm.addWorkspace(body);
         sendJson(res, 201, { ok: true, data: wm.getWorkspace(ws.id) });
+        return;
+      }
+
+      // GET /api/workspaces/deleted — list soft-deleted workspaces
+      if (path === '/api/workspaces/deleted' && method === 'GET') {
+        sendJson(res, 200, { ok: true, data: wm.getDeletedWorkspaces() });
         return;
       }
 
@@ -98,6 +104,15 @@ export function createAdminRoutes(wm, tr) {
         return;
       }
 
+      // POST /api/workspaces/:id/restore
+      const restoreMatch = path.match(/^\/api\/workspaces\/([^/]+)\/restore$/);
+      if (restoreMatch && method === 'POST') {
+        const id = decodeURIComponent(restoreMatch[1]);
+        const ws = await wm.restoreWorkspace(id);
+        sendJson(res, 200, { ok: true, data: wm.getWorkspace(ws.id) });
+        return;
+      }
+
       // GET /api/status
       if (path === '/api/status' && method === 'GET') {
         const workspaces = wm.getWorkspaces();
@@ -109,6 +124,77 @@ export function createAdminRoutes(wm, tr) {
             enabledWorkspaces: workspaces.filter(w => w.enabled).length,
             toolsVersion: tr.toolsVersion,
             totalTools: tr.getToolCount(),
+            activeSessions: sse?.getSessionCount() || 0,
+          },
+        });
+        return;
+      }
+
+      // GET /api/diagnostics
+      if (path === '/api/diagnostics' && method === 'GET') {
+        sendJson(res, 200, { ok: true, data: wm.getDiagnostics() });
+        return;
+      }
+
+      // GET /api/tools — all exposed tools across workspaces
+      if (path === '/api/tools' && method === 'GET') {
+        const tools = tr.getTools().map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          workspace: t._workspace,
+          originalName: t._originalName,
+        }));
+        sendJson(res, 200, { ok: true, data: tools });
+        return;
+      }
+
+      // GET /api/export — export config (credentials stripped)
+      if (path === '/api/export' && method === 'GET') {
+        const workspaces = wm.getWorkspaces({ masked: false }).map(ws => ({
+          provider: ws.provider,
+          namespace: ws.namespace,
+          alias: ws.alias,
+          displayName: ws.displayName,
+          enabled: ws.enabled,
+          toolFilter: ws.toolFilter,
+          // Credentials excluded for security
+        }));
+        sendJson(res, 200, { ok: true, data: { workspaces, exportedAt: new Date().toISOString() } });
+        return;
+      }
+
+      // POST /api/import — import config
+      if (path === '/api/import' && method === 'POST') {
+        const body = await readBody(req);
+        const imported = body.workspaces || [];
+        const results = [];
+        for (const wsData of imported) {
+          try {
+            const ws = await wm.addWorkspace(wsData);
+            results.push({ id: ws.id, status: 'created' });
+          } catch (err) {
+            results.push({ displayName: wsData.displayName, status: 'error', message: err.message });
+          }
+        }
+        sendJson(res, 200, { ok: true, data: { results } });
+        return;
+      }
+
+      // GET /api/connect-info — server info for connect guide
+      if (path === '/api/connect-info' && method === 'GET') {
+        const serverConfig = wm.getServerConfig();
+        const tunnelConfig = wm.config.tunnel || {};
+        const mcpTokenSet = !!wm.getMcpToken();
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            port: serverConfig.port || 3100,
+            mcpEndpoint: `http://localhost:${serverConfig.port || 3100}/mcp`,
+            sseEndpoint: `http://localhost:${serverConfig.port || 3100}/sse`,
+            tunnelEnabled: tunnelConfig.enabled || false,
+            tunnelUrl: tunnelConfig.fixedDomain || null,
+            mcpTokenConfigured: mcpTokenSet,
           },
         });
         return;

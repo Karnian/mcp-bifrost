@@ -68,11 +68,18 @@ describe('WorkspaceManager', () => {
     assert.equal(wm.getWorkspaces().length, 0);
   });
 
-  it('should compute status correctly', async () => {
+  it('should compute status correctly — disabled', async () => {
     const wm = new WorkspaceManager();
     const ws = await wm.addWorkspace({ provider: 'notion', displayName: 'Status', credentials: { token: 'x' }, enabled: false });
     const result = wm.getWorkspace(ws.id);
     assert.equal(result.status, 'disabled');
+  });
+
+  it('should return unknown status for unchecked workspaces', async () => {
+    const wm = new WorkspaceManager();
+    const ws = await wm.addWorkspace({ provider: 'notion', displayName: 'Unchecked', credentials: { token: 'x' } });
+    const result = wm.getWorkspace(ws.id);
+    assert.equal(result.status, 'unknown');
   });
 });
 
@@ -133,6 +140,8 @@ describe('ToolRegistry', () => {
     const tools = tr.getTools();
     const searchTool = tools.find(t => t.name === 'notion_my-notion__search_pages');
     assert.ok(searchTool.description.includes('[My Notion]'));
+    assert.ok(searchTool.description.includes('Notion 워크스페이스'));
+    assert.ok(searchTool.description.includes('읽기 전용'));
   });
 
   it('should not include tools from disabled workspaces', async () => {
@@ -142,6 +151,29 @@ describe('ToolRegistry', () => {
     const tools = tr.getTools();
     const wsTools = tools.filter(t => t._workspace !== null);
     assert.equal(wsTools.length, 0);
+  });
+
+  it('should exclude unavailable tools from capabilityCheck', async () => {
+    const wm = new WorkspaceManager();
+    const ws = await wm.addWorkspace({
+      provider: 'notion',
+      displayName: 'CapTest',
+      credentials: { token: 'x' },
+    });
+    // Simulate capabilityCheck result with an unavailable tool
+    wm.capabilityCache.set(ws.id, {
+      tools: [
+        { name: 'search_pages', usable: 'usable' },
+        { name: 'read_page', usable: 'unavailable' },
+        { name: 'list_databases', usable: 'limited' },
+      ],
+    });
+    const tr = new ToolRegistry(wm);
+    const tools = tr.getTools().filter(t => t._workspace === ws.id);
+    const names = tools.map(t => t._originalName);
+    assert.ok(names.includes('search_pages'));
+    assert.ok(!names.includes('read_page')); // unavailable → excluded
+    assert.ok(names.includes('list_databases')); // limited → included
   });
 
   it('should apply toolFilter include mode', async () => {

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NotionProvider } from '../providers/notion.js';
+import { SlackProvider } from '../providers/slack.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -10,7 +11,7 @@ const CONFIG_PATH = join(CONFIG_DIR, 'workspaces.json');
 const BACKUP_PATH = join(CONFIG_DIR, 'workspaces.backup.json');
 const TMP_PATH = join(CONFIG_DIR, 'workspaces.tmp.json');
 
-const PROVIDERS = { notion: NotionProvider };
+const PROVIDERS = { notion: NotionProvider, slack: SlackProvider };
 
 function generateId(provider, alias) {
   return `${provider}-${alias}`;
@@ -41,8 +42,12 @@ export class WorkspaceManager {
     this.config = { workspaces: [], server: { port: 3100 }, tunnel: { enabled: false, fixedDomain: '' } };
     this.providers = new Map();
     this.healthCache = new Map();
+    this.capabilityCache = new Map();
     this._writeLock = Promise.resolve();
     this._onChange = null;
+    this._loaded = false; // only save to disk after explicit load()
+    this.errorLog = []; // last 50 errors
+    this.auditLog = []; // last 10 config changes
   }
 
   async load() {
@@ -63,6 +68,7 @@ export class WorkspaceManager {
       }
     }
     if (!this.config.workspaces) this.config.workspaces = [];
+    this._loaded = true;
     await this._initProviders();
   }
 
@@ -81,6 +87,7 @@ export class WorkspaceManager {
   }
 
   async _save() {
+    if (!this._loaded) return; // skip disk I/O if not loaded from file
     this._writeLock = this._writeLock.then(async () => {
       if (existsSync(CONFIG_PATH)) {
         await copyFile(CONFIG_PATH, BACKUP_PATH);
@@ -91,8 +98,8 @@ export class WorkspaceManager {
     return this._writeLock;
   }
 
-  getWorkspaces({ masked = true } = {}) {
-    return this.config.workspaces.map(ws => {
+  getWorkspaces({ masked = true, includeDeleted = false } = {}) {
+    return this.config.workspaces.filter(w => includeDeleted || !w.deletedAt).map(ws => {
       const health = this.healthCache.get(ws.id);
       const result = { ...ws, status: this._computeStatus(ws, health) };
       if (masked) {
@@ -150,6 +157,7 @@ export class WorkspaceManager {
     this.config.workspaces.push(ws);
     this._createProvider(ws);
     await this._save();
+    this.logAudit('add', ws.id, `Added ${ws.provider} workspace "${ws.displayName}"`);
     this._notifyChange();
     return ws;
   }
@@ -181,18 +189,63 @@ export class WorkspaceManager {
 
     this._createProvider(ws); // re-create provider with updated config
     await this._save();
+    this.logAudit('update', ws.id, `Updated workspace "${ws.displayName}"`);
     this._notifyChange();
     return ws;
   }
 
-  async deleteWorkspace(id) {
+  async deleteWorkspace(id, { hard = false } = {}) {
     const idx = this.config.workspaces.findIndex(w => w.id === id);
     if (idx === -1) throw new Error(`Workspace '${id}' not found`);
-    this.config.workspaces.splice(idx, 1);
+    const ws = this.config.workspaces[idx];
+
+    if (hard) {
+      this.config.workspaces.splice(idx, 1);
+    } else {
+      // Soft delete — mark as deleted, keep for 30 days
+      ws.deletedAt = new Date().toISOString();
+      ws.enabled = false;
+    }
+
     this.providers.delete(id);
     this.healthCache.delete(id);
+    this.capabilityCache.delete(id);
     await this._save();
+    this.logAudit('delete', id, `${hard ? 'Hard' : 'Soft'} deleted workspace "${ws.displayName}"`);
     this._notifyChange();
+  }
+
+  async restoreWorkspace(id) {
+    const ws = this.config.workspaces.find(w => w.id === id);
+    if (!ws) throw new Error(`Workspace '${id}' not found`);
+    if (!ws.deletedAt) throw new Error(`Workspace '${id}' is not deleted`);
+    delete ws.deletedAt;
+    ws.enabled = true;
+    this._createProvider(ws);
+    await this._save();
+    this.logAudit('restore', id, `Restored workspace "${ws.displayName}"`);
+    this._notifyChange();
+    return ws;
+  }
+
+  getDeletedWorkspaces() {
+    return this.config.workspaces
+      .filter(w => w.deletedAt)
+      .map(ws => ({ ...ws, credentials: maskCredentials(ws.credentials || {}) }));
+  }
+
+  async purgeExpiredWorkspaces() {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const expired = this.config.workspaces.filter(w => w.deletedAt && w.deletedAt < thirtyDaysAgo);
+    for (const ws of expired) {
+      const idx = this.config.workspaces.indexOf(ws);
+      if (idx !== -1) {
+        this.config.workspaces.splice(idx, 1);
+        this.logAudit('purge', ws.id, `Purged expired workspace "${ws.displayName}"`);
+      }
+    }
+    if (expired.length > 0) await this._save();
+    return expired.length;
   }
 
   async testConnection(id) {
@@ -200,6 +253,11 @@ export class WorkspaceManager {
     if (!provider) throw new Error(`No provider for workspace '${id}'`);
     const health = await provider.healthCheck();
     this.healthCache.set(id, { ...health, checkedAt: new Date().toISOString() });
+    // Also run capabilityCheck
+    try {
+      const cap = await provider.capabilityCheck();
+      this.capabilityCache.set(id, { ...cap, checkedAt: new Date().toISOString() });
+    } catch { /* capability check is best-effort */ }
     return health;
   }
 
@@ -210,6 +268,11 @@ export class WorkspaceManager {
         const health = await provider.healthCheck();
         this.healthCache.set(id, { ...health, checkedAt: new Date().toISOString() });
         results[id] = health;
+        // Also run capabilityCheck
+        try {
+          const cap = await provider.capabilityCheck();
+          this.capabilityCache.set(id, { ...cap, checkedAt: new Date().toISOString() });
+        } catch { /* best-effort */ }
       } catch (err) {
         const health = { ok: false, message: err.message, checkedAt: new Date().toISOString() };
         this.healthCache.set(id, health);
@@ -219,12 +282,16 @@ export class WorkspaceManager {
     return results;
   }
 
+  getCapability(id) {
+    return this.capabilityCache.get(id) || null;
+  }
+
   getProvider(id) {
     return this.providers.get(id);
   }
 
   getEnabledWorkspaces() {
-    return this.config.workspaces.filter(w => w.enabled);
+    return this.config.workspaces.filter(w => w.enabled && !w.deletedAt);
   }
 
   getServerConfig() {
@@ -241,8 +308,17 @@ export class WorkspaceManager {
 
   _computeStatus(ws, health) {
     if (!ws.enabled) return 'disabled';
-    if (!health) return 'healthy'; // not checked yet, assume healthy
+    if (!health) return 'unknown';
     if (!health.ok) return 'error';
+
+    // Check capability for limited/action_needed
+    const cap = this.capabilityCache.get(ws.id);
+    if (cap?.tools) {
+      const hasUnavailable = cap.tools.some(t => t.usable === 'unavailable');
+      const hasLimited = cap.tools.some(t => t.usable === 'limited');
+      if (hasUnavailable || hasLimited) return 'limited';
+    }
+
     return 'healthy';
   }
 
@@ -252,5 +328,41 @@ export class WorkspaceManager {
 
   _notifyChange() {
     if (this._onChange) this._onChange();
+  }
+
+  logError(category, workspace, message) {
+    this.errorLog.unshift({
+      timestamp: new Date().toISOString(),
+      category,
+      workspace,
+      message,
+    });
+    if (this.errorLog.length > 50) this.errorLog.length = 50;
+  }
+
+  logAudit(action, workspace, details) {
+    this.auditLog.unshift({
+      timestamp: new Date().toISOString(),
+      action,
+      workspace,
+      details,
+    });
+    if (this.auditLog.length > 10) this.auditLog.length = 10;
+  }
+
+  getDiagnostics() {
+    const workspaces = this.getWorkspaces();
+    return {
+      workspaces: workspaces.map(ws => ({
+        id: ws.id,
+        provider: ws.provider,
+        displayName: ws.displayName,
+        status: ws.status,
+        lastHealth: this.healthCache.get(ws.id) || null,
+        lastCapability: this.capabilityCache.get(ws.id) || null,
+      })),
+      errorLog: this.errorLog,
+      auditLog: this.auditLog,
+    };
   }
 }

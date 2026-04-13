@@ -1,5 +1,7 @@
 node_modules/
 config/workspaces.json
+config/workspaces.backup.json
 .env
 *.db
 .DS_Store
+.mcp.json

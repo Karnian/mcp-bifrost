@@ -25,8 +25,10 @@ export class ToolRegistry {
       if (!provider) continue;
 
       const rawTools = provider.getTools();
+      const capability = this.wm.getCapability?.(ws.id);
       for (const tool of rawTools) {
         if (!this._passesFilter(ws, tool.name)) continue;
+        if (this._isUnavailable(capability, tool.name)) continue;
 
         const mcpName = this._namespacedName(ws.provider, ws.namespace, tool.name);
         const description = this._enrichDescription(ws, tool);
@@ -82,7 +84,8 @@ export class ToolRegistry {
 
   _enrichDescription(ws, tool) {
     const readOnly = tool.readOnly ? ' (읽기 전용)' : '';
-    return `[${ws.displayName}] ${tool.description}.${readOnly}`;
+    const providerLabel = ws.provider.charAt(0).toUpperCase() + ws.provider.slice(1);
+    return `[${ws.displayName}] ${tool.description}. ${providerLabel} 워크스페이스.${readOnly}`;
   }
 
   _passesFilter(ws, toolName) {
@@ -92,6 +95,12 @@ export class ToolRegistry {
       return (filter.enabled || []).includes(toolName);
     }
     return true;
+  }
+
+  _isUnavailable(capability, toolName) {
+    if (!capability?.tools) return false;
+    const toolCap = capability.tools.find(t => t.name === toolName);
+    return toolCap?.usable === 'unavailable';
   }
 
   _metaTools() {
