@@ -85,13 +85,80 @@ class BaseProvider {
 
 ```
 Provider: Notion
-Workspace: "personal"
+Workspace namespace: "personal"
 Tool: search_pages
 
 → 노출 이름: notion_personal__search_pages
 ```
 
-패턴: `{provider}_{workspace_alias}__{tool_name}`
+패턴: `{provider}_{namespace}__{tool_name}`
+
+#### 불변 Namespace vs 가변 Alias
+
+`alias`(displayName에서 자동 생성, 사용자 수정 가능)와 `namespace`(MCP 도구 이름에 사용)를 분리한다.
+
+- `namespace`: 워크스페이스 최초 생성 시 alias에서 복사, **이후 변경 불가** (immutable)
+- `alias`/`displayName`: Admin UI 표시용, 자유롭게 변경 가능
+- MCP 도구 이름은 `namespace` 기반이므로, displayName을 바꿔도 클라이언트에 영향 없음
+- workspaces.json에 `namespace` 필드 추가 (한번 설정되면 변경 불가)
+
+```json
+{
+  "id": "notion-personal",
+  "provider": "notion",
+  "namespace": "personal",
+  "alias": "personal",
+  "displayName": "개인 Notion"
+}
+```
+
+> alias와 namespace가 다를 수 있다: displayName "김팀장 메모장"으로 변경 → alias "kimteam-memo" → namespace는 여전히 "personal" → MCP 이름 `notion_personal__search_pages` 유지.
+
+#### Tool Description 규약
+
+LLM은 도구 이름보다 **description을 보고 선택**한다. 따라서 description은 반드시 다음 구조를 따른다:
+
+```
+description 템플릿:
+"[displayName] 워크스페이스에서 [동작]. [구분 정보]."
+
+필수 포함 정보:
+1. displayName (사용자가 자연어로 참조할 이름)
+2. provider 종류 (Notion/Slack)
+3. 읽기/쓰기 여부
+4. 동일 provider 다중 워크스페이스 구분점
+
+예시:
+- "개인 Notion 워크스페이스에서 페이지를 검색합니다. 개인 메모와 프로젝트용. (읽기 전용)"
+- "회사 Slack (ACME Corp)에서 메시지를 검색합니다. 개인 Slack이 아닌 업무용 워크스페이스입니다."
+```
+
+Bifrost는 provider의 원본 description에 워크스페이스 컨텍스트를 **자동 주입**한다:
+- Provider가 반환하는 원본 description: `"Search pages in Notion"`
+- Bifrost가 노출하는 description: `"[개인 Notion] Search pages in Notion. 개인 메모와 프로젝트용 워크스페이스. (읽기 전용)"`
+
+#### 도구 수 스케일링
+
+LLM의 도구 선택 정확도는 도구 수에 반비례한다:
+- ~20개: 정확도 양호
+- 20-30개: 정확도 저하 시작
+- 50개+: 유의미한 degradation
+
+**대응 전략:**
+
+1. **도구 수 경고 임계값**: Admin UI에서 노출 도구 20개 초과 시 주의, 30개 초과 시 경고
+2. **toolFilter 적극 활용**: 워크스페이스별로 필요한 도구만 선택적 노출
+3. **Profile 기반 엔드포인트** (Phase 4): `/mcp?profile=read-only` 같은 분기로 클라이언트별 도구셋 제한
+4. **쓰기 도구 opt-in**: 기본은 읽기 전용 도구만 노출, 쓰기 도구는 toolFilter에서 명시적 활성화
+
+#### Bifrost 메타 도구
+
+네임스페이스 바깥의 Bifrost 자체 도구:
+
+| 도구 | 설명 |
+|------|------|
+| `bifrost__list_workspaces` | 연결된 워크스페이스 목록 + displayName + 상태 반환. LLM이 모호한 요청 시 워크스페이스를 먼저 확인할 수 있음 |
+| `bifrost__workspace_info` | 특정 워크스페이스의 상세 정보 (접근 가능 리소스, 활성 도구 목록) |
 
 ### MCP Protocol Support
 
@@ -99,16 +166,79 @@ Bifrost가 구현하는 MCP 메서드:
 
 | Method | 설명 |
 |--------|------|
-| `initialize` | 핸드셰이크, 서버 capabilities 선언 |
-| `tools/list` | 모든 워크스페이스의 도구를 네임스페이스와 함께 반환 |
+| `initialize` | 핸드셰이크, capabilities 선언 (`tools.listChanged: true`) |
+| `tools/list` | 모든 활성 워크스페이스의 도구를 네임스페이스와 함께 반환 |
 | `tools/call` | 네임스페이스에서 워크스페이스를 식별하고 해당 provider에 라우팅 |
-| `resources/list` | 워크스페이스 목록/상태를 리소스로 노출 (optional) |
+| `resources/list` | 워크스페이스 목록/상태를 리소스로 노출 |
+| `notifications/tools/list_changed` | 워크스페이스 변경 시 클라이언트에 알림 (서버→클라이언트) |
+
+#### MCP 에러 응답 포맷
+
+`tools/call` 실패 시 LLM이 이해하고 사용자에게 전달할 수 있는 구조화된 응답:
+
+```json
+{
+  "content": [{
+    "type": "text",
+    "text": "개인 Notion에서 페이지 검색에 실패했습니다. 토큰이 만료되었습니다. 사용자에게 Bifrost 관리 페이지에서 Notion 토큰을 갱신해야 한다고 알려주세요."
+  }],
+  "isError": true,
+  "_meta": {
+    "bifrost": {
+      "category": "credential",
+      "workspace": "notion-personal",
+      "provider": "notion",
+      "tool": "search_pages",
+      "retryable": false,
+      "userMessage": "Notion 토큰이 만료되었습니다. Bifrost Admin에서 갱신이 필요합니다.",
+      "suggestedAction": "관리자에게 토큰 갱신을 요청하세요."
+    }
+  }
+}
+```
+
+에러 메시지 원칙:
+- `content.text`: LLM이 사용자에게 **그대로 전달할 수 있는** 자연어 메시지
+- `_meta.bifrost`: 구조화된 메타데이터 (프로그래밍적 처리용)
+- `isError: true`: LLM이 재시도 vs 포기를 판단하는 신호
+- `retryable: true` + `retryAfter`: 재시도 가능 여부와 권장 대기 시간
+
+#### 세션 일관성 모델
+
+Admin에서 워크스페이스를 변경하면 기존 MCP 세션에 영향을 줄 수 있다.
+**Session Snapshot 모델**을 채택한다:
+
+1. MCP 세션이 `initialize`될 때, 그 시점의 도구 카탈로그를 **스냅샷**으로 고정
+2. Admin에서 워크스페이스 변경 시:
+   - **SSE 세션**: `notifications/tools/list_changed` 전송 → 클라이언트가 `tools/list` 재호출
+   - **Streamable HTTP**: 다음 요청 시 새 도구 목록 반영
+3. 클라이언트가 알림을 무시하거나 못 받아도, reconnect하면 새 스냅샷을 받음
+4. **in-flight 안전성**: 세션 중 삭제된 도구를 호출하면 즉시 에러 (isError + "이 도구는 더 이상 사용할 수 없습니다")
+5. Admin UI에 "현재 N개 활성 MCP 세션" 표시 + "변경 사항은 SSE 세션에 즉시, HTTP 세션에는 다음 요청부터 적용됩니다" 안내
+
+### MCP Endpoint Authentication
+
+Admin 인증과 MCP 클라이언트 인증을 **분리**한다:
+
+| 토큰 | 용도 | 환경변수 | 권한 |
+|------|------|---------|------|
+| **Admin Token** | Admin UI/API 접근 | `BIFROST_ADMIN_TOKEN` | 전체 관리 (CRUD, 설정 변경) |
+| **MCP Token** | MCP 엔드포인트 접근 | `BIFROST_MCP_TOKEN` | 도구 호출만 (tools/list, tools/call) |
+
+- MCP 클라이언트는 `Authorization: Bearer <MCP_TOKEN>` 헤더로 인증
+- MCP Token이 설정되지 않으면 → 로컬 전용 모드 (localhost만 허용, Tunnel 비활성화)
+- MCP Token으로는 Admin API에 접근 불가 (워크스페이스 수정, 토큰 조회 등 차단)
+- SSE: 연결 시 Bearer 검증 → 연결 유지
+- Streamable HTTP: 매 요청마다 Bearer 검증 (stateless)
 
 ### Transport
 
-- **Streamable HTTP** (MCP 2025-03-26 spec) — primary
-- **SSE** (legacy 호환) — claude.ai remote connector용
-- **stdio** — Claude Code 로컬 직접 연결용 (optional)
+- **Streamable HTTP** (MCP 2025-03-26 spec) — primary, stateless 인증
+- **SSE** (legacy 호환) — claude.ai remote connector용, 연결 시 인증
+- **stdio** — Claude Code 로컬 직접 연결용 (인증 불필요, 같은 머신)
+
+두 트랜스포트는 동일한 도구 목록, 동일한 에러 포맷, 동일한 인증 방식을 보장한다.
+Streamable HTTP가 표준 경로, SSE는 호환성 경로로 명시 구분.
 
 ### Admin UI
 
@@ -226,14 +356,12 @@ Step 4: 완료
 ```
 
 **3. Workspace Detail (편집)**
-- 기본 정보 수정 (displayName)
-- **alias 변경 시 Breaking Change 경고**:
+- 기본 정보 수정 (displayName, alias — 자유롭게 변경 가능)
+- **namespace는 읽기 전용** 표시 (불변, MCP 도구 이름의 안정성 보장)
   ```
-  ⚠ alias를 변경하면 MCP 도구 이름이 바뀝니다.
-  변경 전: notion_personal__search_pages
-  변경 후: notion_home__search_pages
-  현재 이 도구를 사용 중인 클라이언트에 영향을 줍니다.
-  [변경 확인] [취소]
+  Namespace: personal (변경 불가 — MCP 도구 이름에 사용)
+  Display Name: [김팀장 메모장] (자유 변경)
+  → MCP 이름: notion_personal__search_pages (namespace 기반, 변경 없음)
   ```
 - 토큰 갱신 (API 응답에서 항상 마스킹, 변경 시에만 입력)
 - 연결 상태 + 마지막 health check + capability check 결과
@@ -287,9 +415,11 @@ Step 4: 완료
 ### Security
 
 - `workspaces.json`은 gitignored — 토큰 절대 커밋 금지
-- Admin 토큰은 **환경변수 `BIFROST_ADMIN_TOKEN` 우선**, `workspaces.json`의 `server.adminToken`은 fallback (환경변수 설정 권장)
-- Admin UI 인증: `Authorization: Bearer <token>` 헤더 기반, `sessionStorage`에 저장 (탭 닫으면 만료)
-- **API 응답에서 provider 토큰은 항상 마스킹** (`ntn_***xxx`) — 프론트가 아닌 서버 레벨 마스킹
+- **Admin 토큰** (`BIFROST_ADMIN_TOKEN`): Admin UI/API 전용, 워크스페이스 관리 권한
+- **MCP 토큰** (`BIFROST_MCP_TOKEN`): MCP 클라이언트 전용, 도구 호출만 가능 (Admin API 접근 불가)
+- MCP 토큰 미설정 시 → 로컬 전용 모드 (localhost만 허용)
+- Admin UI 인증: `Authorization: Bearer <admin_token>` 헤더, `sessionStorage`에 저장
+- **API 응답에서 provider 토큰은 항상 마스킹** (`ntn_***xxx`) — 서버 레벨 마스킹
 - Cloudflare Tunnel 사용 시 외부 노출은 MCP 엔드포인트만 (admin은 로컬 전용)
 - 각 provider 토큰은 최소 권한 원칙 (read-only 우선)
 - Admin API CORS: 같은 호스트 내에서만 허용 (`localhost:3101` → `localhost:3100`)
@@ -316,6 +446,7 @@ npm run tunnel
     {
       "id": "notion-personal",
       "provider": "notion",
+      "namespace": "personal",
       "alias": "personal",
       "displayName": "개인 Notion",
       "credentials": {
@@ -330,6 +461,7 @@ npm run tunnel
     {
       "id": "slack-company",
       "provider": "slack",
+      "namespace": "company",
       "alias": "company",
       "displayName": "회사 Slack",
       "credentials": {
@@ -355,8 +487,12 @@ npm run tunnel
 }
 ```
 
-> **Note**: `server.adminToken`은 fallback. 운영 환경에서는 `BIFROST_ADMIN_TOKEN` 환경변수 사용 권장.
-> `toolFilter.mode`가 `"all"`이면 전체 도구 노출, `"include"`이면 `enabled` 배열에 명시된 도구만 노출.
+> **Notes**:
+> - `namespace`: 최초 생성 시 alias에서 복사, **이후 변경 불가**. MCP 도구 이름의 안정성 보장.
+> - `alias`/`displayName`: Admin UI 표시용, 자유롭게 변경 가능. MCP 도구 이름에 영향 없음.
+> - `server.adminToken`은 fallback. 운영 환경에서는 `BIFROST_ADMIN_TOKEN` 환경변수 사용 권장.
+> - `toolFilter.mode`가 `"all"`이면 전체 도구 노출, `"include"`이면 `enabled` 배열에 명시된 도구만 노출.
+> - MCP 클라이언트 인증: `BIFROST_MCP_TOKEN` 환경변수 (Admin 토큰과 분리).
 ```
 
 ## Roadmap
@@ -368,14 +504,20 @@ Notion 1개 Provider로 전체 파이프라인을 관통하는 최소 동작 제
 - [ ] Workspace manager + tool registry
 - [ ] Notion provider (search, read page, list databases)
 - [ ] 기본 설정 파일 로딩
+- [ ] 불변 namespace + 가변 alias 분리
+- [ ] Tool description 자동 생성 (displayName + provider + 워크스페이스 컨텍스트 주입)
+- [ ] Bifrost 메타 도구 (bifrost__list_workspaces, bifrost__workspace_info)
+- [ ] MCP 에러 응답 구조화 (isError + content.text + _meta.bifrost)
+- [ ] MCP 엔드포인트 인증 (BIFROST_MCP_TOKEN, Admin 토큰과 분리)
+- [ ] Session Snapshot 모델 + notifications/tools/list_changed
 - [ ] Admin REST API (CRUD workspaces, health check, capability check)
 - [ ] Admin UI — Login 화면 (BIFROST_ADMIN_TOKEN 인증)
-- [ ] Admin UI — Dashboard (Needs Attention 영역, 카드 그리드, 일괄 재검사)
+- [ ] Admin UI — Dashboard (Needs Attention 영역, 카드 그리드, 일괄 재검사, 도구 수 경고 20/30개)
 - [ ] Admin UI — Setup Wizard (4단계: Provider → 연결 정보 → 검증+Capability Check → 완료)
-- [ ] Admin UI — Workspace Detail (편집, alias 변경 경고, 도구 토글, 삭제 확인)
+- [ ] Admin UI — Workspace Detail (편집, 도구 토글, 삭제 확인)
 - [ ] Workspace 상태 모델 5단계 (Healthy/Limited/Action Needed/Error/Disabled)
 - [ ] 에러 분류 체계 (Credential/Permission/Connectivity/Config Conflict/Internal)
-- [ ] alias 자동 생성 + 중복 검사 + 변경 시 breaking change 경고
+- [ ] namespace 중복 검사 + alias 자동 생성
 - [ ] API 레벨 토큰 마스킹
 
 ### Phase 1.5 — 운영 안정성 + Slack
@@ -410,7 +552,8 @@ Notion 1개 Provider로 전체 파이프라인을 관통하는 최소 동작 제
 - [ ] 설정 export/import (환경 간 이동)
 - [ ] 워크스페이스 삭제 undo (soft delete + 30일 보관)
 - [ ] 사용량 대시보드 / 상세 audit trail
-- [ ] 도구 수 상한 경고 (50개 초과 시 MCP 클라이언트 부하 알림)
+- [ ] Profile 기반 엔드포인트 (`/mcp?profile=read-only` — 클라이언트별 도구셋 제한)
+- [ ] 다중 MCP 토큰 (클라이언트별 토큰 + 접근 가능 워크스페이스 제한)
 
 ## Integration Points
 
@@ -423,11 +566,12 @@ Settings → Connectors → Add Custom Connector → Bifrost URL 등록
   "mcpServers": {
     "bifrost": {
       "url": "https://bifrost-xxxx.trycloudflare.com/mcp",
-      "headers": { "Authorization": "Bearer ..." }
+      "headers": { "Authorization": "Bearer <BIFROST_MCP_TOKEN>" }
     }
   }
 }
 ```
+> MCP 토큰 사용 (Admin 토큰 아님). 로컬 stdio 연결 시 인증 불필요.
 
 ### Palantir Console
 프로젝트/에이전트 설정에서 Bifrost 엔드포인트를 MCP 서버로 등록.
