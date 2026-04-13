@@ -36,9 +36,8 @@ mcp-bifrost/
     notion.js              — Notion API 중계 provider
     slack.js               — Slack API 중계 provider
   admin/
-    index.js              — 관리 UI 서버 (SPA)
-    api.js                — 관리 REST API (인증 미들웨어 포함)
-    auth.js               — Admin 토큰 인증 (env > config fallback)
+    routes.js             — /api/* REST 라우트 + /admin/* 정적 파일 서빙
+    auth.js               — Admin 토큰 인증 미들웨어 (env > config fallback)
     public/               — 관리 UI 프론트엔드 (Login, Dashboard, Wizard, Detail, ...)
   config/
     workspaces.json       — 워크스페이스 설정 (gitignored, 토큰 포함)
@@ -77,6 +76,24 @@ class BaseProvider {
     tools: [{ name, usable, reason }] // 도구별 사용 가능 여부
   }
 }
+```
+
+#### Provider별 capabilityCheck 구현 기준
+
+**Notion:**
+- `GET /v1/users/me` → 토큰 유효성 + bot info
+- `POST /v1/search` (빈 쿼리, limit:1) → 접근 가능 페이지 수 샘플링
+- `GET /v1/databases` (limit:1) → 데이터베이스 접근 확인
+- scope: Notion Integration은 scope 개념이 없으므로, 리소스 접근 여부로 판정
+- usable 기준: search 결과 0건 → `search_pages` limited (공유된 페이지 없음)
+
+**Slack:**
+- `GET /api/auth.test` → 토큰 유효성 + team_id 추출
+- `GET /api/conversations.list` (limit:1) → 채널 접근 확인
+- scope: `auth.test` 응답에 포함된 scope 문자열 파싱
+- usable 기준: `channels:read` 없으면 → `list_channels` unavailable
+
+```
 ```
 
 ### Tool Namespacing
@@ -160,6 +177,44 @@ LLM의 도구 선택 정확도는 도구 수에 반비례한다:
 | `bifrost__list_workspaces` | 연결된 워크스페이스 목록 + displayName + 상태 반환. LLM이 모호한 요청 시 워크스페이스를 먼저 확인할 수 있음 |
 | `bifrost__workspace_info` | 특정 워크스페이스의 상세 정보 (접근 가능 리소스, 활성 도구 목록) |
 
+#### 도구 노출 결정 규칙
+
+`tools/list`에 도구가 노출되려면 다음 조건을 **모두** 통과해야 한다 (평가 순서대로):
+
+```
+1. workspace.enabled === true        (워크스페이스 활성화)
+2. toolFilter 통과                    (mode:"all" → 통과, mode:"include" → enabled 배열에 포함)
+3. 해당 도구의 capabilityCheck 결과가 usable === true  (도구별 개별 판정)
+```
+
+호출(`tools/call`) 시에도 동일 규칙 재검사. 노출되지 않은 도구를 호출하면 `isError: true` + "이 도구는 현재 비활성화되어 있습니다" 반환.
+
+#### healthCheck / capabilityCheck 실행 시점
+
+| 시점 | healthCheck | capabilityCheck |
+|------|:-----------:|:---------------:|
+| 서버 시작 시 | 전체 워크스페이스 | 전체 워크스페이스 |
+| 워크스페이스 저장 시 | 해당 워크스페이스 | 해당 워크스페이스 |
+| Admin UI "Test Connection" | 해당 워크스페이스 | 해당 워크스페이스 |
+| Admin UI "일괄 재검사" | 전체 | 전체 |
+| 주기적 background | 5분 간격 (healthCheck만) | 없음 (비용 높음) |
+
+#### 상태 전이 규칙
+
+복수 조건이 겹칠 때 **가장 심각한 상태가 우선**한다:
+
+```
+Disabled는 수동 override로, 다른 조건보다 우선 적용된다.
+나머지 상태 간 우선순위: Error > Action Needed > Limited > Healthy
+
+예시:
+- enabled: false → Disabled (수동 override, 다른 조건 평가하지 않음)
+- enabled: true + healthCheck 실패 → Error
+- enabled: true + healthCheck 성공 + 토큰 만료 7일 이내 → Action Needed
+- enabled: true + healthCheck 성공 + 만료 아님 + 일부 도구 usable=false → Limited
+- enabled: true + healthCheck 성공 + 만료 아님 + 전체 도구 usable=true → Healthy
+```
+
 ### MCP Protocol Support
 
 Bifrost가 구현하는 MCP 메서드:
@@ -170,7 +225,45 @@ Bifrost가 구현하는 MCP 메서드:
 | `tools/list` | 모든 활성 워크스페이스의 도구를 네임스페이스와 함께 반환 |
 | `tools/call` | 네임스페이스에서 워크스페이스를 식별하고 해당 provider에 라우팅 |
 | `resources/list` | 워크스페이스 목록/상태를 리소스로 노출 |
+| `resources/read` | 특정 워크스페이스의 상세 정보 (JSON) 반환 |
 | `notifications/tools/list_changed` | 워크스페이스 변경 시 클라이언트에 알림 (서버→클라이언트) |
+
+#### MCP 엔드포인트 계약
+
+| 경로 | 트랜스포트 | 설명 |
+|------|-----------|------|
+| `POST /mcp` | Streamable HTTP | MCP JSON-RPC 요청/응답. `Mcp-Session-Id` 헤더로 세션 추적 |
+| `GET /sse` | SSE | SSE 연결. `Authorization: Bearer` 쿼리/헤더. 연결 유지 중 서버→클라이언트 알림 |
+| `POST /sse` | SSE message | SSE 세션에 대한 클라이언트→서버 메시지 |
+
+#### resources/list 스키마
+
+```json
+{
+  "resources": [
+    {
+      "uri": "bifrost://workspaces/notion-personal",
+      "name": "개인 Notion",
+      "description": "Notion 워크스페이스 (namespace: personal, 상태: healthy)",
+      "mimeType": "application/json"
+    }
+  ]
+}
+```
+
+URI 패턴: `bifrost://workspaces/{workspace-id}`
+
+#### resources/read 응답
+
+```json
+{
+  "contents": [{
+    "uri": "bifrost://workspaces/notion-personal",
+    "mimeType": "application/json",
+    "text": "{\"id\":\"notion-personal\",\"provider\":\"notion\",\"namespace\":\"personal\",\"displayName\":\"개인 Notion\",\"status\":\"healthy\",\"tools\":[{\"name\":\"search_pages\",\"usable\":true},{\"name\":\"read_page\",\"usable\":true}],\"lastChecked\":\"2026-04-14T10:00:00Z\"}"
+  }]
+}
+```
 
 #### MCP 에러 응답 포맷
 
@@ -208,10 +301,10 @@ Bifrost가 구현하는 MCP 메서드:
 Admin에서 워크스페이스를 변경하면 기존 MCP 세션에 영향을 줄 수 있다.
 **Session Snapshot 모델**을 채택한다:
 
-1. MCP 세션이 `initialize`될 때, 그 시점의 도구 카탈로그를 **스냅샷**으로 고정
+1. 서버는 도구 카탈로그의 **버전 번호**(`toolsVersion`, 정수 증가)를 관리. 워크스페이스 변경 시 +1
 2. Admin에서 워크스페이스 변경 시:
    - **SSE 세션**: `notifications/tools/list_changed` 전송 → 클라이언트가 `tools/list` 재호출
-   - **Streamable HTTP**: 다음 요청 시 새 도구 목록 반영
+   - **Streamable HTTP**: stateless이므로 매 `tools/list` 호출마다 최신 카탈로그 반환 (별도 스냅샷 저장 불필요)
 3. 클라이언트가 알림을 무시하거나 못 받아도, reconnect하면 새 스냅샷을 받음
 4. **in-flight 안전성**: 세션 중 삭제된 도구를 호출하면 즉시 에러 (isError + "이 도구는 더 이상 사용할 수 없습니다")
 5. Admin UI에 "현재 N개 활성 MCP 세션" 표시 + "변경 사항은 SSE 세션에 즉시, HTTP 세션에는 다음 요청부터 적용됩니다" 안내
@@ -237,13 +330,19 @@ Admin 인증과 MCP 클라이언트 인증을 **분리**한다:
 - **SSE** (legacy 호환) — claude.ai remote connector용, 연결 시 인증
 - **stdio** — Claude Code 로컬 직접 연결용 (인증 불필요, 같은 머신)
 
-두 트랜스포트는 동일한 도구 목록, 동일한 에러 포맷, 동일한 인증 방식을 보장한다.
+Streamable HTTP와 SSE는 동일한 도구 목록, 동일한 에러 포맷, 동일한 인증 방식(Bearer)을 보장한다.
+stdio는 로컬 전용이므로 인증 불필요 (예외).
 Streamable HTTP가 표준 경로, SSE는 호환성 경로로 명시 구분.
 
 ### Admin UI
 
-독립적인 관리 웹 인터페이스 (:3101 또는 같은 포트의 /admin).
+단일 서버(:3100)에서 MCP 엔드포인트와 Admin UI를 함께 서빙한다.
+- MCP: `/mcp` (Streamable HTTP), `/sse` (SSE)
+- Admin UI: `/admin/*` (SPA 정적 파일)
+- Admin API: `/api/*` (REST)
+
 SPA로 구현, 빌드 스텝 없이 vanilla HTML/CSS/JS.
+단일 포트이므로 CORS 불필요, Tunnel은 `/mcp`와 `/sse`만 외부 노출.
 
 #### Workspace 상태 모델
 
@@ -300,7 +399,7 @@ SPA로 구현, 빌드 스텝 없이 vanilla HTML/CSS/JS.
   - 카드 클릭 → Workspace Detail
 - **"+ Add Workspace"** 버튼 → 워크스페이스 1개 이상: 오른쪽 Drawer / 0개: 전체 화면 Wizard
 - **일괄 재검사** 버튼 → 전체 워크스페이스 healthCheck + capabilityCheck
-- **전체 노출 도구 수** 카운터 (경고: 50개 초과 시 MCP 클라이언트 부하 알림)
+- **전체 노출 도구 수** 카운터 (20개 초과: 주의, 30개 초과: 경고)
 - **빈 상태**: 워크스페이스 0개 → Setup Wizard 자동 진입 (Skip → 빈 Dashboard 가능)
 - **All-disabled/error 상태**: "모든 워크스페이스에 문제가 있습니다" 배너 + 일괄 재검사
 
@@ -376,7 +475,7 @@ Step 4: 완료
 - 컬럼: Provider | Workspace | Tool Name | MCP Name | Status (usable/limited/disabled)
 - 검색/필터 지원 (provider별, 상태별, 워크스페이스별)
 - 각 도구의 inputSchema를 펼쳐볼 수 있는 accordion
-- 총 도구 수 카운터 + 50개 초과 경고
+- 총 도구 수 카운터 (20개 초과: 주의, 30개 초과: 경고)
 
 **5. Connect Guide (연동 가이드)**
 - 현재 서버 상태 (port, tunnel URL 등) 표시
@@ -387,7 +486,7 @@ Step 4: 완료
   - **기타**: 일반 MCP 엔드포인트 정보
 
 **6. Server Settings**
-- 현재 서버 포트, admin 포트 표시
+- 현재 서버 포트 표시
 - Tunnel 상태 (활성/비활성, 현재 URL)
 - admin 토큰 변경 (현재 토큰 입력 → 새 토큰 설정)
 - `workspaces.json` 위치 표시 + 수동 편집 경고
@@ -408,7 +507,7 @@ Step 4: 완료
 - **상태는 다중 채널로**: 색상 + 아이콘 + 텍스트 레이블 병행 (색각 접근성)
 - **복사 가능한 모든 값**: URL, 도구 이름, 설정 코드 등 클릭 투 카피
 - **Progressive disclosure**: 기본 뷰는 단순하게, 상세 정보는 펼쳐서 확인
-- **Breaking change 명시**: 외부 소비자에 영향을 주는 변경(alias, 도구 비활성화)은 diff로 표시
+- **Breaking change 명시**: 도구 비활성화 시 영향받는 MCP 도구 이름을 diff로 표시 (namespace는 불변이므로 alias 변경은 breaking change가 아님)
 - **임시 저장**: Wizard 중 외부 이탈 시 진행 상태 보존 (토큰 제외)
 - **빈 상태 = 가이드**: 데이터 없는 화면은 단순 빈 화면이 아닌 다음 행동 안내
 
@@ -422,7 +521,7 @@ Step 4: 완료
 - **API 응답에서 provider 토큰은 항상 마스킹** (`ntn_***xxx`) — 서버 레벨 마스킹
 - Cloudflare Tunnel 사용 시 외부 노출은 MCP 엔드포인트만 (admin은 로컬 전용)
 - 각 provider 토큰은 최소 권한 원칙 (read-only 우선)
-- Admin API CORS: 같은 호스트 내에서만 허용 (`localhost:3101` → `localhost:3100`)
+- 단일 포트(:3100)에서 MCP + Admin 서빙, CORS 불필요
 
 ### Tunnel Integration
 
@@ -437,6 +536,39 @@ npm run tunnel
 고정 도메인 설정도 지원 (Cloudflare 무료 플랜).
 
 ## Configuration
+
+### 설정 저장 정책
+
+- **원자적 쓰기**: `workspaces.tmp.json`에 먼저 쓰고 `rename()`으로 교체 (partial write 방지)
+- **백업**: 저장 전 `workspaces.backup.json`에 이전 버전 복사 (1세대만 유지)
+- **직렬화**: Admin API 요청은 쓰기 잠금으로 serialize (Node.js 단일 스레드이므로 비동기 큐로 충분)
+- **hot reload**: 파일 변경 시 `fs.watch()`로 감지, 서버 재시작 없이 반영
+- **JSON 파싱 실패**: 백업에서 복구 시도, 실패 시 서버 에러 상태 + Admin UI에 "설정 파일 손상" 경고
+
+### Admin REST API 계약
+
+| Method | Path | 설명 | 인증 |
+|--------|------|------|------|
+| `GET` | `/api/workspaces` | 워크스페이스 목록 (토큰 마스킹) | Admin |
+| `GET` | `/api/workspaces/:id` | 워크스페이스 상세 (토큰 마스킹) | Admin |
+| `POST` | `/api/workspaces` | 워크스페이스 추가 (namespace 자동 생성) | Admin |
+| `PUT` | `/api/workspaces/:id` | 워크스페이스 수정 (namespace 변경 불가) | Admin |
+| `DELETE` | `/api/workspaces/:id` | 워크스페이스 삭제 | Admin |
+| `POST` | `/api/workspaces/:id/test` | 연결 테스트 (healthCheck + capabilityCheck) | Admin |
+| `POST` | `/api/workspaces/test-all` | 전체 일괄 재검사 | Admin |
+| `GET` | `/api/status` | 서버 상태, 활성 세션 수, toolsVersion | Admin |
+| `GET` | `/api/diagnostics` | 에러 로그, 상태 요약 | Admin |
+
+응답 형식:
+```json
+// 성공
+{ "ok": true, "data": { ... } }
+
+// 실패
+{ "ok": false, "error": { "code": "NAMESPACE_CONFLICT", "message": "..." } }
+```
+
+토큰 마스킹 규칙: credentials 내 모든 값은 API 응답에서 마지막 4자만 표시 (`ntn_***abcd`). PUT 요청에서 credentials 필드가 비어있으면 기존 값 유지.
 
 ### workspaces.json
 
@@ -477,7 +609,6 @@ npm run tunnel
   ],
   "server": {
     "port": 3100,
-    "adminPort": 3101,
     "adminToken": "your-secret-token"
   },
   "tunnel": {
@@ -497,39 +628,47 @@ npm run tunnel
 
 ## Roadmap
 
-### Phase 1 — Core MVP
-Notion 1개 Provider로 전체 파이프라인을 관통하는 최소 동작 제품.
+### Phase 1a — MCP Core (1~2주)
+Notion 1개로 MCP 프로토콜이 동작하는 최소 서버. Admin은 최소한.
 
-- [ ] MCP 프로토콜 핸들러 (Streamable HTTP + SSE)
+- [ ] MCP 프로토콜 핸들러 (Streamable HTTP 우선)
+- [ ] `initialize`, `tools/list`, `tools/call` 구현
 - [ ] Workspace manager + tool registry
-- [ ] Notion provider (search, read page, list databases)
-- [ ] 기본 설정 파일 로딩
+- [ ] Notion provider (search, read page, list databases) + healthCheck
+- [ ] 기본 설정 파일 로딩 (workspaces.json) + 원자적 쓰기
 - [ ] 불변 namespace + 가변 alias 분리
-- [ ] Tool description 자동 생성 (displayName + provider + 워크스페이스 컨텍스트 주입)
-- [ ] Bifrost 메타 도구 (bifrost__list_workspaces, bifrost__workspace_info)
+- [ ] Tool description 자동 생성 (displayName + provider 컨텍스트 주입)
 - [ ] MCP 에러 응답 구조화 (isError + content.text + _meta.bifrost)
-- [ ] MCP 엔드포인트 인증 (BIFROST_MCP_TOKEN, Admin 토큰과 분리)
-- [ ] Session Snapshot 모델 + notifications/tools/list_changed
-- [ ] Admin REST API (CRUD workspaces, health check, capability check)
-- [ ] Admin UI — Login 화면 (BIFROST_ADMIN_TOKEN 인증)
-- [ ] Admin UI — Dashboard (Needs Attention 영역, 카드 그리드, 일괄 재검사, 도구 수 경고 20/30개)
-- [ ] Admin UI — Setup Wizard (4단계: Provider → 연결 정보 → 검증+Capability Check → 완료)
-- [ ] Admin UI — Workspace Detail (편집, 도구 토글, 삭제 확인)
-- [ ] Workspace 상태 모델 5단계 (Healthy/Limited/Action Needed/Error/Disabled)
-- [ ] 에러 분류 체계 (Credential/Permission/Connectivity/Config Conflict/Internal)
-- [ ] namespace 중복 검사 + alias 자동 생성
+- [ ] MCP 엔드포인트 인증 (BIFROST_MCP_TOKEN)
+- [ ] Admin REST API (CRUD + test connection)
+- [ ] Admin UI — Login + Dashboard (카드 그리드 + Add/Edit form) + 상태 3단계 (Healthy/Error/Disabled)
 - [ ] API 레벨 토큰 마스킹
 
-### Phase 1.5 — 운영 안정성 + Slack
-운영 중 문제를 빠르게 진단하고 복구할 수 있는 기반.
+### Phase 1b — 운영 품질 (1~2주)
+MCP 서버를 실제 운영 가능한 수준으로 보강.
+
+- [ ] SSE 트랜스포트 추가 (claude.ai remote connector 호환)
+- [ ] capabilityCheck 구현 (Notion) + 상태 5단계로 확장 (Healthy/Limited/Action Needed/Error/Disabled)
+- [ ] Bifrost 메타 도구 (bifrost__list_workspaces, bifrost__workspace_info)
+- [ ] `resources/list` 구현
+- [ ] toolsVersion + `notifications/tools/list_changed` (SSE)
+- [ ] toolFilter (워크스페이스별 도구 선택적 노출)
+- [ ] 에러 분류 체계 (Credential/Permission/Connectivity/Config Conflict/Internal)
+- [ ] Admin UI — Setup Wizard (4단계) + Workspace Detail (도구 토글, 삭제 확인)
+- [ ] Dashboard — Needs Attention 영역, 도구 수 경고 (20/30개)
+- [ ] 주기적 background healthCheck (5분)
+
+### Phase 1.5 — Slack + Diagnostics (1~2주)
+두 번째 Provider 추가, 운영 진단 도구.
 
 - [ ] Slack provider (search messages, read channel, list channels)
-- [ ] Slack Team ID 자동 추출 (Bot Token에서)
+- [ ] Slack capabilityCheck (scope 파싱, Team ID 자동 추출)
 - [ ] Admin UI — Diagnostics 화면 (에러 로그, 상태 요약, 일괄 재검사)
-- [ ] Admin UI — Server Settings 화면 (포트, tunnel 상태, admin 토큰 변경)
+- [ ] Admin UI — Server Settings 화면
 - [ ] Rate Limit (429) 에러 처리 + countdown UI
 - [ ] Provider Outage 자동 감지 + 재시도 (backoff)
 - [ ] 최소 audit log (설정 변경 이력, 마지막 10건)
+- [ ] hot reload (workspaces.json 변경 감지)
 
 ### Phase 2 — Auth & Connect Guide
 외부 서비스 연동을 쉽게 만드는 단계.
