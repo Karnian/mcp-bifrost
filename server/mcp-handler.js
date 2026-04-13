@@ -113,26 +113,42 @@ export class McpHandler {
       });
     }
 
-    try {
-      const result = await provider.callTool(resolved.toolName, args);
-      return result;
-    } catch (err) {
-      const ws = this.wm.getWorkspace(resolved.workspaceId);
-      const displayName = ws?.displayName || resolved.workspaceId;
-      const category = this._categorizeError(err);
-
-      return this._toolError(
-        `${displayName}에서 ${resolved.toolName} 실행에 실패했습니다. ${err.message}`,
-        {
-          category,
-          workspace: resolved.workspaceId,
-          provider: resolved.provider,
-          tool: resolved.toolName,
-          retryable: category === 'connectivity' || category === 'rate_limit',
-          userMessage: this._userMessage(category, displayName),
-        }
-      );
+    // Retry with exponential backoff for transient errors
+    const MAX_RETRIES = 2;
+    let lastErr;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const result = await provider.callTool(resolved.toolName, args);
+        return result;
+      } catch (err) {
+        lastErr = err;
+        const category = this._categorizeError(err);
+        const retryable = category === 'connectivity' || category === 'provider_outage' || category === 'rate_limit';
+        if (!retryable || attempt === MAX_RETRIES) break;
+        const delay = err.retryAfter ? err.retryAfter * 1000 : Math.min(1000 * 2 ** attempt, 5000);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
+
+    const ws = this.wm.getWorkspace(resolved.workspaceId);
+    const displayName = ws?.displayName || resolved.workspaceId;
+    const category = this._categorizeError(lastErr);
+    this.wm.logError(category, resolved.workspaceId, lastErr.message);
+
+    const meta = {
+      category,
+      workspace: resolved.workspaceId,
+      provider: resolved.provider,
+      tool: resolved.toolName,
+      retryable: category === 'connectivity' || category === 'rate_limit' || category === 'provider_outage',
+      userMessage: this._userMessage(category, displayName),
+    };
+    if (lastErr.retryAfter) meta.retryAfter = lastErr.retryAfter;
+
+    return this._toolError(
+      `${displayName}에서 ${resolved.toolName} 실행에 실패했습니다. ${lastErr.message}`,
+      meta
+    );
   }
 
   _handleMetaTool(toolName, args) {

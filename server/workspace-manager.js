@@ -70,6 +70,7 @@ export class WorkspaceManager {
     if (!this.config.workspaces) this.config.workspaces = [];
     this._loaded = true;
     await this._initProviders();
+    this._startFileWatcher();
   }
 
   async _initProviders() {
@@ -311,8 +312,15 @@ export class WorkspaceManager {
     if (!health) return 'unknown';
     if (!health.ok) return 'error';
 
-    // Check capability for limited/action_needed
+    // Check for action_needed: token expiry within 7 days, scope mismatch
     const cap = this.capabilityCache.get(ws.id);
+    if (health.tokenExpiresAt) {
+      const daysUntilExpiry = (new Date(health.tokenExpiresAt) - Date.now()) / (1000 * 60 * 60 * 24);
+      if (daysUntilExpiry <= 7) return 'action_needed';
+    }
+    if (cap?.scopeMismatch) return 'action_needed';
+
+    // Check capability for limited
     if (cap?.tools) {
       const hasUnavailable = cap.tools.some(t => t.usable === 'unavailable');
       const hasLimited = cap.tools.some(t => t.usable === 'limited');
@@ -320,6 +328,28 @@ export class WorkspaceManager {
     }
 
     return 'healthy';
+  }
+
+  _startFileWatcher() {
+    if (!existsSync(CONFIG_PATH)) return;
+    try {
+      const watcher = watch(CONFIG_PATH, { persistent: false });
+      (async () => {
+        for await (const event of watcher) {
+          if (event.eventType === 'change') {
+            try {
+              const raw = await readFile(CONFIG_PATH, 'utf-8');
+              const newConfig = JSON.parse(raw);
+              this.config = newConfig;
+              if (!this.config.workspaces) this.config.workspaces = [];
+              await this._initProviders();
+              this._notifyChange();
+              console.log('[WorkspaceManager] Config hot-reloaded');
+            } catch { /* ignore parse errors during write */ }
+          }
+        }
+      })().catch(() => {}); // watcher closed
+    } catch { /* fs.watch not supported or file gone */ }
   }
 
   onWorkspaceChange(callback) {

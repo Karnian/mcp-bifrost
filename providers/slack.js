@@ -24,6 +24,11 @@ export class SlackProvider extends BaseProvider {
       body: JSON.stringify(params),
     });
     const body = await res.json();
+    // Capture scopes from response headers (x-oauth-scopes)
+    const scopeHeader = res.headers.get('x-oauth-scopes');
+    if (scopeHeader) {
+      body._scopes = scopeHeader.split(',').map(s => s.trim());
+    }
     if (!body.ok) {
       const err = new Error(body.error || `Slack API error: ${method}`);
       err.slackError = body.error;
@@ -172,13 +177,18 @@ export class SlackProvider extends BaseProvider {
   async capabilityCheck() {
     const result = { scopes: [], resources: { count: 0, samples: [] }, tools: [] };
 
+    let grantedScopes = [];
     try {
       const auth = await this._fetch('auth.test');
-      // Extract scopes from response headers (not available in JSON, parse from token type)
       if (auth.team_id && !this.teamId) {
         this.teamId = auth.team_id;
       }
       result.scopes.push(`team: ${auth.team || auth.team_id}`);
+      // Parse scopes from x-oauth-scopes header (captured in _fetch)
+      if (auth._scopes) {
+        grantedScopes = auth._scopes;
+        result.scopes.push(...grantedScopes.map(s => `scope: ${s}`));
+      }
     } catch {
       return result;
     }
