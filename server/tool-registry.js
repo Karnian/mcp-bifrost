@@ -1,11 +1,15 @@
 /**
- * ToolRegistry — namespace-based tool registration and lookup.
- * Pattern: {provider}_{namespace}__{tool_name}
+ * ToolRegistry — namespace-based tool registration + reverse lookup table.
+ * Display name pattern: {provider}_{namespace}__{tool_name}
+ * Resolution uses an internal reverse map, not string parsing, so upstream
+ * tool names containing "__" or "_" are handled correctly.
  */
 export class ToolRegistry {
   constructor(workspaceManager) {
     this.wm = workspaceManager;
     this.toolsVersion = 1;
+    // mcpName → { workspaceId, originalName }
+    this._reverseMap = new Map();
   }
 
   bumpVersion() {
@@ -18,6 +22,7 @@ export class ToolRegistry {
    */
   getTools() {
     const tools = [];
+    const reverseMap = new Map();
     const workspaces = this.wm.getEnabledWorkspaces();
 
     for (const ws of workspaces) {
@@ -30,7 +35,18 @@ export class ToolRegistry {
         if (!this._passesFilter(ws, tool.name)) continue;
         if (this._isUnavailable(capability, tool.name)) continue;
 
-        const mcpName = this._namespacedName(ws.provider, ws.namespace, tool.name);
+        let mcpName = this._namespacedName(ws.provider, ws.namespace, tool.name);
+        // Collision avoidance: sanitize any character that would confuse parsers
+        mcpName = mcpName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        // Disambiguate if sanitization caused collision with existing mapping
+        let candidate = mcpName;
+        let suffix = 2;
+        while (reverseMap.has(candidate)) {
+          candidate = `${mcpName}_${suffix++}`;
+        }
+        mcpName = candidate;
+
+        reverseMap.set(mcpName, { workspaceId: ws.id, originalName: tool.name, provider: ws.provider, namespace: ws.namespace });
         const description = this._enrichDescription(ws, tool);
 
         tools.push({
@@ -43,39 +59,36 @@ export class ToolRegistry {
       }
     }
 
-    // Add bifrost meta tools
-    tools.push(...this._metaTools());
+    // Meta tools
+    for (const m of this._metaTools()) {
+      reverseMap.set(m.name, { workspaceId: null, originalName: m._originalName });
+      tools.push(m);
+    }
 
+    this._reverseMap = reverseMap;
     return tools;
   }
 
   /**
    * Resolve a namespaced tool call to workspace + original tool name.
+   * Uses reverse lookup table (populated by getTools) rather than string parsing.
    */
   resolve(mcpToolName) {
-    // Meta tools
+    // Populate cache lazily if empty
+    if (this._reverseMap.size === 0) this.getTools();
+
     if (mcpToolName.startsWith('bifrost__')) {
       return { type: 'meta', toolName: mcpToolName };
     }
-
-    // Parse {provider}_{namespace}__{tool_name}
-    const doubleUnderIdx = mcpToolName.indexOf('__');
-    if (doubleUnderIdx === -1) return null;
-
-    const prefix = mcpToolName.slice(0, doubleUnderIdx);
-    const toolName = mcpToolName.slice(doubleUnderIdx + 2);
-    const firstUnder = prefix.indexOf('_');
-    if (firstUnder === -1) return null;
-
-    const provider = prefix.slice(0, firstUnder);
-    const namespace = prefix.slice(firstUnder + 1);
-
-    const ws = this.wm.getEnabledWorkspaces().find(
-      w => w.provider === provider && w.namespace === namespace
-    );
-    if (!ws) return null;
-
-    return { type: 'workspace', workspaceId: ws.id, toolName, provider, namespace };
+    const entry = this._reverseMap.get(mcpToolName);
+    if (!entry || !entry.workspaceId) return null;
+    return {
+      type: 'workspace',
+      workspaceId: entry.workspaceId,
+      toolName: entry.originalName,
+      provider: entry.provider,
+      namespace: entry.namespace,
+    };
   }
 
   _namespacedName(provider, namespace, toolName) {
@@ -84,8 +97,11 @@ export class ToolRegistry {
 
   _enrichDescription(ws, tool) {
     const readOnly = tool.readOnly ? ' (읽기 전용)' : '';
-    const providerLabel = ws.provider.charAt(0).toUpperCase() + ws.provider.slice(1);
-    return `[${ws.displayName}] ${tool.description}. ${providerLabel} 워크스페이스.${readOnly}`;
+    const providerLabel = ws.kind === 'mcp-client'
+      ? `MCP(${ws.transport})`
+      : ws.provider.charAt(0).toUpperCase() + ws.provider.slice(1);
+    const desc = tool.description || tool.name;
+    return `[${ws.displayName}] ${desc}. ${providerLabel} 워크스페이스.${readOnly}`;
   }
 
   _passesFilter(ws, toolName) {

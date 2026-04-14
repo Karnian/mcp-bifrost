@@ -115,93 +115,76 @@
       </div>
     </div>
 
-    <!-- Setup Wizard -->
+    <!-- Setup Wizard (single entry point + templates + custom) -->
     <div id="wizard-screen" class="screen hidden">
       <div class="wizard-container">
-        <div class="wizard-steps">
-          <div class="wizard-step active" data-step="1">1. Provider</div>
-          <div class="wizard-step" data-step="2">2. Connection</div>
-          <div class="wizard-step" data-step="3">3. Test</div>
-          <div class="wizard-step" data-step="4">4. Complete</div>
-        </div>
+        <button type="button" id="wiz-skip" class="btn btn-sm btn-outline wizard-skip">Skip</button>
         <div class="wizard-body">
-          <!-- Step 1: Provider Selection -->
+          <!-- Step 1: Choose — search + template grid + custom toggle -->
           <div id="wizard-step-1" class="wizard-panel">
-            <h3>Select Provider</h3>
-            <div class="provider-cards">
-              <div class="provider-card" data-provider="notion">
-                <div class="provider-icon">N</div>
-                <div class="provider-name">Notion</div>
-                <div class="provider-desc">Pages, databases, search</div>
+            <h3>MCP 서버 연결</h3>
+            <p class="muted">템플릿을 선택하거나 직접 설정하세요.</p>
+            <input type="text" id="wiz-search" placeholder="검색: filesystem, github, notion..." class="wiz-search">
+            <div id="wiz-templates" class="template-grid"></div>
+            <details class="wiz-custom-details">
+              <summary>직접 설정 (stdio / HTTP / SSE)</summary>
+              <div class="wiz-custom-buttons">
+                <button type="button" class="btn btn-outline" data-custom="stdio">Stdio 실행</button>
+                <button type="button" class="btn btn-outline" data-custom="http">HTTP URL</button>
+                <button type="button" class="btn btn-outline" data-custom="sse">SSE URL</button>
               </div>
-              <div class="provider-card" data-provider="slack">
-                <div class="provider-icon">S</div>
-                <div class="provider-name">Slack</div>
-                <div class="provider-desc">Messages, channels, search</div>
-              </div>
-            </div>
+            </details>
           </div>
 
-          <!-- Step 2: Connection Info -->
+          <!-- Step 2: Fill template fields OR custom form -->
           <div id="wizard-step-2" class="wizard-panel hidden">
-            <h3>Connection Details</h3>
-            <label for="wiz-displayname">Display Name</label>
-            <input type="text" id="wiz-displayname" placeholder="My Notion">
-            <label for="wiz-alias">Alias (optional)</label>
-            <input type="text" id="wiz-alias" placeholder="auto-generated">
-            <div id="wiz-notion-fields">
-              <label for="wiz-notion-token">Integration Token</label>
-              <input type="password" id="wiz-notion-token" placeholder="ntn_...">
-              <small>notion.so/my-integrations &rarr; New &rarr; Copy Token</small>
-            </div>
-            <div id="wiz-slack-fields" class="hidden">
-              <label for="wiz-slack-token">Bot Token</label>
-              <input type="password" id="wiz-slack-token" placeholder="xoxb-...">
-              <small>api.slack.com/apps &rarr; Create &rarr; Bot Token</small>
-              <label for="wiz-slack-teamid">Team ID</label>
-              <input type="text" id="wiz-slack-teamid" placeholder="T0001">
-            </div>
+            <button type="button" class="btn btn-sm btn-outline" id="wiz-back-to-1">&larr; 다시 선택</button>
+            <h3 id="wiz-step2-title">설정 입력</h3>
+            <p id="wiz-step2-desc" class="muted"></p>
+            <label for="wiz-displayname">표시 이름</label>
+            <input type="text" id="wiz-displayname" placeholder="My Workspace">
+            <label for="wiz-alias">Alias (선택)</label>
+            <input type="text" id="wiz-alias" placeholder="자동 생성">
+            <div id="wiz-dynamic-fields"></div>
+            <div id="wiz-form-error" class="error-msg hidden"></div>
             <div class="wizard-nav">
-              <button type="button" class="btn btn-outline wiz-prev">Back</button>
-              <button type="button" class="btn btn-primary wiz-next">Next</button>
+              <button type="button" class="btn btn-primary wiz-next-2">연결 테스트 &amp; 저장</button>
             </div>
           </div>
 
-          <!-- Step 3: Test Connection -->
+          <!-- Step 3: Test result -->
           <div id="wizard-step-3" class="wizard-panel hidden">
-            <h3>Testing Connection</h3>
+            <h3>연결 테스트</h3>
             <div id="wiz-test-progress" class="test-progress">
               <div class="test-step" id="wiz-ts-validate">
                 <span class="test-icon">...</span>
-                <span>Validating credentials</span>
+                <span>워크스페이스 등록</span>
               </div>
               <div class="test-step" id="wiz-ts-capability">
                 <span class="test-icon">...</span>
-                <span>Checking capabilities</span>
+                <span>연결 검증</span>
               </div>
               <div class="test-step" id="wiz-ts-sample">
                 <span class="test-icon">...</span>
-                <span>Sample tool call</span>
+                <span>도구 탐색</span>
               </div>
             </div>
             <div id="wiz-test-result" class="hidden"></div>
             <div class="wizard-nav">
-              <button type="button" class="btn btn-outline wiz-prev">Back</button>
-              <button type="button" class="btn btn-primary wiz-next" disabled>Next</button>
+              <button type="button" class="btn btn-primary wiz-next-3" disabled>완료</button>
             </div>
           </div>
 
           <!-- Step 4: Complete -->
           <div id="wizard-step-4" class="wizard-panel hidden">
-            <h3>Setup Complete</h3>
+            <h3>완료</h3>
             <div id="wiz-summary"></div>
             <div class="wizard-complete-actions">
-              <button type="button" id="wiz-add-another" class="btn btn-outline">Add Another Workspace</button>
-              <button type="button" id="wiz-go-dashboard" class="btn btn-primary">Go to Dashboard</button>
+              <button type="button" id="wiz-add-another" class="btn btn-outline">다른 서버 추가</button>
+              <button type="button" id="wiz-go-dashboard" class="btn btn-primary">Dashboard</button>
             </div>
           </div>
         </div>
-        <button type="button" id="wiz-skip" class="btn btn-sm btn-outline wizard-skip">Skip</button>
       </div>
     </div>
 
@@ -290,51 +273,7 @@
       </div>
     </div>
 
-    <!-- Add/Edit Drawer -->
-    <div id="drawer-overlay" class="drawer-overlay hidden">
-      <div class="drawer">
-        <div class="drawer-header">
-          <h3 id="drawer-title">Add Workspace</h3>
-          <button id="btn-close-drawer" class="btn btn-icon">&times;</button>
-        </div>
-        <form id="workspace-form">
-          <input type="hidden" id="ws-edit-id">
-          <label for="ws-provider">Provider</label>
-          <select id="ws-provider" required>
-            <option value="notion">Notion</option>
-            <option value="slack">Slack</option>
-          </select>
-          <label for="ws-displayname">Display Name</label>
-          <input type="text" id="ws-displayname" placeholder="My Notion" required>
-          <label for="ws-alias">Alias</label>
-          <input type="text" id="ws-alias" placeholder="auto-generated from display name">
-          <small>Used for identification. Auto-generated if empty.</small>
-          <div id="notion-fields">
-            <label for="ws-notion-token">Integration Token</label>
-            <input type="password" id="ws-notion-token" placeholder="ntn_...">
-            <small>notion.so/my-integrations &rarr; New &rarr; Token</small>
-          </div>
-          <div id="slack-fields" class="hidden">
-            <label for="ws-slack-token">Bot Token</label>
-            <input type="password" id="ws-slack-token" placeholder="xoxb-...">
-            <small>api.slack.com/apps &rarr; Create &rarr; Bot Token</small>
-            <label for="ws-slack-teamid">Team ID</label>
-            <input type="text" id="ws-slack-teamid" placeholder="T0001 (auto-detected if possible)">
-          </div>
-          <label class="toggle-label">
-            <input type="checkbox" id="ws-enabled" checked>
-            <span>Enabled</span>
-          </label>
-          <div id="ws-form-error" class="error-msg hidden"></div>
-          <div class="drawer-actions">
-            <button type="button" id="btn-delete-ws" class="btn btn-danger hidden">Delete</button>
-            <div class="spacer"></div>
-            <button type="button" id="btn-test-ws" class="btn btn-outline">Test Connection</button>
-            <button type="submit" class="btn btn-primary">Save</button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <!-- (Add/Edit Drawer removed — use Wizard for Add, Detail for Edit) -->
 
     <!-- Delete Confirmation -->
     <div id="confirm-overlay" class="drawer-overlay hidden">
@@ -350,6 +289,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

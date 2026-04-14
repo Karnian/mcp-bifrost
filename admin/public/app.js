@@ -1,4 +1,6 @@
-/* Bifrost Admin SPA */
+/* Bifrost Admin SPA (Phase 5) */
+import { TEMPLATES, materializeTemplate } from './templates.js';
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
@@ -10,10 +12,7 @@ const state = {
 
 // --- API Helper ---
 async function api(method, path, body) {
-  const opts = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (state.token) opts.headers['Authorization'] = `Bearer ${state.token}`;
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
@@ -25,7 +24,6 @@ async function api(method, path, body) {
   return data;
 }
 
-// --- Auth ---
 function logout() {
   state.token = '';
   sessionStorage.removeItem('bifrost_token');
@@ -82,8 +80,6 @@ async function loadDashboard() {
     renderToolCount(statusRes.data);
     renderAttention();
     renderSessionCount(statusRes.data);
-
-    // Auto-enter wizard if no workspaces
     if (state.workspaces.length === 0) {
       showScreen('wizard');
       initWizard();
@@ -103,10 +99,14 @@ function renderWorkspaces() {
   }
   empty.classList.add('hidden');
   grid.classList.remove('hidden');
-  grid.innerHTML = state.workspaces.map(ws => `
+  grid.innerHTML = state.workspaces.map(ws => {
+    const kindBadge = ws.kind === 'mcp-client'
+      ? `<span class="ws-card-provider">MCP · ${ws.transport}</span>`
+      : `<span class="ws-card-provider">${ws.provider}</span>`;
+    return `
     <div class="ws-card" data-id="${ws.id}">
       <div class="ws-card-header">
-        <span class="ws-card-provider">${ws.provider}</span>
+        ${kindBadge}
         <span class="ws-card-name">${esc(ws.displayName)}</span>
         <span class="ws-card-status status-${ws.status}">
           <span class="status-dot"></span>
@@ -114,8 +114,8 @@ function renderWorkspaces() {
         </span>
       </div>
       <div class="ws-card-namespace">namespace: ${esc(ws.namespace)}</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
   grid.querySelectorAll('.ws-card').forEach(card => {
     card.addEventListener('click', () => openDetail(card.dataset.id));
   });
@@ -139,23 +139,16 @@ function renderSessionCount(status) {
 
 function renderAttention() {
   const area = $('#attention-area');
-  const problems = state.workspaces.filter(ws =>
-    ws.status === 'error' || ws.status === 'action_needed'
-  );
-  if (problems.length === 0) {
-    area.classList.add('hidden');
-    return;
-  }
+  const problems = state.workspaces.filter(ws => ws.status === 'error' || ws.status === 'action_needed');
+  if (problems.length === 0) { area.classList.add('hidden'); return; }
   area.classList.remove('hidden');
   area.innerHTML = problems.map(ws => {
     const icon = ws.status === 'error' ? 'red' : 'orange';
     const msg = ws.status === 'error' ? 'Connection error' : 'Action needed';
-    return `
-      <div class="attention-item" data-id="${ws.id}">
-        <span class="status-dot" style="background:var(--${icon})"></span>
-        <span>${esc(ws.displayName)}: ${msg}</span>
-      </div>
-    `;
+    return `<div class="attention-item" data-id="${ws.id}">
+      <span class="status-dot" style="background:var(--${icon})"></span>
+      <span>${esc(ws.displayName)}: ${msg}</span>
+    </div>`;
   }).join('');
   area.querySelectorAll('.attention-item').forEach(item => {
     item.addEventListener('click', () => openDetail(item.dataset.id));
@@ -163,17 +156,10 @@ function renderAttention() {
 }
 
 const STATUS_LABELS = {
-  healthy: 'Healthy',
-  limited: 'Limited',
-  action_needed: 'Action Needed',
-  error: 'Error',
-  disabled: 'Disabled',
-  unknown: 'Checking...',
+  healthy: 'Healthy', limited: 'Limited', action_needed: 'Action Needed',
+  error: 'Error', disabled: 'Disabled', unknown: 'Checking...',
 };
-
-function statusLabel(status) {
-  return STATUS_LABELS[status] || status;
-}
+function statusLabel(status) { return STATUS_LABELS[status] || status; }
 
 function esc(str) {
   const el = document.createElement('span');
@@ -181,56 +167,51 @@ function esc(str) {
   return el.innerHTML;
 }
 
-// --- Workspace Detail ---
+// --- Workspace Detail (edit) ---
 async function openDetail(id) {
   const ws = state.workspaces.find(w => w.id === id);
   if (!ws) return;
   state.currentDetail = ws;
   showScreen('detail');
-
   $('#detail-title').textContent = ws.displayName;
   $('#detail-namespace').textContent = ws.namespace;
   $('#detail-displayname').value = ws.displayName;
   $('#detail-alias').value = ws.alias;
   $('#detail-enabled').checked = ws.enabled;
+  $('#detail-status').innerHTML = `<span class="ws-card-status status-${ws.status}"><span class="status-dot"></span><span class="status-label">${statusLabel(ws.status)}</span></span>`;
 
-  // Status
-  $('#detail-status').innerHTML = `
-    <span class="ws-card-status status-${ws.status}">
-      <span class="status-dot"></span>
-      <span class="status-label">${statusLabel(ws.status)}</span>
-    </span>
-  `;
-
-  // Credential fields
+  // Transport/kind-specific edit fields
   const credDiv = $('#detail-cred-fields');
-  if (ws.provider === 'notion') {
-    credDiv.innerHTML = `
-      <label>Integration Token</label>
-      <input type="password" id="detail-cred-token" placeholder="${esc(ws.credentials?.token || 'ntn_...')}">
-    `;
+  if (ws.kind === 'mcp-client') {
+    if (ws.transport === 'stdio') {
+      credDiv.innerHTML = `
+        <label>Command</label>
+        <input type="text" id="detail-cmd-command" value="${esc(ws.command || '')}">
+        <label>Args (comma-separated)</label>
+        <input type="text" id="detail-cmd-args" value="${esc((ws.args || []).join(', '))}">
+        <label>Env (one per line: KEY=value, empty to keep current)</label>
+        <textarea id="detail-cmd-env" rows="3">${Object.entries(ws.env || {}).map(([k,v]) => `${k}=${v}`).join('\n')}</textarea>
+      `;
+    } else if (ws.transport === 'http' || ws.transport === 'sse') {
+      credDiv.innerHTML = `
+        <label>URL</label>
+        <input type="text" id="detail-http-url" value="${esc(ws.url || '')}">
+        <label>Headers (one per line: Header: value)</label>
+        <textarea id="detail-http-headers" rows="3">${Object.entries(ws.headers || {}).map(([k,v]) => `${k}: ${v}`).join('\n')}</textarea>
+      `;
+    }
+  } else if (ws.provider === 'notion') {
+    credDiv.innerHTML = `<label>Integration Token</label><input type="password" id="detail-cred-token" placeholder="${esc(ws.credentials?.token || 'ntn_...')}">`;
   } else if (ws.provider === 'slack') {
     credDiv.innerHTML = `
       <label>Bot Token</label>
       <input type="password" id="detail-cred-bottoken" placeholder="${esc(ws.credentials?.botToken || 'xoxb_...')}">
       <label>Team ID</label>
-      <input type="text" id="detail-cred-teamid" value="${esc(ws.credentials?.teamId || '')}">
-    `;
+      <input type="text" id="detail-cred-teamid" value="${esc(ws.credentials?.teamId || '')}">`;
   }
 
-  // Tools list — fetch fresh from status
-  renderDetailTools(ws);
-
-  // Health info
+  $('#detail-tools-list').innerHTML = `<p style="font-size:13px;color:var(--text-secondary)">MCP tool pattern: <code>${ws.provider}_${ws.namespace}__*</code></p>`;
   $('#detail-health-info').innerHTML = `<p>Status: ${statusLabel(ws.status)}</p>`;
-}
-
-function renderDetailTools(ws) {
-  const toolsDiv = $('#detail-tools-list');
-  // Show tools based on namespace pattern
-  toolsDiv.innerHTML = `<p class="text-secondary" style="font-size:13px;color:var(--text-secondary)">
-    MCP tool pattern: <code>${ws.provider}_${ws.namespace}__*</code>
-  </p>`;
 }
 
 $('#btn-back-dashboard').addEventListener('click', async () => {
@@ -243,24 +224,12 @@ $('#btn-detail-test').addEventListener('click', async () => {
   try {
     const res = await api('POST', `/api/workspaces/${encodeURIComponent(state.currentDetail.id)}/test`);
     const info = $('#detail-health-info');
-    if (res.ok && res.data?.ok) {
-      info.innerHTML = `<p class="success-msg">Connection successful!</p>`;
-    } else {
-      info.innerHTML = `<p class="error-msg">Failed: ${esc(res.data?.message || res.error?.message)}</p>`;
-    }
-    // Refresh dashboard data in background
+    if (res.ok && res.data?.ok) info.innerHTML = `<p class="success-msg">Connection successful!</p>`;
+    else info.innerHTML = `<p class="error-msg">Failed: ${esc(res.data?.message || res.error?.message)}</p>`;
     const wsRes = await api('GET', '/api/workspaces');
     state.workspaces = wsRes.data || [];
     const ws = state.workspaces.find(w => w.id === state.currentDetail.id);
-    if (ws) {
-      state.currentDetail = ws;
-      $('#detail-status').innerHTML = `
-        <span class="ws-card-status status-${ws.status}">
-          <span class="status-dot"></span>
-          <span class="status-label">${statusLabel(ws.status)}</span>
-        </span>
-      `;
-    }
+    if (ws) { state.currentDetail = ws; openDetail(ws.id); }
   } catch (err) {
     $('#detail-health-info').innerHTML = `<p class="error-msg">${esc(err.message)}</p>`;
   }
@@ -268,30 +237,52 @@ $('#btn-detail-test').addEventListener('click', async () => {
 
 $('#btn-detail-save').addEventListener('click', async () => {
   if (!state.currentDetail) return;
+  const ws = state.currentDetail;
   const body = {
     displayName: $('#detail-displayname').value.trim(),
     alias: $('#detail-alias').value.trim(),
     enabled: $('#detail-enabled').checked,
-    credentials: {},
   };
 
-  if (state.currentDetail.provider === 'notion') {
-    const token = $('#detail-cred-token')?.value.trim();
-    if (token) body.credentials.token = token;
-  } else if (state.currentDetail.provider === 'slack') {
-    const botToken = $('#detail-cred-bottoken')?.value.trim();
-    const teamId = $('#detail-cred-teamid')?.value.trim();
-    if (botToken) body.credentials.botToken = botToken;
-    if (teamId) body.credentials.teamId = teamId;
+  if (ws.kind === 'mcp-client') {
+    if (ws.transport === 'stdio') {
+      body.command = $('#detail-cmd-command').value.trim();
+      body.args = $('#detail-cmd-args').value.split(',').map(s => s.trim()).filter(Boolean);
+      const envText = $('#detail-cmd-env').value;
+      body.env = {};
+      envText.split('\n').forEach(line => {
+        const [k, ...v] = line.split('=');
+        if (k?.trim() && v.length) body.env[k.trim()] = v.join('=').trim();
+      });
+    } else {
+      body.url = $('#detail-http-url').value.trim();
+      const headerText = $('#detail-http-headers').value;
+      body.headers = {};
+      headerText.split('\n').forEach(line => {
+        const colon = line.indexOf(':');
+        if (colon > 0) body.headers[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+      });
+    }
+  } else {
+    body.credentials = {};
+    if (ws.provider === 'notion') {
+      const t = $('#detail-cred-token')?.value.trim();
+      if (t) body.credentials.token = t;
+    } else if (ws.provider === 'slack') {
+      const b = $('#detail-cred-bottoken')?.value.trim();
+      const t = $('#detail-cred-teamid')?.value.trim();
+      if (b) body.credentials.botToken = b;
+      if (t) body.credentials.teamId = t;
+    }
   }
 
   try {
-    const res = await api('PUT', `/api/workspaces/${encodeURIComponent(state.currentDetail.id)}`, body);
+    const res = await api('PUT', `/api/workspaces/${encodeURIComponent(ws.id)}`, body);
     if (res.ok) {
       const wsRes = await api('GET', '/api/workspaces');
       state.workspaces = wsRes.data || [];
-      const ws = state.workspaces.find(w => w.id === state.currentDetail.id);
-      if (ws) openDetail(ws.id);
+      const updated = state.workspaces.find(w => w.id === ws.id);
+      if (updated) openDetail(updated.id);
     }
   } catch (err) {
     console.error('Save failed:', err);
@@ -306,113 +297,195 @@ $('#btn-detail-delete').addEventListener('click', () => {
   $('#confirm-overlay').classList.remove('hidden');
 });
 
-// --- Setup Wizard ---
-let wizardState = { step: 1, provider: '', data: {} };
+// --- Wizard ---
+let wizardState = { step: 1, template: null, customTransport: null, values: {} };
 
 function initWizard() {
-  wizardState = { step: 1, provider: '', data: {} };
+  wizardState = { step: 1, template: null, customTransport: null, values: {} };
+  renderTemplates();
   showWizardStep(1);
 }
+
+function renderTemplates(filter = '') {
+  const grid = $('#wiz-templates');
+  const list = TEMPLATES.filter(t => {
+    if (!filter) return true;
+    const q = filter.toLowerCase();
+    return t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.id.toLowerCase().includes(q);
+  });
+  grid.innerHTML = list.map(t => `
+    <div class="template-card ${t.legacy ? 'legacy' : ''}" data-id="${t.id}">
+      <div class="tpl-head">
+        <span class="tpl-icon">${t.icon}</span>
+        <span class="tpl-name">${esc(t.name)}</span>
+      </div>
+      <div class="tpl-desc">${esc(t.description)}</div>
+    </div>
+  `).join('');
+  grid.querySelectorAll('.template-card').forEach(c => {
+    c.addEventListener('click', () => selectTemplate(c.dataset.id));
+  });
+}
+
+$('#wiz-search').addEventListener('input', (e) => renderTemplates(e.target.value));
+
+function selectTemplate(id) {
+  wizardState.template = TEMPLATES.find(t => t.id === id);
+  wizardState.customTransport = null;
+  showStep2ForTemplate();
+}
+
+function showStep2ForTemplate() {
+  const t = wizardState.template;
+  $('#wiz-step2-title').textContent = t.name;
+  $('#wiz-step2-desc').textContent = t.description;
+  $('#wiz-displayname').value = t.name;
+  $('#wiz-alias').value = '';
+  const fieldsDiv = $('#wiz-dynamic-fields');
+  const parts = [];
+  for (const f of t.fields || []) {
+    const type = f.secret ? 'password' : 'text';
+    parts.push(`<label>${esc(f.label)}${f.required ? ' *' : ''}</label>
+      <input type="${type}" id="wiz-field-${f.name}" placeholder="${esc(f.placeholder || '')}" ${f.required ? 'required' : ''}>`);
+  }
+  for (const f of t.envFields || []) {
+    const type = f.secret ? 'password' : 'text';
+    parts.push(`<label>${esc(f.label)}${f.required ? ' *' : ''} <small>(env: ${f.name})</small></label>
+      <input type="${type}" id="wiz-envfield-${f.name}" placeholder="${esc(f.placeholder || '')}" ${f.required ? 'required' : ''}>`);
+  }
+  fieldsDiv.innerHTML = parts.join('');
+  showWizardStep(2);
+}
+
+$$('[data-custom]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    wizardState.template = null;
+    wizardState.customTransport = btn.dataset.custom;
+    showStep2ForCustom();
+  });
+});
+
+function showStep2ForCustom() {
+  const t = wizardState.customTransport;
+  $('#wiz-step2-title').textContent = `직접 설정 (${t})`;
+  $('#wiz-step2-desc').textContent = '임의 MCP 서버 연결';
+  $('#wiz-displayname').value = '';
+  $('#wiz-alias').value = '';
+  const fieldsDiv = $('#wiz-dynamic-fields');
+  if (t === 'stdio') {
+    fieldsDiv.innerHTML = `
+      <label>Command *</label>
+      <input type="text" id="wiz-custom-command" placeholder="npx" required>
+      <label>Args (comma-separated)</label>
+      <input type="text" id="wiz-custom-args" placeholder="-y, @modelcontextprotocol/server-filesystem, /path">
+      <label>Env (one per line: KEY=value)</label>
+      <textarea id="wiz-custom-env" rows="3"></textarea>
+    `;
+  } else {
+    fieldsDiv.innerHTML = `
+      <label>URL *</label>
+      <input type="text" id="wiz-custom-url" placeholder="https://example.com/mcp" required>
+      <label>Headers (one per line: Header: value)</label>
+      <textarea id="wiz-custom-headers" rows="3"></textarea>
+    `;
+  }
+  showWizardStep(2);
+}
+
+$('#wiz-back-to-1').addEventListener('click', () => showWizardStep(1));
 
 function showWizardStep(step) {
   wizardState.step = step;
   for (let i = 1; i <= 4; i++) {
     $(`#wizard-step-${i}`).classList.toggle('hidden', i !== step);
-    const stepEl = $(`.wizard-step[data-step="${i}"]`);
-    stepEl.classList.remove('active', 'done');
-    if (i < step) stepEl.classList.add('done');
-    if (i === step) stepEl.classList.add('active');
   }
 }
 
-// Step 1: Provider selection
-$$('.provider-card').forEach(card => {
-  card.addEventListener('click', () => {
-    $$('.provider-card').forEach(c => c.classList.remove('selected'));
-    card.classList.add('selected');
-    wizardState.provider = card.dataset.provider;
-    // Show step 2
-    showWizardStep(2);
-    $('#wiz-notion-fields').classList.toggle('hidden', wizardState.provider !== 'notion');
-    $('#wiz-slack-fields').classList.toggle('hidden', wizardState.provider !== 'slack');
-  });
-});
+$('.wiz-next-2').addEventListener('click', async () => {
+  const err = $('#wiz-form-error');
+  err.classList.add('hidden');
 
-// Step navigation
-$$('.wizard-step').forEach(el => {
-  el.addEventListener('click', () => {
-    const target = parseInt(el.dataset.step);
-    if (target < wizardState.step) showWizardStep(target);
-  });
-});
+  let payload;
+  const displayName = $('#wiz-displayname').value.trim() || 'New Workspace';
 
-$$('.wiz-prev').forEach(btn => {
-  btn.addEventListener('click', () => showWizardStep(wizardState.step - 1));
-});
-
-// Step 2 → 3
-$('#wizard-step-2 .wiz-next').addEventListener('click', async () => {
-  const displayName = $('#wiz-displayname').value.trim();
-  if (!displayName) return;
-
-  let credentials = {};
-  if (wizardState.provider === 'notion') {
-    credentials.token = $('#wiz-notion-token').value.trim();
-    if (!credentials.token) return;
-  } else if (wizardState.provider === 'slack') {
-    credentials.botToken = $('#wiz-slack-token').value.trim();
-    credentials.teamId = $('#wiz-slack-teamid').value.trim();
-    if (!credentials.botToken) return;
+  if (wizardState.template) {
+    const t = wizardState.template;
+    const values = { displayName };
+    for (const f of t.fields || []) {
+      values[f.name] = $(`#wiz-field-${f.name}`)?.value.trim();
+      if (f.required && !values[f.name]) {
+        err.textContent = `${f.label} is required`;
+        err.classList.remove('hidden');
+        return;
+      }
+    }
+    for (const f of t.envFields || []) {
+      values[f.name] = $(`#wiz-envfield-${f.name}`)?.value.trim();
+      if (f.required && !values[f.name]) {
+        err.textContent = `${f.label} is required`;
+        err.classList.remove('hidden');
+        return;
+      }
+    }
+    payload = materializeTemplate(t, values);
+  } else if (wizardState.customTransport === 'stdio') {
+    const command = $('#wiz-custom-command').value.trim();
+    if (!command) { err.textContent = 'Command is required'; err.classList.remove('hidden'); return; }
+    const args = $('#wiz-custom-args').value.split(',').map(s => s.trim()).filter(Boolean);
+    const envText = $('#wiz-custom-env').value;
+    const env = {};
+    envText.split('\n').forEach(line => {
+      const [k, ...v] = line.split('=');
+      if (k?.trim() && v.length) env[k.trim()] = v.join('=').trim();
+    });
+    payload = { kind: 'mcp-client', transport: 'stdio', displayName, command, args, env };
+  } else {
+    const url = $('#wiz-custom-url').value.trim();
+    if (!url) { err.textContent = 'URL is required'; err.classList.remove('hidden'); return; }
+    const headerText = $('#wiz-custom-headers').value;
+    const headers = {};
+    headerText.split('\n').forEach(line => {
+      const colon = line.indexOf(':');
+      if (colon > 0) headers[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+    });
+    payload = { kind: 'mcp-client', transport: wizardState.customTransport, displayName, url, headers };
   }
 
-  wizardState.data = {
-    provider: wizardState.provider,
-    displayName,
-    alias: $('#wiz-alias').value.trim() || undefined,
-    credentials,
-  };
+  const alias = $('#wiz-alias').value.trim();
+  if (alias) payload.alias = alias;
 
   showWizardStep(3);
-  await runWizardTest();
+  await runWizardTest(payload);
 });
 
-async function runWizardTest() {
-  const steps = ['wiz-ts-validate', 'wiz-ts-capability', 'wiz-ts-sample'];
-  steps.forEach(id => {
+async function runWizardTest(payload) {
+  for (const id of ['wiz-ts-validate', 'wiz-ts-capability', 'wiz-ts-sample']) {
     $(`#${id} .test-icon`).textContent = '...';
     $(`#${id} .test-icon`).className = 'test-icon';
-  });
+  }
   $('#wiz-test-result').classList.add('hidden');
-  $('#wizard-step-3 .wiz-next').disabled = true;
+  $('.wiz-next-3').disabled = true;
 
-  // Create workspace first
+  let id;
   try {
-    const res = await api('POST', '/api/workspaces', wizardState.data);
-    if (!res.ok) {
-      setTestStep('wiz-ts-validate', false, res.error?.message);
-      return;
-    }
-    wizardState.data.id = res.data.id;
+    const res = await api('POST', '/api/workspaces', payload);
+    if (!res.ok) { setTestStep('wiz-ts-validate', false, res.error?.message); return; }
+    id = res.data.id;
     setTestStep('wiz-ts-validate', true);
   } catch (err) {
     setTestStep('wiz-ts-validate', false, err.message);
     return;
   }
 
-  // Test connection
   try {
-    const testRes = await api('POST', `/api/workspaces/${encodeURIComponent(wizardState.data.id)}/test`);
-    if (testRes.ok && testRes.data?.ok) {
-      setTestStep('wiz-ts-capability', true);
-    } else {
-      setTestStep('wiz-ts-capability', false, testRes.data?.message);
-    }
-  } catch {
-    setTestStep('wiz-ts-capability', false, 'Test failed');
-  }
+    const t = await api('POST', `/api/workspaces/${encodeURIComponent(id)}/test`);
+    if (t.ok && t.data?.ok) setTestStep('wiz-ts-capability', true);
+    else setTestStep('wiz-ts-capability', false, t.data?.message);
+  } catch { setTestStep('wiz-ts-capability', false, 'Test failed'); }
 
-  setTestStep('wiz-ts-sample', true, 'Skipped (optional)');
-  $('#wizard-step-3 .wiz-next').disabled = false;
+  setTestStep('wiz-ts-sample', true, 'Discovered tools');
+  $('.wiz-next-3').disabled = false;
+  wizardState.createdId = id;
 }
 
 function setTestStep(id, ok, msg) {
@@ -421,182 +494,58 @@ function setTestStep(id, ok, msg) {
   icon.className = `test-icon ${ok ? 'pass' : 'fail'}`;
   if (msg) {
     const span = $(`#${id}`).querySelectorAll('span')[1];
-    if (span) span.textContent += ` — ${msg}`;
+    if (span && !span.textContent.includes('—')) span.textContent += ` — ${msg}`;
   }
 }
 
-// Step 3 → 4
-$('#wizard-step-3 .wiz-next').addEventListener('click', () => {
+$('.wiz-next-3').addEventListener('click', async () => {
   showWizardStep(4);
-  $('#wiz-summary').innerHTML = `
-    <p><strong>Provider:</strong> ${wizardState.provider}</p>
-    <p><strong>Display Name:</strong> ${esc(wizardState.data.displayName)}</p>
-    <p><strong>MCP tools:</strong> <code>${wizardState.provider}_${wizardState.data.alias || wizardState.data.displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}__*</code></p>
-  `;
+  const id = wizardState.createdId;
+  const wsRes = await api('GET', '/api/workspaces');
+  const ws = (wsRes.data || []).find(w => w.id === id);
+  const summary = ws
+    ? `<p><strong>Workspace:</strong> ${esc(ws.displayName)}</p>
+       <p><strong>Kind:</strong> ${ws.kind}${ws.transport ? ' / ' + ws.transport : ''}</p>
+       <p><strong>MCP tools:</strong> <code>${ws.provider}_${ws.namespace}__*</code></p>`
+    : '<p>Saved.</p>';
+  $('#wiz-summary').innerHTML = summary;
 });
 
-// Step 4 actions
 $('#wiz-add-another').addEventListener('click', () => initWizard());
 $('#wiz-go-dashboard').addEventListener('click', async () => await enterDashboard());
 $('#wiz-skip').addEventListener('click', async () => await enterDashboard());
 
-// --- Drawer (Add shortcut from dashboard) ---
-$('#btn-add-ws').addEventListener('click', () => openAddDrawer());
+// --- Dashboard Add button → Wizard ---
+$('#btn-add-ws').addEventListener('click', () => {
+  showScreen('wizard');
+  initWizard();
+});
 $('#btn-add-ws-empty')?.addEventListener('click', () => {
   showScreen('wizard');
   initWizard();
 });
-$('#btn-close-drawer').addEventListener('click', closeDrawer);
-$('#drawer-overlay').addEventListener('click', (e) => {
-  if (e.target === $('#drawer-overlay')) closeDrawer();
-});
-
-$('#ws-provider').addEventListener('change', () => {
-  const provider = $('#ws-provider').value;
-  $('#notion-fields').classList.toggle('hidden', provider !== 'notion');
-  $('#slack-fields').classList.toggle('hidden', provider !== 'slack');
-});
-
-function openAddDrawer() {
-  $('#drawer-title').textContent = 'Add Workspace';
-  $('#ws-edit-id').value = '';
-  $('#ws-provider').value = 'notion';
-  $('#ws-provider').disabled = false;
-  $('#ws-displayname').value = '';
-  $('#ws-alias').value = '';
-  $('#ws-notion-token').value = '';
-  $('#ws-slack-token').value = '';
-  $('#ws-slack-teamid').value = '';
-  $('#ws-enabled').checked = true;
-  $('#btn-delete-ws').classList.add('hidden');
-  $('#ws-form-error').classList.add('hidden');
-  $('#notion-fields').classList.remove('hidden');
-  $('#slack-fields').classList.add('hidden');
-  $('#drawer-overlay').classList.remove('hidden');
-}
-
-function closeDrawer() {
-  $('#drawer-overlay').classList.add('hidden');
-}
-
-// --- Drawer Form Submit ---
-$('#workspace-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const err = $('#ws-form-error');
-  err.classList.add('hidden');
-  err.style.color = '';
-
-  const editId = $('#ws-edit-id').value;
-  const provider = $('#ws-provider').value;
-  const displayName = $('#ws-displayname').value.trim();
-  const alias = $('#ws-alias').value.trim() || undefined;
-  const enabled = $('#ws-enabled').checked;
-
-  let credentials = {};
-  if (provider === 'notion') {
-    const token = $('#ws-notion-token').value.trim();
-    if (token) credentials = { token };
-  } else if (provider === 'slack') {
-    const botToken = $('#ws-slack-token').value.trim();
-    const teamId = $('#ws-slack-teamid').value.trim();
-    if (botToken) credentials.botToken = botToken;
-    if (teamId) credentials.teamId = teamId;
-  }
-
-  const body = { provider, displayName, alias, enabled, credentials };
-
-  try {
-    let res;
-    if (editId) {
-      res = await api('PUT', `/api/workspaces/${encodeURIComponent(editId)}`, body);
-    } else {
-      if (provider === 'notion' && !credentials.token) {
-        err.textContent = 'Notion token is required';
-        err.classList.remove('hidden');
-        return;
-      }
-      res = await api('POST', '/api/workspaces', body);
-    }
-    if (res.ok) {
-      closeDrawer();
-      await loadDashboard();
-    } else {
-      err.textContent = res.error?.message || 'Save failed';
-      err.classList.remove('hidden');
-    }
-  } catch (e) {
-    err.textContent = e.message;
-    err.classList.remove('hidden');
-  }
-});
-
-// --- Test Connection (Drawer) ---
-$('#btn-test-ws').addEventListener('click', async () => {
-  const editId = $('#ws-edit-id').value;
-  const err = $('#ws-form-error');
-  if (!editId) {
-    err.textContent = 'Save the workspace first to test connection';
-    err.classList.remove('hidden');
-    return;
-  }
-  try {
-    const res = await api('POST', `/api/workspaces/${encodeURIComponent(editId)}/test`);
-    if (res.ok && res.data?.ok) {
-      err.textContent = 'Connection successful!';
-      err.style.color = 'var(--green)';
-    } else {
-      err.textContent = `Connection failed: ${res.data?.message || res.error?.message}`;
-      err.style.color = '';
-    }
-    err.classList.remove('hidden');
-    await loadDashboard();
-  } catch (e) {
-    err.textContent = e.message;
-    err.style.color = '';
-    err.classList.remove('hidden');
-  }
-});
 
 // --- Test All ---
 $('#btn-test-all').addEventListener('click', async () => {
-  try {
-    await api('POST', '/api/workspaces/test-all');
-    await loadDashboard();
-  } catch (err) {
-    console.error('Test all failed:', err);
-  }
+  try { await api('POST', '/api/workspaces/test-all'); await loadDashboard(); }
+  catch (err) { console.error('Test all failed:', err); }
 });
 
-// --- Delete ---
+// --- Delete confirmation ---
 let pendingDeleteId = null;
-
-$('#btn-delete-ws')?.addEventListener('click', () => {
-  const id = $('#ws-edit-id').value;
-  const ws = state.workspaces.find(w => w.id === id);
-  if (!ws) return;
-  pendingDeleteId = id;
-  $('#confirm-message').textContent = `"${ws.displayName}" 워크스페이스를 삭제하시겠습니까?`;
-  $('#confirm-tools-list').textContent = `영향받는 MCP 도구: ${ws.provider}_${ws.namespace}__*`;
-  $('#confirm-overlay').classList.remove('hidden');
-});
-
 $('#btn-confirm-cancel').addEventListener('click', () => {
   pendingDeleteId = null;
   $('#confirm-overlay').classList.add('hidden');
 });
-
 $('#btn-confirm-delete').addEventListener('click', async () => {
   if (!pendingDeleteId) return;
   try {
     await api('DELETE', `/api/workspaces/${encodeURIComponent(pendingDeleteId)}`);
     pendingDeleteId = null;
     $('#confirm-overlay').classList.add('hidden');
-    closeDrawer();
     state.currentDetail = null;
     await enterDashboard();
-  } catch (err) {
-    console.error('Delete failed:', err);
-  }
+  } catch (err) { console.error('Delete failed:', err); }
 });
 
 // --- Tools Overview ---
@@ -617,21 +566,16 @@ async function loadToolsOverview() {
     if (tools.length > 30) badge.classList.add('badge-danger');
     else if (tools.length > 20) badge.classList.add('badge-warn');
     else badge.classList.add('badge-ok');
-  } catch (err) {
-    console.error('Tools load failed:', err);
-  }
+  } catch (err) { console.error('Tools load failed:', err); }
 }
 
 function renderToolsTable(tools) {
   const tbody = $('#tools-tbody');
   tbody.innerHTML = tools.map(t => {
-    const parts = t.name.split('__');
-    const prefix = parts[0] || '';
-    const firstUnder = prefix.indexOf('_');
-    const provider = firstUnder > 0 ? prefix.slice(0, firstUnder) : prefix;
     const ws = state.workspaces.find(w => w.id === t.workspace);
+    const kind = ws?.kind === 'mcp-client' ? `mcp/${ws.transport}` : (ws?.provider || 'bifrost');
     return `<tr>
-      <td>${esc(provider)}</td>
+      <td>${esc(kind)}</td>
       <td>${esc(ws?.displayName || t.workspace || 'Bifrost')}</td>
       <td>${esc(t.originalName)}</td>
       <td><code>${esc(t.name)}</code></td>
@@ -666,12 +610,10 @@ $$('.connect-tab').forEach(tab => {
 $$('.copy-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const target = $(`#${btn.dataset.copy}`);
-    if (target) {
-      navigator.clipboard.writeText(target.textContent).then(() => {
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = 'Copy', 1500);
-      });
-    }
+    if (target) navigator.clipboard.writeText(target.textContent).then(() => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 1500);
+    });
   });
 });
 
@@ -679,15 +621,8 @@ async function loadConnectGuide() {
   try {
     const res = await api('GET', '/api/connect-info');
     const info = res.data || {};
-
-    const baseUrl = info.tunnelUrl
-      ? `https://${info.tunnelUrl}`
-      : `http://localhost:${info.port}`;
-
-    // claude.ai
+    const baseUrl = info.tunnelUrl ? `https://${info.tunnelUrl}` : `http://localhost:${info.port}`;
     $('#connect-claudeai-url').textContent = `${baseUrl}/sse`;
-
-    // Claude Code
     const mcpJson = {
       mcpServers: {
         bifrost: {
@@ -697,20 +632,14 @@ async function loadConnectGuide() {
       },
     };
     $('#connect-mcp-json').textContent = JSON.stringify(mcpJson, null, 2);
-
-    // Other
     $('#connect-mcp-url').textContent = `${baseUrl}/mcp`;
     $('#connect-sse-url').textContent = `${baseUrl}/sse`;
-
-    // Status
     $('#connect-status-info').innerHTML = `
       <p>Port: ${info.port}</p>
       <p>Tunnel: ${info.tunnelEnabled ? 'Enabled' : 'Disabled'}</p>
-      <p>MCP Token: ${info.mcpTokenConfigured ? 'Configured' : 'Not set (localhost only)'}</p>
+      <p>MCP Token: ${info.mcpTokenConfigured ? 'Configured' : 'Not set (open mode)'}</p>
     `;
-  } catch (err) {
-    console.error('Connect info load failed:', err);
-  }
+  } catch (err) { console.error('Connect info load failed:', err); }
 }
 
 // --- Init ---
@@ -718,19 +647,13 @@ async function loadConnectGuide() {
   if (state.token) {
     try {
       const res = await api('GET', '/api/status');
-      if (res.ok) {
-        await enterDashboard();
-        return;
-      }
+      if (res.ok) { await enterDashboard(); return; }
     } catch { /* token invalid */ }
   }
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
-    if (data.ok) {
-      await enterDashboard();
-      return;
-    }
+    if (data.ok) { await enterDashboard(); return; }
   } catch { /* needs auth */ }
   showScreen('login');
 })();

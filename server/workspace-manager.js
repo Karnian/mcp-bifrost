@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NotionProvider } from '../providers/notion.js';
 import { SlackProvider } from '../providers/slack.js';
+import { McpClientProvider } from '../providers/mcp-client.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -11,7 +12,7 @@ const CONFIG_PATH = join(CONFIG_DIR, 'workspaces.json');
 const BACKUP_PATH = join(CONFIG_DIR, 'workspaces.backup.json');
 const TMP_PATH = join(CONFIG_DIR, 'workspaces.tmp.json');
 
-const PROVIDERS = { notion: NotionProvider, slack: SlackProvider };
+const NATIVE_PROVIDERS = { notion: NotionProvider, slack: SlackProvider };
 
 function generateId(provider, alias) {
   return `${provider}-${alias}`;
@@ -68,9 +69,24 @@ export class WorkspaceManager {
       }
     }
     if (!this.config.workspaces) this.config.workspaces = [];
+    this._migrateLegacy();
     this._loaded = true;
     await this._initProviders();
     this._startFileWatcher();
+  }
+
+  _migrateLegacy() {
+    // Legacy entries without `kind` → assume native (Notion/Slack REST wrapper)
+    let migrated = 0;
+    for (const ws of this.config.workspaces) {
+      if (!ws.kind) {
+        ws.kind = 'native';
+        migrated++;
+      }
+    }
+    if (migrated > 0) {
+      console.log(`[WorkspaceManager] Migrated ${migrated} legacy workspace(s) to kind=native`);
+    }
   }
 
   async _initProviders() {
@@ -81,7 +97,20 @@ export class WorkspaceManager {
   }
 
   _createProvider(ws) {
-    const ProviderClass = PROVIDERS[ws.provider];
+    // Shutdown old provider if replacing
+    const old = this.providers.get(ws.id);
+    if (old?.shutdown) { try { old.shutdown(); } catch {} }
+
+    if (ws.kind === 'mcp-client') {
+      const provider = new McpClientProvider(ws);
+      provider.onToolsChanged(() => this._notifyChange());
+      this.providers.set(ws.id, provider);
+      // Warm up cache in background
+      provider.refreshTools().catch(() => {});
+      return;
+    }
+    // Native (default for backward compat)
+    const ProviderClass = NATIVE_PROVIDERS[ws.provider];
     if (ProviderClass) {
       this.providers.set(ws.id, new ProviderClass(ws));
     }
@@ -103,9 +132,7 @@ export class WorkspaceManager {
     return this.config.workspaces.filter(w => includeDeleted || !w.deletedAt).map(ws => {
       const health = this.healthCache.get(ws.id);
       const result = { ...ws, status: this._computeStatus(ws, health) };
-      if (masked) {
-        result.credentials = maskCredentials(ws.credentials || {});
-      }
+      if (masked) this._maskSecrets(result, ws);
       return result;
     });
   }
@@ -115,10 +142,14 @@ export class WorkspaceManager {
     if (!ws) return null;
     const health = this.healthCache.get(ws.id);
     const result = { ...ws, status: this._computeStatus(ws, health) };
-    if (masked) {
-      result.credentials = maskCredentials(ws.credentials || {});
-    }
+    if (masked) this._maskSecrets(result, ws);
     return result;
+  }
+
+  _maskSecrets(result, ws) {
+    if (ws.credentials) result.credentials = maskCredentials(ws.credentials);
+    if (ws.env) result.env = maskCredentials(ws.env);
+    if (ws.headers) result.headers = maskCredentials(ws.headers);
   }
 
   _getRawWorkspace(id) {
@@ -126,8 +157,11 @@ export class WorkspaceManager {
   }
 
   async addWorkspace(data) {
+    const kind = data.kind || 'native';
+    // provider field = native provider name OR mcp-client canonical id
+    const provider = data.provider || (kind === 'mcp-client' ? (data.transport || 'mcp') : 'unknown');
+
     let alias = data.alias || aliasFromDisplayName(data.displayName || '');
-    // Deduplicate alias
     const existing = this.config.workspaces.map(w => w.alias);
     let candidate = alias;
     let counter = 1;
@@ -136,29 +170,42 @@ export class WorkspaceManager {
     }
     alias = candidate;
 
-    const namespace = alias; // namespace = alias at creation time, immutable
-    const id = data.id || generateId(data.provider, namespace);
+    const namespace = alias;
+    const id = data.id || generateId(provider, namespace);
 
-    // Check id uniqueness
     if (this.config.workspaces.some(w => w.id === id)) {
       throw new Error(`Workspace ID '${id}' already exists`);
     }
 
     const ws = {
       id,
-      provider: data.provider,
+      kind,
+      provider,
       namespace,
       alias,
       displayName: data.displayName || alias,
-      credentials: data.credentials || {},
       enabled: data.enabled !== false,
       toolFilter: data.toolFilter || { mode: 'all', enabled: [] },
     };
 
+    if (kind === 'native') {
+      ws.credentials = data.credentials || {};
+    } else if (kind === 'mcp-client') {
+      ws.transport = data.transport;
+      if (data.transport === 'stdio') {
+        ws.command = data.command;
+        ws.args = data.args || [];
+        ws.env = data.env || {};
+      } else if (data.transport === 'http' || data.transport === 'sse') {
+        ws.url = data.url;
+        ws.headers = data.headers || {};
+      }
+    }
+
     this.config.workspaces.push(ws);
     this._createProvider(ws);
     await this._save();
-    this.logAudit('add', ws.id, `Added ${ws.provider} workspace "${ws.displayName}"`);
+    this.logAudit('add', ws.id, `Added ${kind}/${provider} workspace "${ws.displayName}"`);
     this._notifyChange();
     return ws;
   }
@@ -179,11 +226,36 @@ export class WorkspaceManager {
     if (data.enabled !== undefined) ws.enabled = data.enabled;
     if (data.toolFilter !== undefined) ws.toolFilter = data.toolFilter;
 
-    // Credentials: only update if provided and non-empty
-    if (data.credentials) {
+    // Credentials: only update if provided and non-empty (native kind)
+    if (data.credentials && ws.credentials) {
       for (const [key, value] of Object.entries(data.credentials)) {
         if (value && !value.includes('***')) {
           ws.credentials[key] = value;
+        }
+      }
+    }
+
+    // MCP-client fields (mutable except transport)
+    if (ws.kind === 'mcp-client') {
+      if (ws.transport === 'stdio') {
+        if (data.command !== undefined) ws.command = data.command;
+        if (data.args !== undefined) ws.args = data.args;
+        if (data.env !== undefined) {
+          // Skip masked values
+          const mergedEnv = { ...ws.env };
+          for (const [k, v] of Object.entries(data.env)) {
+            if (v && !String(v).includes('***')) mergedEnv[k] = v;
+          }
+          ws.env = mergedEnv;
+        }
+      } else if (ws.transport === 'http' || ws.transport === 'sse') {
+        if (data.url !== undefined) ws.url = data.url;
+        if (data.headers !== undefined) {
+          const mergedHeaders = { ...ws.headers };
+          for (const [k, v] of Object.entries(data.headers)) {
+            if (v && !String(v).includes('***')) mergedHeaders[k] = v;
+          }
+          ws.headers = mergedHeaders;
         }
       }
     }

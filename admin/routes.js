@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { authenticateAdmin, sendJson, readBody } from './auth.js';
+import { authenticateAdmin, sendJson, readBody, isCommandAllowed } from './auth.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
@@ -32,6 +32,16 @@ export function createAdminRoutes(wm, tr, sse) {
       return;
     }
 
+    // Admin exposure guard (also applies to login)
+    if (process.env.BIFROST_ADMIN_EXPOSE !== '1') {
+      const addr = req.socket?.remoteAddress || '';
+      const isLocal = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+      if (!isLocal) {
+        sendJson(res, 403, { ok: false, error: { code: 'ADMIN_LOCAL_ONLY', message: 'Admin API is restricted to localhost. Set BIFROST_ADMIN_EXPOSE=1 to allow remote access.' } });
+        return;
+      }
+    }
+
     // Auth check (except POST /api/auth/login)
     if (path === '/api/auth/login' && method === 'POST') {
       return handleLogin(req, res, wm);
@@ -51,6 +61,13 @@ export function createAdminRoutes(wm, tr, sse) {
       // POST /api/workspaces
       if (path === '/api/workspaces' && method === 'POST') {
         const body = await readBody(req);
+        // Command whitelist enforcement for stdio mcp-client
+        if (body.kind === 'mcp-client' && body.transport === 'stdio' && body.command) {
+          if (!isCommandAllowed(body.command)) {
+            sendJson(res, 403, { ok: false, error: { code: 'COMMAND_NOT_ALLOWED', message: `Command "${body.command}" is not in BIFROST_ALLOWED_COMMANDS whitelist` } });
+            return;
+          }
+        }
         const ws = await wm.addWorkspace(body);
         sendJson(res, 201, { ok: true, data: wm.getWorkspace(ws.id) });
         return;
