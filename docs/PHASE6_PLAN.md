@@ -28,7 +28,16 @@ Bifrost가 **OAuth 2.0 Authorization Code + PKCE** flow를 자체 수행해서 a
 ### 비목표 (Out of Scope)
 - Bifrost 자체가 **OAuth 서버**가 되는 것 (Bifrost → 클라이언트 간 인증은 기존 Bearer 유지)
 - User-to-User 위임 플로우 (한 사용자가 다른 사용자 대신 authorize)
-- Dynamic Client Registration이 불가능한 레거시 OAuth 서버 대응 (pre-configured client_id 필요한 경우는 Phase 6.5로 연기)
+- **Notifications subscription (tools/list_changed over SSE)** — HTTP/SSE stream 구독은 Phase 6.5 로 연기
+- **OS keychain 통합 토큰 암호화** — Phase 7 고려 (현재는 평문 + chmod 600 + 마스킹)
+
+### 반영: Self-Review 후 변경점
+- **DCR fallback** 은 Phase 6a 에 포함 (원안: 6.5 로 연기)
+- **사전 검증 단계 (6-pre)** 추가: Notion 실제 응답 형식 확인
+- **일정** 5일 → 7.5일 (buffer + OAuth quirk 탐색)
+- **Remote Admin UI** OAuth 수동 fallback UX 추가
+- **Refresh token rotation + per-workspace mutex** 명시
+- **Pending state 영속화** (메모리 → `.ao/state/`)
 
 ---
 
@@ -175,52 +184,92 @@ class OAuthManager {
 
 ## 4. 구현 단계
 
-### 6a — 발견 & 등록 (1.5일)
-- [ ] `.well-known/oauth-protected-resource` fetch
-- [ ] `.well-known/oauth-authorization-server` fetch + cache
-- [ ] Dynamic Client Registration 요청
-- [ ] workspaces.json 에 `oauth.issuer`, `clientId`, `metadataCache` 저장
-- [ ] 에러 케이스: resource metadata 없음, auth server 404, registration 거부 등
-- [ ] 테스트: mock auth server fixture로 단위 테스트
+### 6-pre — 사전 검증 (0.5일) ★ 신규
+**Self-review FAIL 8 반영**: Notion MCP 의 실제 응답 형식 확인 없이 착수 불가.
+- [ ] `curl` 로 `POST https://mcp.notion.com/mcp` 직접 요청 → 응답이 JSON 인지 SSE stream 인지 확인
+- [ ] 응답에 `Mcp-Session-Id` 헤더 사용 여부 확인 (Streamable HTTP spec)
+- [ ] WWW-Authenticate 헤더 포맷 확인
+- [ ] `.well-known/oauth-protected-resource` 실제 응답 받아 형식 검증
+- [ ] 결과에 따라 Phase 6a/6c 범위 조정
+- [ ] **Gate**: SSE stream 응답이면 `_rpcHttp` 확장 작업 추가 (반일~1일)
+
+### 6a — 발견 & 등록 (2일, DCR fallback 포함) ★ 확장
+**Self-review FAIL 1, 2, 5, 10 반영**
+- [ ] `.well-known/oauth-protected-resource` fetch (RFC 9728)
+- [ ] `.well-known/oauth-authorization-server` fetch + cache (RFC 8414)
+- [ ] Dynamic Client Registration 요청 (RFC 7591)
+- [ ] **DCR 미지원 fallback**: registration_endpoint 없거나 4xx 응답 시 Admin UI 에 "이 서버는 사전 등록이 필요합니다. Client ID / (Secret) 을 입력하세요" 폼
+- [ ] **Issuer 단위 client 재사용**: `issuerCache`(메모리 + `.ao/state/oauth-issuer-cache.json`)에 `issuer → clientId` 저장, 같은 issuer 의 새 워크스페이스는 재사용
+- [ ] workspaces.json 에 `oauth.issuer`, `clientId`, `clientSecret`(있을 때), `metadataCache` 저장
+- [ ] **chmod 600 강제**: `_save()` 에서 `fs.chmod(CONFIG_PATH, 0o600)` + backup 파일도 동일
+- [ ] **로그 sanitization**: `logError()` 가 기록하는 message 에서 `access_token`, `refresh_token`, `code`, `client_secret` 패턴 정규식으로 ***masked***
+- [ ] **MCP spec 체크리스트**: `Mcp-Session-Id`, `resource=` parameter (RFC 8707), token audience 오류 처리
+- [ ] 에러 케이스: resource metadata 없음, auth server 404, registration 거부, 잘못된 audience
+- [ ] 테스트: mock auth server fixture 로 단위 테스트 (DCR + DCR 미지원 양쪽)
 
 ### 6b — Authorization Code + PKCE flow (1.5일)
+**Self-review FAIL 4 반영**
 - [ ] PKCE code_verifier/challenge 생성 (32 bytes random → base64url)
-- [ ] state 생성 (CSRF 방지)
+- [ ] state 생성 (HMAC 서명된 random → CSRF + 위조 방지)
+- [ ] **Pending state 영속화**: `.ao/state/oauth-pending.json` 에 state + verifier + workspaceId + TTL(10분) 저장 → 서버 재시작/hot reload 에도 생존
 - [ ] `POST /api/workspaces/:id/authorize` → authorization URL 반환
 - [ ] `GET /oauth/callback?code&state` 처리:
-  - state 검증 (pending store에서 lookup)
-  - `POST token_endpoint` 으로 exchange
-  - tokens 저장
+  - state 검증 (pending store 에서 lookup) + TTL 확인
+  - `POST token_endpoint` 으로 exchange (verifier 포함)
+  - tokens 저장 (chmod 포함)
+  - pending state 즉시 삭제 (1회용)
   - 브라우저에 "성공" 페이지 반환 (창 닫기 안내)
 - [ ] Admin UI: "Authorize" 버튼 클릭 → 새 탭/팝업으로 authorization URL 열기
-- [ ] 테스트: end-to-end mock flow
+- [ ] 테스트: end-to-end mock flow + 재시작 생존 테스트
 
-### 6c — Token 사용 & 갱신 (1일)
+### 6c — Token 사용 & 갱신 (1.5일, mutex 포함) ★ 확장
+**Self-review FAIL 6 반영**
 - [ ] `McpClientProvider._connectHttp()` 에서 `oauth.enabled` 이면 access_token 주입
-- [ ] `_rpcHttp` 에서 401 응답 시 `forceRefresh` → 한 번 재시도
+- [ ] `_rpcHttp` 에서 401 응답 시 `forceRefresh` → 한 번 재시도 (exponential backoff 기존 로직과 충돌 안 하게 분리)
 - [ ] `getValidAccessToken()`: 만료 시간(`expiresAt` - 60초 여유) 체크 후 자동 refresh
-- [ ] refresh 실패(예: refresh_token 만료) 시 워크스페이스 상태 `action_needed`로 전환
-- [ ] 테스트: 만료 토큰 시뮬레이션 + 자동 refresh 확인
+- [ ] **Per-workspace refresh mutex**: 동일 워크스페이스의 동시 refresh 요청 직렬화 (Promise 공유)
+- [ ] **Refresh token rotation**: 응답의 `refresh_token` 이 있으면 교체 저장
+- [ ] refresh 실패(예: refresh_token 만료/revoke) 시 워크스페이스 상태 `action_needed`로 전환 + Dashboard 배너
+- [ ] **logError 시 token value 제외** — 에러 메시지만 저장
+- [ ] 테스트: 만료 토큰 시뮬레이션, rotation 확인, 동시 refresh race condition
 
-### 6d — UI / UX (1일)
+### 6d — UI / UX (1.5일) ★ 확장
+**Self-review FAIL 3 반영**
 - [ ] Wizard 에 "HTTP (OAuth)" 트랜스포트 옵션
   - URL 입력 → "다음" 누르면 즉시 discovery + registration
+  - DCR 실패 시 수동 client_id/secret 입력 폼 fallback
   - "Authorize" 버튼 표시, 클릭 시 팝업
-  - 팝업 닫힌 후 callback이 도착하면 자동으로 완료 화면 진입
+  - 팝업 닫힌 후 callback 도착하면 자동으로 완료 화면 진입
+  - **Remote Admin UI 대응**: `localhost` 외 host 에서 접속한 경우 **수동 fallback UI** 표시
+    - "이 URL을 로컬 브라우저에서 열어주세요: `https://auth.notion.com/authorize?...`"
+    - "리다이렉트된 URL 의 `code` 파라미터를 여기에 붙여넣으세요: [   ]"
+    - 수동 완료 버튼 → POST `/api/workspaces/:id/complete-authorize` (code + state)
 - [ ] Detail 화면:
   - OAuth 워크스페이스는 credentials 편집 대신 **"Re-authorize"** 버튼
-  - 토큰 만료 시간 표시 ("access_token 만료까지 45분")
-  - 마지막 refresh 시간
-- [ ] `notion-official-oauth` 템플릿 추가 (URL 프리셋 `https://mcp.notion.com/mcp`)
-- [ ] 에러 UI: "Authorization 실패", "Refresh token 만료 — 재인증 필요"
+  - 토큰 만료 시간 표시 ("access_token 만료까지 45분", "refresh 마지막 18분 전")
+  - 만료 임박 시 Dashboard 의 Needs Attention 영역에 표시
+- [ ] `notion-official-oauth` 템플릿 추가 (URL 프리셋 `https://mcp.notion.com/mcp`, `oauth.enabled = true`)
+- [ ] 에러 UI: "Authorization 실패 (reason)", "Refresh token 만료 — 재인증 필요"
 
-### 6e — 테스트 & 문서 (0.5일)
+### 6e — 테스트 & 문서 (1일) ★ 확장
 - [ ] Mock OAuth server fixture (`tests/fixtures/mock-oauth-server.js`)
-- [ ] 단위 테스트 (discovery, PKCE, state 검증, token refresh)
+  - discovery endpoints + DCR + DCR-미지원 모드 스위치 env
+  - authorize (자동 승인 옵션)
+  - token exchange + refresh + rotation
+  - /mcp Bearer 검증
+- [ ] 단위 테스트:
+  - discovery 파싱, DCR 성공/실패
+  - PKCE/state 생성/검증/TTL
+  - token 교환, refresh, rotation
+  - 401 → refresh → 재시도 flow
+  - 동시 refresh mutex
+  - pending state 영속화/복구
+  - 토큰 마스킹 (API 응답, 로그)
 - [ ] USAGE.md 에 OAuth 등록 섹션 추가
-- [ ] Notion OAuth 연결 시나리오 수동 검증
+- [ ] Notion OAuth 연결 시나리오 수동 검증 (체크리스트)
 
-### 총 예상 시간: **5일**
+### 총 예상 시간: **7.5일** (5일 → 수정)
+**Self-review FAIL 7 반영**: buffer 포함 현실적 추정. happy path 만 "5일", 실제 integration quirks + race 발견 + UI 세부까지 7.5일.
 
 ---
 
@@ -313,8 +362,9 @@ class OAuthManager {
 
 ### 2. State 파라미터
 - CSRF 방지 + workspace 식별
-- 서버 측 store: `Map<state, { workspaceId, pkceVerifier, expiresAt }>`
-- 10분 TTL, 사용 후 즉시 삭제
+- **서버 측 영속 store**: `.ao/state/oauth-pending.json` 에 `{ state → { workspaceId, pkceVerifier, expiresAt } }` 저장
+- state 값은 `HMAC(server_secret, random_bytes)` 서명된 문자열 → 서버 외부에서 위조 불가
+- 10분 TTL, 사용 후 즉시 삭제, 서버 재시작/hot reload 에도 생존
 
 ### 3. Redirect URI 제한
 - **항상 `http://localhost:3100/oauth/callback` 또는 127.0.0.1**
@@ -322,14 +372,17 @@ class OAuthManager {
 - Dynamic registration 시 이 URI로 등록
 
 ### 4. Token 저장
-- `workspaces.json`에 평문 저장 (기존 Notion Internal Token 과 동일 정책)
+- `workspaces.json` 에 평문 저장 (기존 credentials 과 동일 정책)
+- **`_save()` 에서 `fs.chmod(CONFIG_PATH, 0o600)` 강제** (backup 파일 포함)
 - Admin API 응답에서 **마스킹** (`eyJhbGci***XYZ`)
-- 파일시스템 권한에 의존 (`chmod 600` 권장)
-- **Phase 6에서는 암호화 안 함** — 필요 시 별도 Phase 에서 OS keychain 통합
+- **로그 sanitization**: `logError()`/audit log 에 `Authorization: Bearer ...`, `refresh_token=...`, `code=...` 패턴 정규식으로 `***` 치환
+- **Phase 6에서는 암호화 안 함** — OS keychain 통합은 Phase 7 고려
 
 ### 5. Refresh token 관리
-- refresh token은 더 장기 유효 → 유출 시 피해 큼
+- refresh token 은 더 장기 유효 → 유출 시 피해 큼
 - API 응답에서는 `expiresAt`, `lastRefresh` 만 노출, 토큰 값 자체는 마스킹
+- **Refresh token rotation 지원**: token 응답의 `refresh_token` 이 있으면 교체 저장 (OAuth 2.1 권장)
+- **Per-workspace refresh mutex**: 동시 refresh 요청 race condition 방지 (Promise 공유로 직렬화)
 - 서버 재시작해도 refresh 가능해야 함 (파일 저장)
 
 ### 6. 클라이언트 측 보안
@@ -410,19 +463,28 @@ class OAuthManager {
 ## 9. 성공 기준
 
 - ✅ Notion hosted MCP (`mcp.notion.com/mcp`) 에 Member 권한 사용자가 연결 성공
-- ✅ 여러 Notion 워크스페이스(개인 + 회사) 가 Bifrost에 각각 등록되어 단일 엔드포인트로 노출
+- ✅ 여러 Notion 워크스페이스(개인 + 회사) 가 Bifrost 에 각각 등록되어 단일 엔드포인트로 노출
 - ✅ access_token 만료 시 자동 refresh — 사용자 개입 없이 끊김 없음
+- ✅ Refresh token rotation 지원 (새 refresh_token 저장)
+- ✅ 동시 refresh race condition 없음 (mutex)
 - ✅ refresh_token 만료/revoke 시 `action_needed` 상태 + "Re-authorize" 안내
-- ✅ 60+ 기존 테스트 + 10+ Phase 6 단위 테스트 모두 PASS
-- ✅ Admin UI 에서 토큰 평문 노출 없음
+- ✅ DCR 미지원 서버도 수동 client_id 입력으로 등록 가능
+- ✅ 서버 재시작 중에 진행되던 OAuth flow 복구 (pending state 영속)
+- ✅ 같은 issuer 의 여러 워크스페이스가 client 1개 공유
+- ✅ 60+ 기존 테스트 + 15+ Phase 6 단위 테스트 모두 PASS
+- ✅ Admin UI / 로그 / diagnostics 에서 토큰 평문 노출 없음
+- ✅ `workspaces.json` 권한 `0600` 확인
+- ✅ Remote Admin UI 환경에서도 수동 fallback 으로 OAuth 가능
 
 ## 10. 후속 / 확장 (Phase 6.5+)
 
-- **Pre-configured client (DCR 미지원 서버)**: Admin UI 에서 client_id/secret 수동 입력
+- ~~**Pre-configured client (DCR 미지원 서버)**~~ → **Phase 6a 에 포함**
+- ~~**Multi-account OAuth caching**~~ → **Phase 6a 에 포함** (issuer 단위 client 재사용)
+- **Notifications subscription**: MCP `notifications/tools/list_changed` 를 HTTP/SSE stream 으로 구독 (현재는 stdio 만 지원)
 - **Device code flow**: 브라우저 없는 환경 (SSH 서버 등)
-- **Token 암호화 저장**: OS keychain 통합 (macOS Keychain, Linux secret-service)
-- **Multi-account OAuth caching**: 같은 issuer 이면 client 등록 재사용
+- **Token 암호화 저장** (Phase 7): OS keychain 통합 (macOS Keychain, Linux secret-service, Windows Credential Manager)
 - **OAuth for MCP-over-SSE**: Streamable HTTP 외 SSE transport 에서도 같은 flow
+- **Per-user OAuth isolation**: Bifrost 멀티 테넌트 모드 (multi MCP token) 시 각 MCP 클라이언트 사용자별로 OAuth 분리
 
 ---
 
