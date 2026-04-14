@@ -10,11 +10,24 @@
 ```bash
 pwd                                         # /Users/K/Desktop/sub_project/mcp-bifrost
 git status                                  # master, clean (uncommitted 있으면 먼저 정리)
-npm test 2>&1 | tail -5                     # 60 tests passing 확인
+npm test 2>&1 | tail -5                     # 60+ tests passing 확인 (기준선)
 cat docs/PHASE6_PLAN.md | head -60          # 계획 v3 확인
 ```
 
+**Read 툴로 먼저 읽을 파일**:
+1. `docs/PHASE6_EXECUTION_BRIEF.md` (이 파일)
+2. `docs/PHASE6_PLAN.md` §4 전체 (구현 단계)
+3. `CLAUDE.md` (프로젝트 규칙)
+
 실패 시 중단하고 보고.
+
+### Codex 가용성 테스트 (시작 시 1회)
+```bash
+echo "ping" | node /Users/K/.claude/plugins/cache/agent-olympus/agent-olympus/1.0.10/scripts/ask.mjs codex 2>&1 | head -3
+```
+- 응답 오면 Codex 사용 가능. 이후 phase 마다 Codex 리뷰.
+- `demoted: host permission level (suggest) too low` 메시지 오면 → **사용자에게 보고**: "Codex 권한 레벨을 accept 이상으로 올려주세요. 불가 시 self-review 로 대체하고 진행합니다." → 5분 대기 후 진행.
+- auto → gemini fallback 도 체크. 둘 다 불가면 self-review only 모드로 진행.
 
 ---
 
@@ -60,6 +73,7 @@ EOF
 ### 1.5 Commit 규칙
 - Phase 완료 단위 commit. 메시지에 Codex 리뷰 PASS 명시.
 - 예: `feat(phase6a): OAuth discovery + DCR + issuer cache (codex PASS)`
+- Phase 내부에서도 논리 단위로 sub-commit 가능 (예: `oauth-manager 초안`, `sanitize util`) — 단 phase 완료 commit 은 별도로.
 - Co-Authored-By 라인 유지.
 
 ### 1.6 막혔을 때
@@ -116,9 +130,11 @@ EOF
 - [ ] 6c: token 사용 + mutex+timeout + rotation + audit → Codex PASS + commit
 - [ ] 6d: Wizard OAuth + Detail Re-auth + 템플릿 + Windows 배너 → Codex PASS + commit
 - [ ] 6e: mock + 단위 테스트 + integration env + 문서 → Codex PASS + commit
-- [ ] 최종: `npm test` 모두 PASS (60 + 15+ = 75+)
-- [ ] 최종: Codex 에 **전체 통합 리뷰** 요청 → PASS
-- [ ] 최종: 사용자에게 결과 보고 + Notion 수동 E2E 체크리스트 제공
+- [ ] 최종: `npm test` 기준선(60+) 유지 + Phase 6 테스트 증가분 확인
+- [ ] 최종: Codex 에 **전체 통합 리뷰** 요청 → PASS (불가 시 self-review 최종판)
+- [ ] 최종: `docs/PHASE6_SELFREVIEW_LOG.md` 정리 (phase 별 요약만 남기고 세부는 압축)
+- [ ] 최종: Notion 수동 E2E 체크리스트 작성 (아래 §5)
+- [ ] 최종: 사용자에게 결과 보고
 
 ---
 
@@ -143,5 +159,33 @@ EOF
 - `server/workspace-manager.js` — 수정 대상 (oauth 필드, audit)
 - `admin/routes.js` — 수정 대상 (/api/workspaces/:id/authorize, /oauth/callback)
 - `admin/public/app.js` + `templates.js` — Wizard/Detail UI 수정
+
+---
+
+## 6. Notion 수동 E2E 체크리스트 (6e 완료 시 사용자에게 전달)
+
+이 체크리스트를 `docs/NOTION_E2E_CHECKLIST.md` 에 생성. 사용자가 실제 Notion 계정으로 검증하도록.
+
+```
+[ ] 1. Bifrost 기동 (localhost only, 인증 없음)
+       $ npm start
+[ ] 2. 브라우저로 http://localhost:3100/admin/ 접속
+[ ] 3. Wizard → "Notion (공식 MCP)" 템플릿 또는 "HTTP (OAuth)" 수동 선택
+       URL: https://mcp.notion.com/mcp
+[ ] 4. "연결 테스트 & 저장" 클릭 → discovery 성공 메시지 확인
+[ ] 5. "Authorize with Notion" 버튼 → 새 탭 열림 → Notion 로그인 → 페이지 선택 → Accept
+[ ] 6. Admin UI 로 돌아와 "완료" 화면 → Dashboard 진입
+[ ] 7. Dashboard 카드: ● Healthy + "MCP · http" 배지 + namespace 확인
+[ ] 8. Detail 화면: access_token 만료 시간 표시, "Re-authorize" 버튼 보임, client_id 마스킹됨
+[ ] 9. Tools 탭: notion-* 도구 목록 노출 확인 (search, query_database, get_page 등)
+[ ] 10. curl 로 tools/call 호출 → 정상 응답
+       $ curl -X POST http://localhost:3100/mcp -H "Content-Type: application/json" \
+         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"<namespace>__search","arguments":{"query":"test"}}}'
+[ ] 11. 두 번째 Notion 워크스페이스 (다른 계정) 등록 → 네임스페이스 충돌 없이 동작
+[ ] 12. 1시간 대기 (또는 access_token 강제 만료) → 재호출 → 자동 refresh 성공
+[ ] 13. Admin UI > Diagnostics: oauth.refresh_success audit 이벤트 기록 확인
+[ ] 14. `cat config/workspaces.json` → 토큰 평문이지만 권한 0600 확인 (Unix)
+[ ] 15. API 응답 어디에도 access_token 전체 문자열 노출 없음 확인
+```
 
 끝. 이 브리프만으로 실행 가능해야 함.
