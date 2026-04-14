@@ -71,10 +71,7 @@ function isLocalhost(req) {
 function authenticateMcp(req, res, url) {
   const mcpToken = wm.getMcpToken();
   if (!mcpToken) {
-    if (!isLocalhost(req)) {
-      jsonResponse(res, 403, { jsonrpc: '2.0', error: { code: -32600, message: 'MCP token not configured. Only localhost access allowed.' } });
-      return false;
-    }
+    // Open mode — no token configured, allow from anywhere
     return true;
   }
   const token = parseBearerToken(req) || parseBearerFromQuery(url);
@@ -86,11 +83,6 @@ function authenticateMcp(req, res, url) {
 function authenticateMcpSse(req, res, url) {
   const mcpToken = wm.getMcpToken();
   if (!mcpToken) {
-    if (!isLocalhost(req)) {
-      res.writeHead(403);
-      res.end('MCP token not configured. Only localhost access allowed.');
-      return false;
-    }
     return true;
   }
   const token = parseBearerToken(req) || parseBearerFromQuery(url);
