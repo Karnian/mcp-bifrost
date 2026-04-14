@@ -191,12 +191,25 @@ const server = createServer(async (req, res) => {
 });
 
 const port = wm.getServerConfig().port || 3100;
-server.listen(port, () => {
-  console.log(`[Bifrost] Server running on http://localhost:${port}`);
-  console.log(`[Bifrost] MCP endpoint: POST http://localhost:${port}/mcp`);
-  console.log(`[Bifrost] SSE endpoint: GET http://localhost:${port}/sse`);
-  console.log(`[Bifrost] Admin UI: http://localhost:${port}/admin/`);
+const host = process.env.BIFROST_HOST || wm.getServerConfig().host || '127.0.0.1';
+server.listen(port, host, () => {
+  const exposed = host === '0.0.0.0' || host === '::';
+  console.log(`[Bifrost] Server running on http://${host}:${port}`);
+  console.log(`[Bifrost] MCP endpoint: POST http://${host}:${port}/mcp`);
+  console.log(`[Bifrost] SSE endpoint: GET http://${host}:${port}/sse`);
+  console.log(`[Bifrost] Admin UI: http://${host}:${port}/admin/`);
   console.log(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
+  if (exposed) {
+    console.warn('');
+    console.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
+    if (!wm.getMcpToken()) {
+      console.warn('[Bifrost] ⚠️  BIFROST_MCP_TOKEN not set — MCP requests from non-localhost will be REJECTED.');
+    }
+    if (!wm.getAdminToken()) {
+      console.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
+    }
+    console.warn('');
+  }
 });
 
 export { wm, tr, mcp, sse, server };
