@@ -99,7 +99,7 @@ describe('ToolRegistry', () => {
       credentials: { token: 'ntn_test' },
     });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools();
+    const tools = await tr.getTools();
     const names = tools.map(t => t.name);
     assert.ok(names.includes('notion_personal__search_pages'));
     assert.ok(names.includes('notion_personal__read_page'));
@@ -113,31 +113,31 @@ describe('ToolRegistry', () => {
     const wm = new WorkspaceManager();
     await wm.addWorkspace({ provider: 'notion', displayName: 'Personal', credentials: { token: 'x' } });
     const tr = new ToolRegistry(wm);
-    const resolved = tr.resolve('notion_personal__search_pages');
+    const resolved = await tr.resolve('notion_personal__search_pages');
     assert.equal(resolved.type, 'workspace');
     assert.equal(resolved.toolName, 'search_pages');
     assert.equal(resolved.provider, 'notion');
     assert.equal(resolved.namespace, 'personal');
   });
 
-  it('should resolve meta tools', () => {
+  it('should resolve meta tools', async () => {
     const wm = new WorkspaceManager();
     const tr = new ToolRegistry(wm);
-    const resolved = tr.resolve('bifrost__list_workspaces');
+    const resolved = await tr.resolve('bifrost__list_workspaces');
     assert.equal(resolved.type, 'meta');
   });
 
-  it('should return null for unknown tools', () => {
+  it('should return null for unknown tools', async () => {
     const wm = new WorkspaceManager();
     const tr = new ToolRegistry(wm);
-    assert.equal(tr.resolve('unknown__tool'), null);
+    assert.equal(await tr.resolve('unknown__tool'), null);
   });
 
   it('should enrich tool descriptions with displayName', async () => {
     const wm = new WorkspaceManager();
     await wm.addWorkspace({ provider: 'notion', displayName: 'My Notion', credentials: { token: 'x' } });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools();
+    const tools = await tr.getTools();
     const searchTool = tools.find(t => t.name === 'notion_my-notion__search_pages');
     assert.ok(searchTool.description.includes('[My Notion]'));
     assert.ok(searchTool.description.includes('Notion 워크스페이스'));
@@ -148,7 +148,7 @@ describe('ToolRegistry', () => {
     const wm = new WorkspaceManager();
     await wm.addWorkspace({ provider: 'notion', displayName: 'Disabled', credentials: { token: 'x' }, enabled: false });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools();
+    const tools = await tr.getTools();
     const wsTools = tools.filter(t => t._workspace !== null);
     assert.equal(wsTools.length, 0);
   });
@@ -169,7 +169,7 @@ describe('ToolRegistry', () => {
       ],
     });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools().filter(t => t._workspace === ws.id);
+    const tools = (await tr.getTools()).filter(t => t._workspace === ws.id);
     const names = tools.map(t => t._originalName);
     assert.ok(names.includes('search_pages'));
     assert.ok(!names.includes('read_page')); // unavailable → excluded
@@ -185,7 +185,7 @@ describe('ToolRegistry', () => {
       toolFilter: { mode: 'include', enabled: ['search_pages'] },
     });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools().filter(t => t._workspace !== null);
+    const tools = (await tr.getTools()).filter(t => t._workspace !== null);
     assert.equal(tools.length, 1);
     assert.ok(tools[0].name.includes('search_pages'));
   });

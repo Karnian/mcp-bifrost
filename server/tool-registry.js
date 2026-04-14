@@ -18,12 +18,25 @@ export class ToolRegistry {
 
   /**
    * Build the full MCP tool list from all enabled workspaces.
-   * Applies toolFilter and returns namespaced tools with enriched descriptions.
+   * For mcp-client providers with empty cache, awaits one refreshTools()
+   * so newly-registered workspaces are usable on first call.
    */
-  getTools() {
+  async getTools() {
     const tools = [];
     const reverseMap = new Map();
     const workspaces = this.wm.getEnabledWorkspaces();
+
+    // Concurrently warm up any cold mcp-client caches
+    await Promise.all(workspaces.map(async (ws) => {
+      const provider = this.wm.getProvider(ws.id);
+      if (!provider) return;
+      if (typeof provider.refreshTools === 'function') {
+        const cached = provider.getTools();
+        if (!cached || cached.length === 0) {
+          try { await provider.refreshTools(); } catch { /* keep going */ }
+        }
+      }
+    }));
 
     for (const ws of workspaces) {
       const provider = this.wm.getProvider(ws.id);
@@ -72,15 +85,19 @@ export class ToolRegistry {
   /**
    * Resolve a namespaced tool call to workspace + original tool name.
    * Uses reverse lookup table (populated by getTools) rather than string parsing.
+   * Refreshes tool catalog if the name isn't found, in case the workspace
+   * was just registered or its upstream tool list changed.
    */
-  resolve(mcpToolName) {
-    // Populate cache lazily if empty
-    if (this._reverseMap.size === 0) this.getTools();
-
+  async resolve(mcpToolName) {
     if (mcpToolName.startsWith('bifrost__')) {
       return { type: 'meta', toolName: mcpToolName };
     }
-    const entry = this._reverseMap.get(mcpToolName);
+    let entry = this._reverseMap.get(mcpToolName);
+    if (!entry) {
+      // Cache miss — rebuild map (async, may warm up cold mcp-client caches)
+      await this.getTools();
+      entry = this._reverseMap.get(mcpToolName);
+    }
     if (!entry || !entry.workspaceId) return null;
     return {
       type: 'workspace',
@@ -144,7 +161,7 @@ export class ToolRegistry {
     ];
   }
 
-  getToolCount() {
-    return this.getTools().length;
+  async getToolCount() {
+    return (await this.getTools()).length;
   }
 }

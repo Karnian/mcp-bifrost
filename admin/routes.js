@@ -140,7 +140,7 @@ export function createAdminRoutes(wm, tr, sse) {
             workspaces: workspaces.length,
             enabledWorkspaces: workspaces.filter(w => w.enabled).length,
             toolsVersion: tr.toolsVersion,
-            totalTools: tr.getToolCount(),
+            totalTools: await tr.getToolCount(),
             activeSessions: sse?.getSessionCount() || 0,
           },
         });
@@ -155,7 +155,7 @@ export function createAdminRoutes(wm, tr, sse) {
 
       // GET /api/tools — all exposed tools across workspaces
       if (path === '/api/tools' && method === 'GET') {
-        const tools = tr.getTools().map(t => ({
+        const tools = (await tr.getTools()).map(t => ({
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,

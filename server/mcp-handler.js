@@ -19,7 +19,7 @@ export class McpHandler {
           result = this._initialize(params);
           break;
         case 'tools/list':
-          result = this._toolsList(profile);
+          result = await this._toolsList(profile);
           break;
         case 'tools/call':
           result = await this._toolsCall(params);
@@ -56,8 +56,8 @@ export class McpHandler {
     };
   }
 
-  _toolsList(profile) {
-    let tools = this.tr.getTools();
+  async _toolsList(profile) {
+    let tools = await this.tr.getTools();
 
     // Profile filtering: 'read-only' only shows read-only tools
     if (profile === 'read-only') {
@@ -89,7 +89,7 @@ export class McpHandler {
       });
     }
 
-    const resolved = this.tr.resolve(name);
+    const resolved = await this.tr.resolve(name);
     if (!resolved) {
       return this._toolError(`이 도구는 현재 비활성화되어 있습니다: ${name}`, {
         category: 'config_conflict',
@@ -100,7 +100,7 @@ export class McpHandler {
 
     // Meta tools
     if (resolved.type === 'meta') {
-      return this._handleMetaTool(resolved.toolName, args);
+      return await this._handleMetaTool(resolved.toolName, args);
     }
 
     // Workspace tools
@@ -151,7 +151,7 @@ export class McpHandler {
     );
   }
 
-  _handleMetaTool(toolName, args) {
+  async _handleMetaTool(toolName, args) {
     switch (toolName) {
       case 'bifrost__list_workspaces': {
         const workspaces = this.wm.getWorkspaces().map(ws => ({
@@ -174,7 +174,8 @@ export class McpHandler {
             retryable: false,
           });
         }
-        const tools = this.tr.getTools()
+        const allTools = await this.tr.getTools();
+        const tools = allTools
           .filter(t => t._workspace === ws.id)
           .map(t => ({ name: t.name, description: t.description }));
         return {
@@ -212,7 +213,8 @@ export class McpHandler {
     if (!ws) {
       return { contents: [] };
     }
-    const tools = this.tr.getTools()
+    const allTools = await this.tr.getTools();
+    const tools = allTools
       .filter(t => t._workspace === ws.id)
       .map(t => ({ name: t._originalName, usable: true }));
 

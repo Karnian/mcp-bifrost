@@ -65,7 +65,7 @@ describe('Slack tools via ToolRegistry', () => {
       credentials: { botToken: 'xoxb-test', teamId: 'T001' },
     });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools();
+    const tools = await tr.getTools();
     const names = tools.map(t => t.name);
     assert.ok(names.includes('slack_work-slack__search_messages'));
     assert.ok(names.includes('slack_work-slack__read_channel'));

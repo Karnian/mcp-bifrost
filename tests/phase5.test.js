@@ -200,12 +200,12 @@ describe('ToolRegistry reverse lookup', () => {
       ],
     });
     const tr = new ToolRegistry(wm);
-    const tools = tr.getTools();
+    const tools = await tr.getTools();
     const weirdTool = tools.find(t => t._originalName === 'some__weird__tool');
     assert.ok(weirdTool, 'weird tool should be registered');
 
     // Resolve via reverse map (not string parsing)
-    const resolved = tr.resolve(weirdTool.name);
+    const resolved = await tr.resolve(weirdTool.name);
     assert.equal(resolved.toolName, 'some__weird__tool');
     assert.equal(resolved.workspaceId, ws.id);
   });
