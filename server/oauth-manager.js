@@ -472,6 +472,7 @@ export class OAuthManager {
       ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
       : null;
 
+    ws.oauthActionNeeded = false;
     ws.oauth = {
       ...(ws.oauth || {}),
       enabled: true,
@@ -564,6 +565,7 @@ export class OAuthManager {
         scope: tokens.scope || prev.scope || null,
         lastRefreshAt: new Date().toISOString(),
       };
+      ws.oauthActionNeeded = false;
       if (this.wm?._save) this.wm._save().catch(() => {});
       if (this.wm?.logAudit) {
         this.wm.logAudit('oauth.refresh_success', workspaceId, JSON.stringify({
@@ -590,9 +592,12 @@ export class OAuthManager {
       if (this.wm?.logAudit) {
         this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(err.message));
       }
-      // Mark workspace as action_needed so Dashboard surfaces it
+      // Only mark action_needed when we actually attempted refresh against the server.
+      // If we never had a refresh_token (never authorized), that's a different signal.
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
-      if (ws) ws.oauthActionNeeded = true;
+      if (ws && err.code !== 'NO_REFRESH_TOKEN' && err.code !== 'TOKEN_ENDPOINT_UNKNOWN') {
+        ws.oauthActionNeeded = true;
+      }
       throw err;
     } finally {
       this._refreshMutex.delete(workspaceId);

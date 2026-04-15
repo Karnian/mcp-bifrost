@@ -79,7 +79,9 @@ export class WorkspaceManager {
 
   async load() {
     if (!existsSync(CONFIG_PATH)) {
+      this._loaded = true;
       await this._save();
+      this._startFileWatcher();
       return;
     }
     try {

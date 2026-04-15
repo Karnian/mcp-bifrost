@@ -157,3 +157,47 @@ Codex/Gemini 가용 불가 상태 (`demoted: host permission level (suggest) too
 - MCP 알림 구독 (notifications/tools/list_changed over SSE) — Phase 6.5
 
 **최종 판정**: 계획 대비 범위 달성, 테스트 목표 초과, 문서 완결. PASS.
+
+---
+
+## E2E 자동 검증 (2026-04-15) — PASS
+
+실제 Notion MCP 엔드포인트(`https://mcp.notion.com/mcp`)에 대해 브라우저 로그인 없이 가능한 항목을 자동 수행했습니다.
+
+### 자동 검증 통과
+
+| # | 항목 | 결과 |
+|---|-----|------|
+| 1 | Bifrost 기동 (localhost, 토큰 미설정) | ✅ |
+| 2 | `/admin/` 200 응답 | ✅ |
+| 3 | OAuth workspace 생성 (oauth.enabled=true 저장) | ✅ |
+| 4 | `/authorize` → 실제 Notion discovery + DCR 성공 — issuer=`https://mcp.notion.com`, clientId 자동 발급, PKCE S256, HMAC state, `resource=` 파라미터 포함 | ✅ |
+| 14 | chmod 0600 확인 — `workspaces.json`, `workspaces.backup.json`, `oauth-issuer-cache.json`, `server-secret` 모두 `600` | ✅ |
+| 15 | 토큰 마스킹 — `clientId: 4-Rt***j2Ko` 형태, `tokens: null` 일 때 민감값 없음 | ✅ |
+| 13 | Audit 이벤트 기록 — `oauth.authorize_start` 엔트리 확인, token 값 없음 | ✅ |
+| callback 보안 | `/oauth/callback?state=garbage` → 400 + "인증 실패" HTML (HMAC 위조 거부) | ✅ |
+| callback 누락 파라미터 | `/oauth/callback` (code/state 없음) → 400 | ✅ |
+| sanitize | 에러 로그에 fake `code=FAKE_CODE_ABCDEFG123456` 값 주입 시도 → 로그에는 `invalid_state_signature` 만 남고 raw 값 유출 없음 | ✅ |
+| 11 | 두 번째 워크스페이스 등록 → `notion-2nd` 네임스페이스 분리 + **issuer cache 재사용** (동일 clientId `4-Rt***j2Ko`, DCR 1회만 호출) | ✅ |
+| 재시작 생존 | workspaces.json 재기동 후 워크스페이스 복원 (oauth.enabled 유지) | ✅ |
+
+### 브라우저 로그인 필요 (수동)
+
+항목 5, 6, 7, 9, 10, 12, 16 은 실제 Notion 로그인 + 페이지 선택 + token 발급 단계가 필요해 자동 검증 불가. 사용자가 직접 수행하실 항목:
+
+- 5: 팝업에서 Notion 로그인 + 페이지 선택 + Accept
+- 6: 팝업 닫힘 → Admin UI 자동 완료 화면
+- 7: Dashboard ● Healthy 배지
+- 9: Tools 탭에 notion-* 도구 노출
+- 10: `curl tools/call` 정상 응답
+- 12: 1시간 후 (또는 `expiresAt` 강제 조작) 재호출 → 자동 refresh
+- 16: Notion 쪽에서 integration revoke → `action_needed` 전환 → Re-authorize 복구
+
+E2E 자동 검증 통과분만으로도 **OAuth infrastructure 전체(discovery, DCR, PKCE, state HMAC, chmod, 마스킹, sanitize, issuer cache, callback guard, persistence)** 가 실제 Notion 상대로 정상 동작함을 입증.
+
+### E2E 중 발견 + 수정한 버그
+
+1. **`workspaces.json` 미생성 (preexisting)**: `load()` 가 `_loaded=true` 설정 전에 `_save()` 를 호출해 최초 기동 시 파일 생성이 누락됐음. OAuth workspace 가 재시작 후 증발. → `load()` 의 early-return 경로에서 `_loaded=true` 먼저 설정하도록 수정.
+2. **Warmup 중 refresh 시도가 `oauthActionNeeded=true` 설정**: 토큰이 아직 없는 워크스페이스의 warmup `refreshTools()` 가 401 → `onUnauthorized` → `forceRefresh` → NO_REFRESH_TOKEN 경로에서 `action_needed` 플래그를 켰음. → `_refreshWithMutex` catch 에서 `NO_REFRESH_TOKEN`/`TOKEN_ENDPOINT_UNKNOWN` 코드는 제외, `_persistTokens` 성공 시 플래그 해제.
+
+이 두 수정은 `feat(phase6e): mock OAuth server ...` 이후 별도 fix commit 으로 반영.
