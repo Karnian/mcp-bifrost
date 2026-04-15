@@ -32,6 +32,7 @@
         <div class="topbar-right">
           <span id="tool-count-badge" class="badge"></span>
           <button id="btn-nav-tools" class="btn btn-sm btn-outline">Tools</button>
+          <button id="btn-nav-tokens" class="btn btn-sm btn-outline">Tokens</button>
           <button id="btn-nav-connect" class="btn btn-sm btn-outline">Connect</button>
           <button id="btn-test-all" class="btn btn-sm">Test All</button>
           <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
@@ -217,6 +218,44 @@
             </tr>
           </thead>
           <tbody id="tools-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- MCP Tokens (Phase 7b) -->
+    <div id="tokens-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-tokens" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>MCP Tokens</h2>
+        </div>
+        <div class="topbar-right">
+          <button id="btn-issue-token" class="btn btn-primary btn-sm">+ Issue Token</button>
+        </div>
+      </nav>
+      <div class="tools-overview-content">
+        <div id="tokens-legacy-banner" class="security-banner hidden" style="margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#1e3a8a;color:#dbeafe;border:1px solid #3b82f6;font-size:13px">
+          Legacy <code>BIFROST_MCP_TOKEN</code> (단수) 이 활성 상태입니다. 새 토큰을 발급해 이관하는 것을 권장합니다.
+        </div>
+        <div id="tokens-plaintext-banner" class="hidden" style="margin:0 0 12px;padding:12px 14px;border-radius:8px;background:#064e3b;color:#a7f3d0;border:1px solid #10b981;font-size:13px">
+          <div style="font-weight:600;margin-bottom:6px">⚠ 새 토큰이 발급되었습니다. 이후로는 해시만 저장되니 지금 복사하세요.</div>
+          <div style="display:flex;gap:8px;align-items:center"><code id="tokens-plaintext-value" style="flex:1;user-select:all;background:#022c22;padding:6px 8px;border-radius:4px;word-break:break-all"></code><button id="tokens-plaintext-copy" class="btn btn-sm btn-outline">Copy</button><button id="tokens-plaintext-dismiss" class="btn btn-sm btn-outline">Dismiss</button></div>
+        </div>
+        <table class="tools-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Description</th>
+              <th>Allowed Workspaces</th>
+              <th>Allowed Profiles</th>
+              <th>Source</th>
+              <th>Hashed</th>
+              <th>Created</th>
+              <th>Last Used</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tokens-tbody"></tbody>
         </table>
       </div>
     </div>

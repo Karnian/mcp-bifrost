@@ -1,7 +1,13 @@
 /**
  * MCP Protocol Handler — handles JSON-RPC requests for MCP protocol.
- * Implements: initialize, tools/list, tools/call, resources/list, resources/read
+ * Implements: initialize, tools/list, tools/call, resources/list, resources/read, ping
+ *
+ * Phase 7b: identity + profile propagation + ACL enforcement (assertAllowed).
+ * Every workspace-scoped operation re-checks identity.allowedWorkspaces to
+ * prevent tools/list bypass via name guessing.
  */
+import { identityAllowsWorkspace, identityAllowsProfile, matchPattern } from './mcp-token-manager.js';
+
 export class McpHandler {
   constructor(workspaceManager, toolRegistry) {
     this.wm = workspaceManager;
@@ -10,7 +16,8 @@ export class McpHandler {
 
   async handle(request, options = {}) {
     const { method, params, id } = request;
-    const { profile } = options;
+    const { identity = null, profile = null } = options;
+    const profileObj = this._resolveProfile(profile);
 
     try {
       let result;
@@ -19,17 +26,22 @@ export class McpHandler {
           result = this._initialize(params);
           break;
         case 'tools/list':
-          result = await this._toolsList(profile);
+          result = await this._toolsList(identity, profileObj);
           break;
         case 'tools/call':
-          result = await this._toolsCall(params);
+          result = await this._toolsCall(params, identity, profileObj);
           break;
         case 'resources/list':
-          result = this._resourcesList();
+          result = this._resourcesList(identity);
           break;
         case 'resources/read':
-          result = await this._resourcesRead(params);
+          result = this._resourcesRead(params, identity);
           break;
+        case 'prompts/list':
+          result = { prompts: [] };
+          break;
+        case 'prompts/get':
+          return this._errorResponse(id, -32601, 'prompts/get not implemented');
         case 'ping':
           result = {};
           break;
@@ -56,13 +68,75 @@ export class McpHandler {
     };
   }
 
-  async _toolsList(profile) {
-    let tools = await this.tr.getTools();
+  /**
+   * Resolve profile name → profile object (config/workspaces.json > server.profiles).
+   * Legacy value "read-only" falls back to a built-in filter if no explicit config.
+   */
+  _resolveProfile(profileName) {
+    if (!profileName) return null;
+    const profiles = this.wm.config?.server?.profiles || {};
+    const explicit = profiles[profileName];
+    if (explicit) return { name: profileName, ...explicit };
+    // Built-in: read-only (Phase 6 legacy behavior)
+    if (profileName === 'read-only') {
+      return { name: 'read-only', builtIn: true };
+    }
+    return { name: profileName, unknown: true };
+  }
 
-    // Profile filtering: 'read-only' only shows read-only tools
-    if (profile === 'read-only') {
+  /**
+   * Central ACL gate. Throws a JSON-RPC-ish error with code=-32600 when denied.
+   * Callers should either let the error propagate (handle wraps it) or map to
+   * a tool-error payload for tools/call.
+   */
+  _assertAllowed(identity, profileObj, { workspaceId = null, toolName = null } = {}) {
+    // No identity: only permitted when MCP auth is disabled (server/index.js
+    // short-circuits authenticateMcp when no token configured; in that mode
+    // it calls handle() without identity, so we treat null identity as
+    // "open mode" → allow).
+    if (identity) {
+      if (workspaceId && !identityAllowsWorkspace(identity, workspaceId)) {
+        const err = new Error(`identity '${identity.id}' not allowed for workspace '${workspaceId}'`);
+        err.code = -32600;
+        throw err;
+      }
+      if (profileObj?.name && !identityAllowsProfile(identity, profileObj.name)) {
+        const err = new Error(`identity '${identity.id}' not allowed for profile '${profileObj.name}'`);
+        err.code = -32600;
+        throw err;
+      }
+    }
+    if (profileObj) {
+      if (profileObj.unknown) {
+        const err = new Error(`unknown profile: ${profileObj.name}`);
+        err.code = -32602;
+        throw err;
+      }
+      if (workspaceId && Array.isArray(profileObj.workspacesInclude)) {
+        const ok = profileObj.workspacesInclude.some(p => matchPattern(p, workspaceId));
+        if (!ok) {
+          const err = new Error(`profile '${profileObj.name}' does not include workspace '${workspaceId}'`);
+          err.code = -32600;
+          throw err;
+        }
+      }
+      if (toolName && Array.isArray(profileObj.toolsInclude)) {
+        const ok = profileObj.toolsInclude.some(p => matchPattern(p, toolName));
+        if (!ok) {
+          const err = new Error(`profile '${profileObj.name}' does not include tool '${toolName}'`);
+          err.code = -32600;
+          throw err;
+        }
+      }
+    }
+  }
+
+  async _toolsList(identity, profileObj) {
+    let tools = await this.tr.getTools({ identity, profile: profileObj });
+
+    // Legacy built-in "read-only" filter — only applied when profile has no toolsInclude
+    if (profileObj?.builtIn && profileObj.name === 'read-only') {
       tools = tools.filter(t => {
-        // Meta tools are always shown
         if (!t._workspace) return true;
         const provider = this.wm.getProvider(t._workspace);
         if (!provider) return false;
@@ -80,7 +154,7 @@ export class McpHandler {
     };
   }
 
-  async _toolsCall(params) {
+  async _toolsCall(params, identity, profileObj) {
     const { name, arguments: args = {} } = params || {};
     if (!name) {
       return this._toolError('Tool name is required', {
@@ -98,9 +172,24 @@ export class McpHandler {
       });
     }
 
-    // Meta tools
+    // Meta tools — always allowed (no workspace context)
     if (resolved.type === 'meta') {
-      return await this._handleMetaTool(resolved.toolName, args);
+      return await this._handleMetaTool(resolved.toolName, args, identity, profileObj);
+    }
+
+    // 2nd-line ACL check (defense in depth vs tools/list bypass)
+    try {
+      this._assertAllowed(identity, profileObj, {
+        workspaceId: resolved.workspaceId,
+        toolName: name,
+      });
+    } catch (err) {
+      return this._toolError(err.message, {
+        category: 'unauthorized',
+        workspace: resolved.workspaceId,
+        tool: name,
+        retryable: false,
+      });
     }
 
     // Workspace tools
@@ -151,10 +240,10 @@ export class McpHandler {
     );
   }
 
-  async _handleMetaTool(toolName, args) {
+  async _handleMetaTool(toolName, args, identity, profileObj) {
     switch (toolName) {
       case 'bifrost__list_workspaces': {
-        const workspaces = this.wm.getWorkspaces().map(ws => ({
+        let workspaces = this.wm.getWorkspaces().map(ws => ({
           id: ws.id,
           provider: ws.provider,
           displayName: ws.displayName,
@@ -162,6 +251,13 @@ export class McpHandler {
           status: ws.status,
           enabled: ws.enabled,
         }));
+        // Respect identity/profile ACL — only list workspaces user can access
+        if (identity) {
+          workspaces = workspaces.filter(ws => identityAllowsWorkspace(identity, ws.id));
+        }
+        if (profileObj && Array.isArray(profileObj.workspacesInclude)) {
+          workspaces = workspaces.filter(ws => profileObj.workspacesInclude.some(p => matchPattern(p, ws.id)));
+        }
         return {
           content: [{ type: 'text', text: JSON.stringify(workspaces, null, 2) }],
         };
@@ -174,7 +270,12 @@ export class McpHandler {
             retryable: false,
           });
         }
-        const allTools = await this.tr.getTools();
+        try {
+          this._assertAllowed(identity, profileObj, { workspaceId: ws.id });
+        } catch (err) {
+          return this._toolError(err.message, { category: 'unauthorized', workspace: ws.id, retryable: false });
+        }
+        const allTools = await this.tr.getTools({ identity, profile: profileObj });
         const tools = allTools
           .filter(t => t._workspace === ws.id)
           .map(t => ({ name: t.name, description: t.description }));
@@ -193,8 +294,12 @@ export class McpHandler {
     }
   }
 
-  _resourcesList() {
-    const resources = this.wm.getWorkspaces().map(ws => ({
+  _resourcesList(identity) {
+    let workspaces = this.wm.getWorkspaces();
+    if (identity) {
+      workspaces = workspaces.filter(ws => identityAllowsWorkspace(identity, ws.id));
+    }
+    const resources = workspaces.map(ws => ({
       uri: `bifrost://workspaces/${ws.id}`,
       name: ws.displayName,
       description: `${ws.provider} 워크스페이스 (namespace: ${ws.namespace}, 상태: ${ws.status})`,
@@ -203,7 +308,7 @@ export class McpHandler {
     return { resources };
   }
 
-  async _resourcesRead(params) {
+  async _resourcesRead(params, identity) {
     const { uri } = params || {};
     const match = uri?.match(/^bifrost:\/\/workspaces\/(.+)$/);
     if (!match) {
@@ -212,6 +317,11 @@ export class McpHandler {
     const ws = this.wm.getWorkspace(match[1]);
     if (!ws) {
       return { contents: [] };
+    }
+    if (identity && !identityAllowsWorkspace(identity, ws.id)) {
+      const err = new Error(`identity '${identity.id}' not allowed for workspace '${ws.id}'`);
+      err.code = -32600;
+      throw err;
     }
     const allTools = await this.tr.getTools();
     const tools = allTools

@@ -16,7 +16,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-export function createAdminRoutes(wm, tr, sse, oauth) {
+export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
   return async (req, res, url) => {
     const path = url.pathname;
     const method = req.method;
@@ -295,11 +295,68 @@ export function createAdminRoutes(wm, tr, sse, oauth) {
         return;
       }
 
+      // --- Phase 7b: MCP token management ---
+      if (path === '/api/tokens' && method === 'GET') {
+        if (!tokenManager) return sendJson(res, 500, { ok: false, error: { code: 'TOKEN_MANAGER_UNAVAILABLE' } });
+        sendJson(res, 200, { ok: true, data: tokenManager.list() });
+        return;
+      }
+      if (path === '/api/tokens' && method === 'POST') {
+        if (!tokenManager) return sendJson(res, 500, { ok: false, error: { code: 'TOKEN_MANAGER_UNAVAILABLE' } });
+        const body = await readBody(req);
+        try {
+          const { id, plaintext, entry } = await tokenManager.issue({
+            id: body.id,
+            description: body.description,
+            allowedWorkspaces: body.allowedWorkspaces,
+            allowedProfiles: body.allowedProfiles,
+          });
+          sendJson(res, 201, { ok: true, data: { id, plaintext, entry, warning: 'plaintext 는 지금 한 번만 보여집니다. 이후 복구 불가.' } });
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: { code: 'TOKEN_ISSUE_FAILED', message: err.message } });
+        }
+        return;
+      }
+      const tokenMatch = path.match(/^\/api\/tokens\/([^/]+)$/);
+      if (tokenMatch && method === 'DELETE') {
+        if (!tokenManager) return sendJson(res, 500, { ok: false, error: { code: 'TOKEN_MANAGER_UNAVAILABLE' } });
+        const id = decodeURIComponent(tokenMatch[1]);
+        try {
+          await tokenManager.revoke(id);
+          sendJson(res, 200, { ok: true });
+        } catch (err) {
+          sendJson(res, 404, { ok: false, error: { code: 'TOKEN_NOT_FOUND', message: err.message } });
+        }
+        return;
+      }
+      const rotateMatch = path.match(/^\/api\/tokens\/([^/]+)\/rotate$/);
+      if (rotateMatch && method === 'POST') {
+        if (!tokenManager) return sendJson(res, 500, { ok: false, error: { code: 'TOKEN_MANAGER_UNAVAILABLE' } });
+        const id = decodeURIComponent(rotateMatch[1]);
+        try {
+          const { plaintext } = await tokenManager.rotate(id);
+          sendJson(res, 200, { ok: true, data: { id, plaintext, warning: 'plaintext 는 지금 한 번만 보여집니다.' } });
+        } catch (err) {
+          sendJson(res, 404, { ok: false, error: { code: 'TOKEN_NOT_FOUND', message: err.message } });
+        }
+        return;
+      }
+
+      // GET /api/profiles — list configured profiles (Phase 7a groundwork)
+      if (path === '/api/profiles' && method === 'GET') {
+        const profiles = wm.config?.server?.profiles || {};
+        sendJson(res, 200, { ok: true, data: profiles });
+        return;
+      }
+
       // GET /api/connect-info — server info for connect guide
       if (path === '/api/connect-info' && method === 'GET') {
         const serverConfig = wm.getServerConfig();
         const tunnelConfig = wm.config.tunnel || {};
-        const mcpTokenSet = !!wm.getMcpToken();
+        // Phase 7b: reflect multi-token + persisted tokens, not only the singular env.
+        const mcpTokenSet = tokenManager ? tokenManager.isConfigured() : !!wm.getMcpToken();
+        const hasLegacyToken = tokenManager ? tokenManager.hasLegacyToken() : !!wm.getMcpToken();
+        const persistedTokenCount = tokenManager ? (tokenManager.list().filter(t => t.source === 'persisted').length) : 0;
         sendJson(res, 200, {
           ok: true,
           data: {
@@ -309,6 +366,8 @@ export function createAdminRoutes(wm, tr, sse, oauth) {
             tunnelEnabled: tunnelConfig.enabled || false,
             tunnelUrl: tunnelConfig.fixedDomain || null,
             mcpTokenConfigured: mcpTokenSet,
+            hasLegacyToken,
+            persistedTokenCount,
           },
         });
         return;

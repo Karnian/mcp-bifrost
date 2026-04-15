@@ -705,6 +705,105 @@ $('#tools-search')?.addEventListener('input', (e) => {
   });
 });
 
+// --- Tokens (Phase 7b) ---
+$('#btn-nav-tokens').addEventListener('click', async () => {
+  showScreen('tokens');
+  await loadTokensView();
+});
+$('#btn-back-from-tokens').addEventListener('click', async () => await enterDashboard());
+
+async function loadTokensView() {
+  try {
+    const res = await api('GET', '/api/tokens');
+    const tokens = res.data || [];
+    const tbody = $('#tokens-tbody');
+    const hasLegacy = tokens.some(t => t.source === 'env-legacy');
+    $('#tokens-legacy-banner').classList.toggle('hidden', !hasLegacy);
+    tbody.innerHTML = tokens.map(t => {
+      const isPersisted = t.source === 'persisted';
+      return `<tr>
+        <td><code>${esc(t.id)}</code></td>
+        <td>${esc(t.description || '')}</td>
+        <td>${esc((t.allowedWorkspaces || []).join(', '))}</td>
+        <td>${esc((t.allowedProfiles || []).join(', '))}</td>
+        <td>${esc(t.source)}</td>
+        <td>${t.hashed ? '✓ scrypt' : '<span style="color:#f59e0b">⚠ plaintext</span>'}</td>
+        <td>${esc(t.createdAt || '-')}</td>
+        <td>${esc(t.lastUsedAt || '-')}</td>
+        <td>
+          ${isPersisted ? `
+            <button class="btn btn-sm btn-outline" data-rotate="${esc(t.id)}">Rotate</button>
+            <button class="btn btn-sm btn-danger" data-revoke="${esc(t.id)}">Revoke</button>
+          ` : '<span style="color:#64748b">환경변수</span>'}
+        </td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="9" style="text-align:center;color:#64748b;padding:20px">No tokens configured.</td></tr>';
+
+    tbody.querySelectorAll('[data-rotate]').forEach(btn => {
+      btn.addEventListener('click', () => rotateToken(btn.dataset.rotate));
+    });
+    tbody.querySelectorAll('[data-revoke]').forEach(btn => {
+      btn.addEventListener('click', () => revokeToken(btn.dataset.revoke));
+    });
+  } catch (err) { console.error('Tokens load failed:', err); }
+}
+
+function showPlaintextBanner(plaintext) {
+  $('#tokens-plaintext-value').textContent = plaintext;
+  $('#tokens-plaintext-banner').classList.remove('hidden');
+}
+$('#tokens-plaintext-dismiss')?.addEventListener('click', () => {
+  $('#tokens-plaintext-value').textContent = '';
+  $('#tokens-plaintext-banner').classList.add('hidden');
+});
+$('#tokens-plaintext-copy')?.addEventListener('click', () => {
+  const v = $('#tokens-plaintext-value').textContent;
+  navigator.clipboard?.writeText(v).catch(() => {});
+});
+
+$('#btn-issue-token').addEventListener('click', async () => {
+  const id = prompt('Token ID (공백은 자동 생성):', '');
+  if (id === null) return;
+  const description = prompt('설명 (선택):', '') || '';
+  const wsGlob = prompt('Allowed Workspaces (글롭, 콤마 구분, 빈값=모두 *):', '*') || '*';
+  const profGlob = prompt('Allowed Profiles (글롭, 콤마 구분, 빈값=모두 *):', '*') || '*';
+  try {
+    const body = {
+      description,
+      allowedWorkspaces: wsGlob.split(',').map(s => s.trim()).filter(Boolean),
+      allowedProfiles: profGlob.split(',').map(s => s.trim()).filter(Boolean),
+    };
+    if (id.trim()) body.id = id.trim();
+    const res = await api('POST', '/api/tokens', body);
+    if (res.ok) {
+      showPlaintextBanner(res.data.plaintext);
+      await loadTokensView();
+    } else {
+      alert(`발급 실패: ${res.error?.message}`);
+    }
+  } catch (err) { alert(`발급 실패: ${err.message}`); }
+});
+
+async function rotateToken(id) {
+  if (!confirm(`토큰 '${id}' 를 rotate 하시겠습니까? 기존 plaintext 는 즉시 무효화됩니다.`)) return;
+  try {
+    const res = await api('POST', `/api/tokens/${encodeURIComponent(id)}/rotate`);
+    if (res.ok) {
+      showPlaintextBanner(res.data.plaintext);
+      await loadTokensView();
+    } else alert(`rotate 실패: ${res.error?.message}`);
+  } catch (err) { alert(`rotate 실패: ${err.message}`); }
+}
+
+async function revokeToken(id) {
+  if (!confirm(`토큰 '${id}' 를 영구 삭제하시겠습니까?`)) return;
+  try {
+    const res = await api('DELETE', `/api/tokens/${encodeURIComponent(id)}`);
+    if (res.ok) await loadTokensView();
+    else alert(`revoke 실패: ${res.error?.message}`);
+  } catch (err) { alert(`revoke 실패: ${err.message}`); }
+}
+
 // --- Connect Guide ---
 $('#btn-nav-connect').addEventListener('click', async () => {
   showScreen('connect');

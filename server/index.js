@@ -5,12 +5,14 @@ import { McpHandler } from './mcp-handler.js';
 import { SseManager } from './sse-manager.js';
 import { createAdminRoutes } from '../admin/routes.js';
 import { OAuthManager } from './oauth-manager.js';
+import { McpTokenManager } from './mcp-token-manager.js';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
 const mcp = new McpHandler(wm, tr);
 const sse = new SseManager();
 const oauth = new OAuthManager(wm);
+const tokenManager = new McpTokenManager(wm);
 wm.setOAuthManager(oauth);
 
 // Bump tool version + notify SSE clients when workspaces change
@@ -33,7 +35,7 @@ setInterval(() => {
   wm.testAll().catch(err => console.error('[Bifrost] Background health check failed:', err.message));
 }, HEALTH_CHECK_INTERVAL);
 
-const adminRoutes = createAdminRoutes(wm, tr, sse, oauth);
+const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager);
 
 function parseBearerToken(req) {
   const auth = req.headers['authorization'];
@@ -74,28 +76,45 @@ function isLocalhost(req) {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
-function authenticateMcp(req, res, url) {
-  const mcpToken = wm.getMcpToken();
-  if (!mcpToken) {
-    // Open mode — no token configured, allow from anywhere
-    return true;
+/**
+ * Authenticate an MCP request. Returns identity object (or null for open mode),
+ * or `false` if the request was rejected (response already sent).
+ * Phase 7b: identity is the MCP token manager's resolved identity.
+ */
+async function authenticateMcp(req, res, url) {
+  if (!tokenManager.isConfigured()) {
+    return null; // open mode → caller treats as no identity
   }
   const token = parseBearerToken(req) || parseBearerFromQuery(url);
-  if (token === mcpToken) return true;
-  jsonResponse(res, 401, { jsonrpc: '2.0', error: { code: -32600, message: 'Unauthorized' } });
-  return false;
+  if (!token) {
+    jsonResponse(res, 401, { jsonrpc: '2.0', error: { code: -32600, message: 'Unauthorized' } });
+    return false;
+  }
+  const identity = await tokenManager.resolve(token);
+  if (!identity) {
+    jsonResponse(res, 401, { jsonrpc: '2.0', error: { code: -32600, message: 'Unauthorized' } });
+    return false;
+  }
+  return identity;
 }
 
-function authenticateMcpSse(req, res, url) {
-  const mcpToken = wm.getMcpToken();
-  if (!mcpToken) {
-    return true;
+async function authenticateMcpSse(req, res, url) {
+  if (!tokenManager.isConfigured()) {
+    return null;
   }
   const token = parseBearerToken(req) || parseBearerFromQuery(url);
-  if (token === mcpToken) return true;
-  res.writeHead(401);
-  res.end('Unauthorized');
-  return false;
+  if (!token) {
+    res.writeHead(401);
+    res.end('Unauthorized');
+    return false;
+  }
+  const identity = await tokenManager.resolve(token);
+  if (!identity) {
+    res.writeHead(401);
+    res.end('Unauthorized');
+    return false;
+  }
+  return identity;
 }
 
 const server = createServer(async (req, res) => {
@@ -104,18 +123,19 @@ const server = createServer(async (req, res) => {
 
   // --- MCP Streamable HTTP ---
   if (path === '/mcp' && req.method === 'POST') {
-    if (!authenticateMcp(req, res, url)) return;
+    const identity = await authenticateMcp(req, res, url);
+    if (identity === false) return;
     const profile = url.searchParams.get('profile') || null;
     try {
       const body = await readBody(req);
 
       if (Array.isArray(body)) {
-        const results = await Promise.all(body.map(r => mcp.handle(r, { profile })));
+        const results = await Promise.all(body.map(r => mcp.handle(r, { identity, profile })));
         jsonResponse(res, 200, results);
         return;
       }
 
-      const result = await mcp.handle(body, { profile });
+      const result = await mcp.handle(body, { identity, profile });
 
       if (body.id === undefined || body.id === null) {
         res.writeHead(204);
@@ -136,13 +156,16 @@ const server = createServer(async (req, res) => {
 
   // --- SSE Transport ---
   if (path === '/sse' && req.method === 'GET') {
-    if (!authenticateMcpSse(req, res, url)) return;
+    const identity = await authenticateMcpSse(req, res, url);
+    if (identity === false) return;
     sse.createSession(res);
     return;
   }
 
   if (path === '/sse' && req.method === 'POST') {
-    if (!authenticateMcp(req, res, url)) return;
+    const identity = await authenticateMcp(req, res, url);
+    if (identity === false) return;
+    const profile = url.searchParams.get('profile') || null;
     const sessionId = url.searchParams.get('sessionId');
     const session = sessionId && sse.getSession(sessionId);
     if (!session) {
@@ -151,7 +174,7 @@ const server = createServer(async (req, res) => {
     }
     try {
       const body = await readBody(req);
-      const result = await mcp.handle(body);
+      const result = await mcp.handle(body, { identity, profile });
       // Send response back via SSE
       sse.sendToSession(sessionId, result);
       // Acknowledge the POST
@@ -205,8 +228,8 @@ server.listen(port, host, () => {
   if (exposed) {
     console.warn('');
     console.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
-    if (!wm.getMcpToken()) {
-      console.warn('[Bifrost] ⚠️  BIFROST_MCP_TOKEN not set — MCP requests from non-localhost will be REJECTED.');
+    if (!tokenManager.isConfigured()) {
+      console.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
     }
     if (!wm.getAdminToken()) {
       console.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
@@ -277,4 +300,4 @@ async function handleOAuthCallback(req, res, url) {
   }
 }
 
-export { wm, tr, mcp, sse, oauth, server };
+export { wm, tr, mcp, sse, oauth, tokenManager, server };

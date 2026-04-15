@@ -3,7 +3,14 @@
  * Display name pattern: {provider}_{namespace}__{tool_name}
  * Resolution uses an internal reverse map, not string parsing, so upstream
  * tool names containing "__" or "_" are handled correctly.
+ *
+ * Phase 7b: getTools() accepts { identity, profile } for ACL filtering.
+ * The reverse map is always built from the unfiltered catalog so that
+ * tools/call resolve() can still detect existence (and fail closed via
+ * the mcp-handler 2nd-line ACL check) for tools hidden from tools/list.
  */
+import { identityAllowsWorkspace, matchPattern } from './mcp-token-manager.js';
+
 export class ToolRegistry {
   constructor(workspaceManager) {
     this.wm = workspaceManager;
@@ -21,7 +28,8 @@ export class ToolRegistry {
    * For mcp-client providers with empty cache, awaits one refreshTools()
    * so newly-registered workspaces are usable on first call.
    */
-  async getTools() {
+  async getTools(opts = {}) {
+    const { identity = null, profile = null } = opts;
     const tools = [];
     const reverseMap = new Map();
     const workspaces = this.wm.getEnabledWorkspaces();
@@ -79,7 +87,26 @@ export class ToolRegistry {
     }
 
     this._reverseMap = reverseMap;
-    return tools;
+
+    // ACL + profile filter (Phase 7b): reverse map is unfiltered, but return set is filtered.
+    let filtered = tools;
+    if (identity) {
+      filtered = filtered.filter(t => !t._workspace || identityAllowsWorkspace(identity, t._workspace));
+    }
+    if (profile) {
+      if (Array.isArray(profile.workspacesInclude)) {
+        filtered = filtered.filter(t => !t._workspace || profile.workspacesInclude.some(p => matchPattern(p, t._workspace)));
+      }
+      if (Array.isArray(profile.toolsInclude)) {
+        filtered = filtered.filter(t => {
+          // Meta tools: always include
+          if (!t._workspace) return true;
+          // Match against the bare originalName OR namespaced name
+          return profile.toolsInclude.some(p => matchPattern(p, t._originalName) || matchPattern(p, t.name));
+        });
+      }
+    }
+    return filtered;
   }
 
   /**

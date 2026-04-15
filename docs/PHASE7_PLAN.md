@@ -128,7 +128,7 @@ config/
       {
         "id": "tok_ci_bot",
         "description": "CI 봇 (Linear 전용 read)",
-        "token": "<hashed>",             // bcrypt(원본) — 원본은 발급 시 1회만 노출
+        "token": "<hashed>",             // scrypt(원본) — 원본은 발급 시 1회만 노출. 포맷 "scrypt$N$r$p$salt$hash"
         "allowedWorkspaces": ["linear-work"],
         "allowedProfiles": ["read-only"],
         "createdAt": "...",
@@ -188,19 +188,19 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] Admin UI: "Profiles" 탭 (정의된 프로필 목록 + glob 에디터 + 프리뷰: 매칭되는 도구)
 - [ ] 테스트: 프로필 매칭 glob, 존재하지 않는 프로필 요청 시 에러, 빈 결과 집합
 
-### 7b — 다중 MCP 토큰 + ACL (1.5일)
-- [ ] `server/mcp-token-manager.js`:
-  - `add({ description, allowedWorkspaces, allowedProfiles })` → returns `{ id, plaintext }` (plaintext 는 1회만 반환)
-  - `resolve(bearer)` → identity or null
-  - `list()` → 마스킹된 목록 (`token` 필드 제외)
-  - `revoke(id)`
-- [ ] 저장: `config/workspaces.json` 의 `server.mcpTokens` 배열. `token` 필드는 `bcrypt` 해시 (cost 10)
-- [ ] `BIFROST_MCP_TOKEN` (단수) 은 legacy — 여전히 동작하되 identity = `"legacy"`
-- [ ] `BIFROST_MCP_TOKENS` 환경변수 지원: `id1:plaintext1,id2:plaintext2` 형식으로 런타임 등록 (파일에 쓰지 않음)
-- [ ] Admin UI: "Tokens" 탭 — 토큰 발급 시 plaintext 를 한 번만 크게 표시 + 복사 버튼 + "이후로는 해시만 저장됨" 안내
-- [ ] `server/index.js`: `authenticateMcp` 가 token-manager 에 위임, identity 를 req 에 부착
-- [ ] `tool-registry.getTools({ identity })` — `allowedWorkspaces` 기준 필터
-- [ ] 테스트: 토큰 없음/잘못된 토큰/유효 토큰 + ACL 필터링 + 해시 검증 + 로테이션(재발급)
+### 7b — 다중 MCP 토큰 + ACL (1.5일) — 완료 (codex PASS after REVISE)
+- [x] `server/mcp-token-manager.js`:
+  - `issue({ id?, description, allowedWorkspaces, allowedProfiles })` → returns `{ id, plaintext, entry }` (plaintext 는 1회만 반환)
+  - `resolve(bearer)` → identity or null (legacy env → multi env → persisted scrypt 순)
+  - `list()` → 마스킹된 목록 (`token` 필드 제외, env 소스 표시)
+  - `revoke(id)`, `rotate(id)` (rotate 는 hash 교체 + 새 plaintext 반환)
+- [x] 저장: `config/workspaces.json` 의 `server.mcpTokens` 배열. `token` 필드는 `crypto.scrypt` 해시 (N=2^15, r=8, p=1, maxmem=64MB)
+- [x] `BIFROST_MCP_TOKEN` (단수) 은 legacy — 여전히 동작하되 identity = `"legacy"`, allowedWorkspaces=`['*']`, allowedProfiles=`['*']`
+- [x] `BIFROST_MCP_TOKENS` 환경변수 지원: `id:plaintext[:wsGlob[:profileGlob]]` 콤마 구분 형식 (wsGlob/profileGlob 은 `|` 로 복수 패턴). 파일에 쓰지 않음
+- [x] Admin UI: "Tokens" 탭 — Topbar 버튼 + 발급 시 plaintext banner (한 번만 노출, copy/dismiss, "이후로는 해시만 저장됨" 안내), rotate/revoke 버튼, legacy 토큰 배너
+- [x] `server/index.js`: `authenticateMcp` 가 `McpTokenManager.resolve` 에 위임, identity 를 `mcp.handle(body, { identity, profile })` 로 전달
+- [x] `tool-registry.getTools({ identity, profile })` — `allowedWorkspaces` + profile globs 기준 필터 (reverse map 은 unfiltered 유지 → 2차 검증 여지)
+- [x] 테스트 (20 신규): hash round-trip, verify 실패 케이스, legacy env, multi env + 4-segment format, issue/resolve/revoke, rotate 무효화, duplicate id, matchPattern glob, ACL helper, tools/list + tools/call + resources/list + profile toolsInclude/workspacesInclude + identity.allowedProfiles + unknown profile + open mode
 
 ### 7c-pre — 스키마 + 시그니처 migration (1일) ★ 신규 (Codex REVISE 반영)
 **Rationale**: 현재 `server/workspace-manager.js:139`, `server/oauth-manager.js:506`, `providers/mcp-client.js:127` 가 전부 단일 `oauth.tokens` + no-arg `tokenProvider()` 전제. 7c 직행 시 호환층 없이 회귀 위험.
