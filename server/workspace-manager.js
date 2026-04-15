@@ -26,6 +26,19 @@ function aliasFromDisplayName(displayName) {
     .replace(/^-|-$/g, '') || 'workspace';
 }
 
+function maskTokenEntry(t) {
+  if (!t) return null;
+  return {
+    hasAccessToken: !!t.accessToken,
+    hasRefreshToken: !!t.refreshToken,
+    accessTokenPrefix: t.accessToken ? `${t.accessToken.slice(0, 4)}***${t.accessToken.slice(-4)}` : null,
+    expiresAt: t.expiresAt || null,
+    tokenType: t.tokenType || null,
+    scope: t.scope || null,
+    lastRefreshAt: t.lastRefreshAt || null,
+  };
+}
+
 function maskOAuth(oauth) {
   if (!oauth) return oauth;
   const masked = { ...oauth };
@@ -33,18 +46,15 @@ function maskOAuth(oauth) {
     masked.clientId = `${oauth.clientId.slice(0, 4)}***${oauth.clientId.slice(-4)}`;
   }
   if (oauth.clientSecret) masked.clientSecret = '***';
-  if (oauth.tokens) {
-    const t = oauth.tokens;
-    masked.tokens = {
-      // Never expose token values in masked view.
-      hasAccessToken: !!t.accessToken,
-      hasRefreshToken: !!t.refreshToken,
-      accessTokenPrefix: t.accessToken ? `${t.accessToken.slice(0, 4)}***${t.accessToken.slice(-4)}` : null,
-      expiresAt: t.expiresAt || null,
-      tokenType: t.tokenType || null,
-      scope: t.scope || null,
-      lastRefreshAt: t.lastRefreshAt || null,
-    };
+  // Legacy default tokens
+  if (oauth.tokens) masked.tokens = maskTokenEntry(oauth.tokens);
+  // Phase 7c-pre: byIdentity[*].tokens must be masked too.
+  if (oauth.byIdentity && typeof oauth.byIdentity === 'object') {
+    const maskedBy = {};
+    for (const [identity, entry] of Object.entries(oauth.byIdentity)) {
+      maskedBy[identity] = { tokens: maskTokenEntry(entry?.tokens) };
+    }
+    masked.byIdentity = maskedBy;
   }
   return masked;
 }
@@ -106,14 +116,27 @@ export class WorkspaceManager {
   _migrateLegacy() {
     // Legacy entries without `kind` → assume native (Notion/Slack REST wrapper)
     let migrated = 0;
+    let oauthMirrored = 0;
     for (const ws of this.config.workspaces) {
       if (!ws.kind) {
         ws.kind = 'native';
         migrated++;
       }
+      // Phase 7c-pre: mirror legacy ws.oauth.tokens into byIdentity.default.tokens.
+      // Keep the legacy `tokens` field intact for back-compat readers.
+      if (ws.oauth?.tokens && !ws.oauth?.byIdentity?.default?.tokens) {
+        ws.oauth.byIdentity = {
+          ...(ws.oauth.byIdentity || {}),
+          default: { tokens: ws.oauth.tokens },
+        };
+        oauthMirrored++;
+      }
     }
     if (migrated > 0) {
       console.log(`[WorkspaceManager] Migrated ${migrated} legacy workspace(s) to kind=native`);
+    }
+    if (oauthMirrored > 0) {
+      console.log(`[WorkspaceManager] Phase 7c-pre: mirrored ${oauthMirrored} OAuth tokens to byIdentity.default`);
     }
   }
 
@@ -136,9 +159,12 @@ export class WorkspaceManager {
     if (ws.kind === 'mcp-client') {
       const opts = {};
       if (ws.oauth?.enabled && this._oauth) {
-        opts.tokenProvider = async () => this._oauth.getValidAccessToken(ws.id).catch(() => null);
-        opts.onUnauthorized = async () => {
-          try { await this._oauth.forceRefresh(ws.id); }
+        // Phase 7c-pre: tokenProvider accepts an optional identity argument.
+        // Undefined → default identity (backwards-compatible for callers that
+        // don't know about byIdentity yet).
+        opts.tokenProvider = async (identity) => this._oauth.getValidAccessToken(ws.id, identity || 'default').catch(() => null);
+        opts.onUnauthorized = async (identity) => {
+          try { await this._oauth.forceRefresh(ws.id, identity || 'default'); }
           catch (err) { this.logError('oauth.refresh', ws.id, err.message); throw err; }
         };
       }
@@ -445,6 +471,10 @@ export class WorkspaceManager {
 
   _computeStatus(ws, health) {
     if (!ws.enabled) return 'disabled';
+    // Phase 7c-pre: per-identity action_needed map supersedes single bool.
+    // Any identity flagged → action_needed.
+    const byId = ws.oauthActionNeededBy || {};
+    if (Object.values(byId).some(Boolean)) return 'action_needed';
     if (ws.oauthActionNeeded) return 'action_needed';
     if (!health) return 'unknown';
     if (!health.ok) return 'error';

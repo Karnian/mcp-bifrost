@@ -337,18 +337,19 @@ export class OAuthManager {
     return removed;
   }
 
-  async initializeAuthorization(workspaceId, { issuer, clientId, clientSecret, authMethod, authServerMetadata, resource, scope }) {
+  async initializeAuthorization(workspaceId, { issuer, clientId, clientSecret, authMethod, authServerMetadata, resource, scope, identity = 'default' }) {
     if (!authServerMetadata?.authorization_endpoint) {
       throw new Error('initializeAuthorization: missing authorization_endpoint');
     }
     const pkce = this._newPkce();
     const random = b64url(randomBytes(16));
     const issuedAt = Date.now();
-    const state = await this._signState({ r: random, w: workspaceId, iat: issuedAt });
+    const state = await this._signState({ r: random, w: workspaceId, i: identity, iat: issuedAt });
 
     const pending = await this._loadPending();
     pending[state] = {
       workspaceId,
+      identity,
       issuer,
       clientId,
       clientSecret,
@@ -419,6 +420,7 @@ export class OAuthManager {
       authMethod: entry.authMethod,
       resource: entry.resource,
       tokens,
+      identity: entry.identity || 'default',
     });
     return stored;
   }
@@ -464,7 +466,7 @@ export class OAuthManager {
     return json;
   }
 
-  _persistTokens(workspaceId, { issuer, clientId, clientSecret, authMethod, resource, tokens }) {
+  _persistTokens(workspaceId, { issuer, clientId, clientSecret, authMethod, resource, tokens, identity = 'default' }) {
     const ws = this.wm?._getRawWorkspace?.(workspaceId);
     if (!ws) throw new Error(`workspace_not_found: ${workspaceId}`);
 
@@ -472,7 +474,20 @@ export class OAuthManager {
       ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
       : null;
 
-    ws.oauthActionNeeded = false;
+    // Only fall back to legacy ws.oauth.tokens for the default identity; other
+    // identities must start fresh to preserve isolation (a missing refresh_token
+    // in the new authorize response should NOT inherit the default refresh token).
+    const legacyFallback = identity === 'default' ? (ws.oauth?.tokens || {}) : {};
+    const existing = ws.oauth?.byIdentity?.[identity]?.tokens || legacyFallback;
+    const newTokens = {
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token || existing.refreshToken || null,
+      expiresAt,
+      tokenType: tokens.token_type || 'Bearer',
+      scope: tokens.scope || null,
+      lastRefreshAt: new Date().toISOString(),
+    };
+
     ws.oauth = {
       ...(ws.oauth || {}),
       enabled: true,
@@ -481,18 +496,38 @@ export class OAuthManager {
       clientSecret: clientSecret || null,
       authMethod,
       resource: resource || ws.oauth?.resource || null,
-      tokens: {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || ws.oauth?.tokens?.refreshToken || null,
-        expiresAt,
-        tokenType: tokens.token_type || 'Bearer',
-        scope: tokens.scope || null,
-        lastRefreshAt: new Date().toISOString(),
+      byIdentity: {
+        ...(ws.oauth?.byIdentity || {}),
+        [identity]: { tokens: newTokens },
       },
     };
+
+    // Phase 7c-pre: keep the legacy `tokens` mirror for default identity only,
+    // so older readers still see a valid token.
+    if (identity === 'default') {
+      ws.oauth.tokens = newTokens;
+    }
+
+    // Per-identity action_needed map + legacy bool (cleared when default re-auths)
+    if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
+    ws.oauthActionNeededBy[identity] = false;
+    if (identity === 'default') ws.oauthActionNeeded = false;
+
     // fire-and-forget save
     if (this.wm?._save) this.wm._save().catch(() => {});
     return ws.oauth;
+  }
+
+  /**
+   * Read the tokens object for a given identity. Handles legacy configs
+   * where only ws.oauth.tokens existed (treats it as the default identity).
+   */
+  _tokensFor(ws, identity = 'default') {
+    const byId = ws?.oauth?.byIdentity?.[identity]?.tokens;
+    if (byId) return byId;
+    // Legacy fallback: ws.oauth.tokens → default identity only
+    if (identity === 'default' && ws?.oauth?.tokens) return ws.oauth.tokens;
+    return null;
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -503,29 +538,35 @@ export class OAuthManager {
     return new Date(oauthTokens.expiresAt).getTime() - leewayMs <= now;
   }
 
-  async getValidAccessToken(workspaceId) {
+  async getValidAccessToken(workspaceId, identity = 'default') {
     const ws = this.wm?._getRawWorkspace?.(workspaceId);
     if (!ws?.oauth?.enabled) throw new Error(`workspace_not_oauth: ${workspaceId}`);
-    if (!ws.oauth.tokens?.accessToken) throw new Error(`workspace_not_authorized: ${workspaceId}`);
+    const current = this._tokensFor(ws, identity);
+    if (!current?.accessToken) throw new Error(`workspace_not_authorized: ${workspaceId}::${identity}`);
 
-    if (!this._isExpired(ws.oauth.tokens)) {
-      return ws.oauth.tokens.accessToken;
+    if (!this._isExpired(current)) {
+      return current.accessToken;
     }
-    await this._refreshWithMutex(workspaceId);
-    return ws.oauth.tokens.accessToken;
+    await this._refreshWithMutex(workspaceId, identity);
+    return this._tokensFor(ws, identity)?.accessToken;
   }
 
-  async forceRefresh(workspaceId) {
-    return this._refreshWithMutex(workspaceId);
+  async forceRefresh(workspaceId, identity = 'default') {
+    return this._refreshWithMutex(workspaceId, identity);
   }
 
-  async _refreshWithMutex(workspaceId) {
-    const existing = this._refreshMutex.get(workspaceId);
+  async _refreshWithMutex(workspaceId, identity = 'default') {
+    // Mutex key: ${wsId}::${identity} (default identity uses "${wsId}::default"
+    // — chosen to keep Phase 6 tests' intuition of "per-ws mutex" working while
+    // allowing 2 identities to refresh in parallel).
+    const key = `${workspaceId}::${identity}`;
+    const existing = this._refreshMutex.get(key);
     if (existing) return existing;
 
     const task = (async () => {
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
-      if (!ws?.oauth?.tokens?.refreshToken) {
+      const prev = this._tokensFor(ws, identity);
+      if (!prev?.refreshToken) {
         const err = new Error('no_refresh_token');
         err.code = 'NO_REFRESH_TOKEN';
         throw err;
@@ -539,7 +580,6 @@ export class OAuthManager {
       };
       // Resolve token endpoint lazily if missing
       if (!entry.tokenEndpoint) {
-        // Attempt rediscovery via issuer metadata cache
         const endpoint = ws.oauth.metadataCache?.token_endpoint;
         if (!endpoint) {
           const err = new Error('token_endpoint_unknown — re-authorize required');
@@ -550,31 +590,37 @@ export class OAuthManager {
       }
       const params = new URLSearchParams();
       params.set('grant_type', 'refresh_token');
-      params.set('refresh_token', ws.oauth.tokens.refreshToken);
+      params.set('refresh_token', prev.refreshToken);
       if (entry.resource) params.set('resource', entry.resource);
 
       const tokens = await this._tokenRequest(entry, params, 'refresh');
 
-      const prev = ws.oauth.tokens;
-      ws.oauth.tokens = {
+      const updated = {
         accessToken: tokens.access_token,
-        // Rotation: replace only when server returns new refresh_token
         refreshToken: tokens.refresh_token || prev.refreshToken,
         expiresAt: tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000).toISOString() : null,
         tokenType: tokens.token_type || prev.tokenType || 'Bearer',
         scope: tokens.scope || prev.scope || null,
         lastRefreshAt: new Date().toISOString(),
       };
-      ws.oauthActionNeeded = false;
+      // Write through byIdentity + legacy mirror for default
+      if (!ws.oauth.byIdentity) ws.oauth.byIdentity = {};
+      ws.oauth.byIdentity[identity] = { tokens: updated };
+      if (identity === 'default') ws.oauth.tokens = updated;
+      if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
+      ws.oauthActionNeededBy[identity] = false;
+      if (identity === 'default') ws.oauthActionNeeded = false;
+
       if (this.wm?._save) this.wm._save().catch(() => {});
       if (this.wm?.logAudit) {
         this.wm.logAudit('oauth.refresh_success', workspaceId, JSON.stringify({
           issuer: ws.oauth.issuer,
+          identity,
           tokenPrefix: tokenPrefix(tokens.access_token),
           rotated: Boolean(tokens.refresh_token),
         }));
       }
-      return ws.oauth.tokens;
+      return updated;
     })();
 
     let timeoutHandle;
@@ -585,22 +631,22 @@ export class OAuthManager {
     // Swallow late rejection of the losing promise to avoid unhandledRejection
     task.catch(() => {});
     const wrapped = Promise.race([task, timeout]).finally(() => clearTimeout(timeoutHandle));
-    this._refreshMutex.set(workspaceId, wrapped);
+    this._refreshMutex.set(key, wrapped);
     try {
       return await wrapped;
     } catch (err) {
       if (this.wm?.logAudit) {
-        this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(err.message));
+        this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(`identity=${identity} ${err.message}`));
       }
-      // Only mark action_needed when we actually attempted refresh against the server.
-      // If we never had a refresh_token (never authorized), that's a different signal.
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
       if (ws && err.code !== 'NO_REFRESH_TOKEN' && err.code !== 'TOKEN_ENDPOINT_UNKNOWN') {
-        ws.oauthActionNeeded = true;
+        if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
+        ws.oauthActionNeededBy[identity] = true;
+        if (identity === 'default') ws.oauthActionNeeded = true;
       }
       throw err;
     } finally {
-      this._refreshMutex.delete(workspaceId);
+      this._refreshMutex.delete(key);
     }
   }
 }

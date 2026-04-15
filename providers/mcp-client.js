@@ -11,7 +11,7 @@ import { BaseProvider } from './base.js';
  * - sse:   TODO (Phase 5c)
  */
 export class McpClientProvider extends BaseProvider {
-  constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null } = {}) {
+  constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null, identity = 'default' } = {}) {
     super(workspaceConfig);
     this.transport = workspaceConfig.transport; // "stdio" | "http" | "sse"
     this.stdioConfig = {
@@ -23,8 +23,12 @@ export class McpClientProvider extends BaseProvider {
       url: workspaceConfig.url,
       headers: workspaceConfig.headers || {},
     };
-    this._tokenProvider = tokenProvider; // async () => string (OAuth access token)
-    this._onUnauthorized = onUnauthorized; // async () => void (triggers refresh)
+    // Phase 7c-pre: tokenProvider / onUnauthorized accept an optional identity
+    // argument. Provider-level identity default is supplied at construction;
+    // call-site overrides (7c) will pass an explicit identity.
+    this._tokenProvider = tokenProvider; // async (identity?) => string
+    this._onUnauthorized = onUnauthorized; // async (identity?) => void
+    this._identity = identity;
 
     // Runtime state
     this._child = null;
@@ -118,20 +122,21 @@ export class McpClientProvider extends BaseProvider {
     }
   }
 
-  async _buildHeaders() {
+  async _buildHeaders(identity) {
     const headers = {
       'Content-Type': 'application/json',
       'Accept': 'application/json, text/event-stream',
       ...this.httpConfig.headers,
     };
     if (this._tokenProvider) {
-      const token = await this._tokenProvider();
+      // Phase 7c-pre: pass identity explicitly; provider-default when unspecified.
+      const token = await this._tokenProvider(identity || this._identity || 'default');
       if (token) headers['Authorization'] = `Bearer ${token}`;
     }
     return headers;
   }
 
-  async _rpcHttp(method, params, { timeoutMs = 30000, notification = false, _retry = false } = {}) {
+  async _rpcHttp(method, params, { timeoutMs = 30000, notification = false, _retry = false, identity } = {}) {
     const id = this._nextRpcId++;
     const body = notification
       ? { jsonrpc: '2.0', method, params: params || {} }
@@ -144,15 +149,15 @@ export class McpClientProvider extends BaseProvider {
     try {
       const res = await fetch(this.httpConfig.url, {
         method: 'POST',
-        headers: await this._buildHeaders(),
+        headers: await this._buildHeaders(identity),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
       clearTimeout(timer);
 
       if (res.status === 401 && this._onUnauthorized && !_retry) {
-        try { await this._onUnauthorized(); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
-        return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true });
+        try { await this._onUnauthorized(identity || this._identity || 'default'); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
+        return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true, identity });
       }
 
       if (notification) return null;
