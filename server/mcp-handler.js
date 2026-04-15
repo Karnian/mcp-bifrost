@@ -9,9 +9,10 @@
 import { identityAllowsWorkspace, identityAllowsProfile, matchPattern } from './mcp-token-manager.js';
 
 export class McpHandler {
-  constructor(workspaceManager, toolRegistry) {
+  constructor(workspaceManager, toolRegistry, { usage = null } = {}) {
     this.wm = workspaceManager;
     this.tr = toolRegistry;
+    this._usage = usage;
   }
 
   async handle(request, options = {}) {
@@ -205,9 +206,22 @@ export class McpHandler {
     // Retry with exponential backoff for transient errors
     const MAX_RETRIES = 2;
     let lastErr;
+    const startedAt = Date.now();
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const result = await provider.callTool(resolved.toolName, args);
+        // Phase 7g: record successful call (usage JSONL)
+        if (this._usage) {
+          try {
+            this._usage.record({
+              identity: identity?.id || 'anonymous',
+              workspaceId: resolved.workspaceId,
+              tool: name,
+              durationMs: Date.now() - startedAt,
+              ok: !result?.isError,
+            });
+          } catch { /* best effort */ }
+        }
         return result;
       } catch (err) {
         lastErr = err;
@@ -223,6 +237,18 @@ export class McpHandler {
     const displayName = ws?.displayName || resolved.workspaceId;
     const category = this._categorizeError(lastErr);
     this.wm.logError(category, resolved.workspaceId, lastErr.message);
+    // Phase 7g: record failed call
+    if (this._usage) {
+      try {
+        this._usage.record({
+          identity: identity?.id || 'anonymous',
+          workspaceId: resolved.workspaceId,
+          tool: name,
+          durationMs: Date.now() - startedAt,
+          ok: false,
+        });
+      } catch { /* best effort */ }
+    }
 
     const meta = {
       category,

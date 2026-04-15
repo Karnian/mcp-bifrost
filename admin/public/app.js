@@ -918,6 +918,70 @@ $('#btn-save-profiles').addEventListener('click', async () => {
   } catch (err) { alert(`저장 실패: ${err.message}`); }
 });
 
+// --- Usage (Phase 7g) ---
+$('#btn-nav-usage').addEventListener('click', async () => {
+  showScreen('usage');
+  await loadUsage();
+});
+$('#btn-back-from-usage').addEventListener('click', async () => await enterDashboard());
+$('#usage-since').addEventListener('change', loadUsage);
+
+async function loadUsage() {
+  const since = $('#usage-since').value;
+  try {
+    const res = await api('GET', `/api/usage?since=${since}`);
+    const data = res.data || {};
+    const renderList = (title, rows, keyLabel) => `
+      <h4>${title}</h4>
+      <table class="tools-table" style="margin-bottom:24px">
+        <thead><tr><th>${keyLabel}</th><th>Count</th><th>Avg latency</th><th>Errors</th><th>Last</th></tr></thead>
+        <tbody>
+          ${(rows || []).map(r => `<tr>
+            <td><code>${esc(r.key)}</code></td>
+            <td>${r.count}</td>
+            <td>${r.avgMs}ms</td>
+            <td>${r.errors} (${(r.errorRate * 100).toFixed(1)}%)</td>
+            <td>${esc(r.lastAt || '-')}</td>
+          </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:#64748b">No data.</td></tr>'}
+        </tbody>
+      </table>`;
+    $('#usage-content').innerHTML =
+      renderList('Top 10 Tools', data.topTools, 'Tool') +
+      renderList('Top 5 Identities (tokens)', data.topIdentities, 'Identity') +
+      renderList('Top 10 Workspaces', data.topWorkspaces, 'Workspace');
+  } catch (err) { console.error('Usage load failed:', err); }
+}
+
+// --- Audit (Phase 7g) ---
+$('#btn-nav-audit').addEventListener('click', async () => {
+  showScreen('audit');
+  await loadAudit();
+});
+$('#btn-back-from-audit').addEventListener('click', async () => await enterDashboard());
+$('#btn-audit-refresh').addEventListener('click', loadAudit);
+
+async function loadAudit() {
+  const params = new URLSearchParams();
+  const action = $('#audit-action').value.trim();
+  const identity = $('#audit-identity').value.trim();
+  const workspace = $('#audit-workspace').value.trim();
+  if (action) params.set('action', action);
+  if (identity) params.set('identity', identity);
+  if (workspace) params.set('workspace', workspace);
+  params.set('limit', '200');
+  try {
+    const res = await api('GET', `/api/audit?${params.toString()}`);
+    const rows = res.data || [];
+    $('#audit-tbody').innerHTML = rows.map(r => `<tr>
+      <td>${esc(r.t)}</td>
+      <td><code>${esc(r.action)}</code></td>
+      <td>${esc(r.identity || '-')}</td>
+      <td>${esc(r.workspace || '-')}</td>
+      <td style="max-width:480px;word-break:break-all;font-size:12px">${esc(r.details || '')}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:#64748b;padding:20px">No matching audit entries.</td></tr>';
+  } catch (err) { console.error('Audit load failed:', err); }
+}
+
 // --- Connect Guide ---
 $('#btn-nav-connect').addEventListener('click', async () => {
   showScreen('connect');

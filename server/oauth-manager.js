@@ -373,7 +373,7 @@ export class OAuthManager {
     if (scope) url.searchParams.set('scope', scope);
 
     if (this.wm?.logAudit) {
-      this.wm.logAudit('oauth.authorize_start', workspaceId, JSON.stringify({ issuer }));
+      this.wm.logAudit('oauth.authorize_start', workspaceId, JSON.stringify({ issuer, identity }), identity);
     }
 
     return { authorizationUrl: url.toString(), state };
@@ -409,8 +409,9 @@ export class OAuthManager {
     if (this.wm?.logAudit) {
       this.wm.logAudit('oauth.authorize_complete', entry.workspaceId, JSON.stringify({
         issuer: entry.issuer,
+        identity: entry.identity || 'default',
         tokenPrefix: tokenPrefix(tokens.access_token),
-      }));
+      }), entry.identity || 'default');
     }
 
     const stored = this._persistTokens(entry.workspaceId, {
@@ -618,7 +619,7 @@ export class OAuthManager {
           identity,
           tokenPrefix: tokenPrefix(tokens.access_token),
           rotated: Boolean(tokens.refresh_token),
-        }));
+        }), identity);
       }
       return updated;
     })();
@@ -636,7 +637,7 @@ export class OAuthManager {
       return await wrapped;
     } catch (err) {
       if (this.wm?.logAudit) {
-        this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(`identity=${identity} ${err.message}`));
+        this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(`identity=${identity} ${err.message}`), identity);
       }
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
       if (ws && err.code !== 'NO_REFRESH_TOKEN' && err.code !== 'TOKEN_ENDPOINT_UNKNOWN') {

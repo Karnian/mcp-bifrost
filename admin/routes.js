@@ -16,7 +16,8 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
+export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extras = {}) {
+  const { usage = null, audit = null } = extras;
   return async (req, res, url) => {
     const path = url.pathname;
     const method = req.method;
@@ -388,6 +389,30 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
         await wm._save();
         wm.logAudit('profile.update', null, `Updated ${Object.keys(body).length} profile(s)`);
         sendJson(res, 200, { ok: true, data: body });
+        return;
+      }
+
+      // --- Phase 7g: Usage + Audit endpoints ---
+      if (path === '/api/usage' && method === 'GET') {
+        if (!usage) return sendJson(res, 500, { ok: false, error: { code: 'USAGE_UNAVAILABLE' } });
+        const since = url.searchParams.get('since') || '24h';
+        const by = url.searchParams.get('by') || null;
+        const data = by ? usage.query({ since, by }) : usage.topSummary({ since });
+        sendJson(res, 200, { ok: true, data });
+        return;
+      }
+      if (path === '/api/audit' && method === 'GET') {
+        if (!audit) return sendJson(res, 500, { ok: false, error: { code: 'AUDIT_UNAVAILABLE' } });
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500);
+        const actionPrefix = url.searchParams.get('action') || null;
+        const identity = url.searchParams.get('identity') || null;
+        const workspace = url.searchParams.get('workspace') || null;
+        try {
+          const data = await audit.tail({ limit, actionPrefix, identity, workspace });
+          sendJson(res, 200, { ok: true, data });
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: { code: 'AUDIT_READ_FAILED', message: err.message } });
+        }
         return;
       }
 

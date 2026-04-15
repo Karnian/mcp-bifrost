@@ -34,6 +34,8 @@
           <button id="btn-nav-tools" class="btn btn-sm btn-outline">Tools</button>
           <button id="btn-nav-tokens" class="btn btn-sm btn-outline">Tokens</button>
           <button id="btn-nav-profiles" class="btn btn-sm btn-outline">Profiles</button>
+          <button id="btn-nav-usage" class="btn btn-sm btn-outline">Usage</button>
+          <button id="btn-nav-audit" class="btn btn-sm btn-outline">Audit</button>
           <button id="btn-nav-connect" class="btn btn-sm btn-outline">Connect</button>
           <button id="btn-test-all" class="btn btn-sm">Test All</button>
           <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
@@ -279,6 +281,49 @@
         <textarea id="profiles-editor" spellcheck="false"
           style="width:100%;min-height:320px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:13px"></textarea>
         <div id="profiles-preview" style="margin-top:16px"></div>
+      </div>
+    </div>
+
+    <!-- Usage (Phase 7g) -->
+    <div id="usage-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-usage" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Usage</h2>
+        </div>
+        <div class="topbar-right">
+          <select id="usage-since" class="detail-input" style="width:120px">
+            <option value="24h" selected>Last 24h</option>
+            <option value="7d">Last 7 days</option>
+          </select>
+        </div>
+      </nav>
+      <div class="tools-overview-content">
+        <div id="usage-content"></div>
+      </div>
+    </div>
+
+    <!-- Audit (Phase 7g) -->
+    <div id="audit-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-audit" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Audit</h2>
+        </div>
+        <div class="topbar-right">
+          <input id="audit-action" type="text" placeholder="action prefix (oauth.*)" class="detail-input" style="width:180px">
+          <input id="audit-identity" type="text" placeholder="identity" class="detail-input" style="width:120px">
+          <input id="audit-workspace" type="text" placeholder="workspace" class="detail-input" style="width:120px">
+          <button id="btn-audit-refresh" class="btn btn-sm">Refresh</button>
+        </div>
+      </nav>
+      <div class="tools-overview-content">
+        <table class="tools-table">
+          <thead>
+            <tr><th>Time</th><th>Action</th><th>Identity</th><th>Workspace</th><th>Details</th></tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
       </div>
     </div>
 

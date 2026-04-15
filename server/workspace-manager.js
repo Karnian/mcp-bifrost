@@ -151,6 +151,10 @@ export class WorkspaceManager {
     this._oauth = oauth;
   }
 
+  setAuditLogger(audit) {
+    this._audit = audit;
+  }
+
   _createProvider(ws) {
     // Shutdown old provider if replacing
     const old = this.providers.get(ws.id);
@@ -542,20 +546,32 @@ export class WorkspaceManager {
     if (this.errorLog.length > 50) this.errorLog.length = 50;
   }
 
-  logAudit(action, workspace, details) {
+  /**
+   * Audit log entry. `identity` is optional (added in Phase 7g); callers that
+   * predate it can continue passing the old 3-arg form (identity defaults to
+   * null). Pass a 4th positional argument — e.g. `logAudit(action, ws, details,
+   * 'bot_ci')` — to scope the entry to a specific identity, which enables
+   * `/api/audit?identity=…` filtering in Phase 7g.
+   */
+  logAudit(action, workspace, details, identity = null) {
     const entry = {
       timestamp: new Date().toISOString(),
       action,
       workspace,
+      identity,
       details: sanitize(details),
     };
     if (typeof action === 'string' && action.startsWith('oauth.')) {
       this.oauthAuditLog.unshift(entry);
       if (this.oauthAuditLog.length > 50) this.oauthAuditLog.length = 50;
-      return;
+    } else {
+      this.auditLog.unshift(entry);
+      if (this.auditLog.length > 10) this.auditLog.length = 10;
     }
-    this.auditLog.unshift(entry);
-    if (this.auditLog.length > 10) this.auditLog.length = 10;
+    // Phase 7g: mirror to audit.jsonl when the file-based logger is attached.
+    if (this._audit?.record) {
+      this._audit.record({ action, identity, workspace, details });
+    }
   }
 
   getDiagnostics() {

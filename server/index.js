@@ -6,14 +6,19 @@ import { SseManager } from './sse-manager.js';
 import { createAdminRoutes } from '../admin/routes.js';
 import { OAuthManager } from './oauth-manager.js';
 import { McpTokenManager } from './mcp-token-manager.js';
+import { UsageRecorder } from './usage-recorder.js';
+import { AuditLogger } from './audit-logger.js';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
-const mcp = new McpHandler(wm, tr);
+const usage = new UsageRecorder();
+const audit = new AuditLogger();
+const mcp = new McpHandler(wm, tr, { usage });
 const sse = new SseManager();
 const oauth = new OAuthManager(wm);
 const tokenManager = new McpTokenManager(wm);
 wm.setOAuthManager(oauth);
+wm.setAuditLogger?.(audit);
 
 // Bump tool version + notify SSE clients when workspaces change
 wm.onWorkspaceChange(() => {
@@ -35,7 +40,7 @@ setInterval(() => {
   wm.testAll().catch(err => console.error('[Bifrost] Background health check failed:', err.message));
 }, HEALTH_CHECK_INTERVAL);
 
-const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager);
+const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit });
 
 function parseBearerToken(req) {
   const auth = req.headers['authorization'];
@@ -300,4 +305,4 @@ async function handleOAuthCallback(req, res, url) {
   }
 }
 
-export { wm, tr, mcp, sse, oauth, tokenManager, server };
+export { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server };

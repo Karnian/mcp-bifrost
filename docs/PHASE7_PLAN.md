@@ -254,7 +254,7 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] 각 템플릿의 실제 URL 검증은 **template probe** 스크립트 작성 (`scripts/probe-templates.mjs`) — CI 가 아닌 수동 실행, 결과를 `docs/TEMPLATES_PROBE.md` 에 기록 (Phase 6 의 NOTION_MCP_PROBE.md 패턴 재사용)
 - [ ] 테스트: 단위 — template → materialize → 올바른 payload
 
-### 7g — 사용량 대시보드 + audit trail (2일)
+### 7g — 사용량 대시보드 + audit trail (2일) — 완료 (codex PASS 2회차 REVISE → PASS)
 - [ ] `server/usage-recorder.js`:
   - `record({ identity, workspaceId, tool, durationMs, ok })` — 비동기 배치 flush (1s)
   - `.ao/state/usage.jsonl` append. chmod 0600
