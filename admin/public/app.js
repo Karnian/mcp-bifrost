@@ -569,7 +569,13 @@ async function runWizardTest(payload) {
 
 async function runOAuthFlow(wsId) {
   try {
-    const res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, {});
+    let res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, {});
+    // Phase 7d: if DCR is unsupported, prompt for a manual client_id and retry.
+    if (!res.ok && res.error?.code === 'DCR_UNSUPPORTED') {
+      const manual = await promptManualClientCreds();
+      if (!manual) return false;
+      res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { manual });
+    }
     if (!res.ok) {
       alert(`OAuth 초기화 실패: ${res.error?.message || 'unknown'}\n\nDCR 미지원 서버인 경우 Admin API 로 수동 client_id 를 등록하세요.`);
       return false;
@@ -600,6 +606,21 @@ async function runOAuthFlow(wsId) {
     alert(`OAuth flow 오류: ${err.message}`);
     return false;
   }
+}
+
+/**
+ * Phase 7d — Prompt the user for a manually-issued OAuth client when the
+ * MCP server does not support Dynamic Client Registration (RFC 7591).
+ * Returns `{ clientId, clientSecret, authMethod }` or null if cancelled.
+ */
+function promptManualClientCreds() {
+  const msg = 'DCR 미지원 서버입니다. 수동으로 발급한 OAuth client_id 를 입력하세요.';
+  const clientId = prompt(`${msg}\n\nClient ID (필수):`, '');
+  if (!clientId) return null;
+  const clientSecret = prompt('Client Secret (public client 는 빈값):', '') || '';
+  const authMethodRaw = prompt('Auth method: none / client_secret_basic / client_secret_post', clientSecret ? 'client_secret_basic' : 'none');
+  const authMethod = ['none', 'client_secret_basic', 'client_secret_post'].includes(authMethodRaw) ? authMethodRaw : (clientSecret ? 'client_secret_basic' : 'none');
+  return { clientId: clientId.trim(), clientSecret: clientSecret.trim() || null, authMethod };
 }
 
 function setTestStep(id, ok, msg) {

@@ -54,6 +54,44 @@ export const TEMPLATES = [
     ],
   },
   {
+    id: 'github-oauth',
+    name: 'GitHub (Remote MCP · OAuth)',
+    icon: 'GH',
+    description: 'GitHub 공식 hosted MCP (Copilot MCP) + OAuth 2.0',
+    kind: 'mcp-client',
+    transport: 'http',
+    // URL source: https://github.blog/changelog/ GitHub Copilot MCP (2025).
+    // If unavailable in your region, replace with the URL GitHub publishes.
+    url: 'https://api.githubcopilot.com/mcp/',
+    oauth: true,
+    fields: [],
+  },
+  {
+    id: 'linear-oauth',
+    name: 'Linear (Remote MCP · OAuth)',
+    icon: 'L',
+    description: 'Linear 공식 hosted MCP + OAuth 2.0',
+    kind: 'mcp-client',
+    transport: 'http',
+    url: 'https://mcp.linear.app/mcp',
+    oauth: true,
+    fields: [],
+  },
+  {
+    id: 'google-drive-oauth',
+    name: 'Google Drive (Remote MCP · OAuth, stub)',
+    icon: 'GD',
+    description: 'Google Drive hosted MCP (URL 미공개 — 사용자가 직접 입력 필요)',
+    kind: 'mcp-client',
+    transport: 'http',
+    url: '', // user must fill in at Wizard Step 3
+    oauth: true,
+    stub: true,
+    fields: [
+      { name: 'url', label: 'MCP Endpoint URL', required: true, placeholder: 'https://drive.mcp.example/mcp' },
+    ],
+  },
+  {
     id: 'notion-official-oauth',
     name: 'Notion (공식 MCP · OAuth)',
     icon: 'N',
@@ -133,7 +171,8 @@ export function materializeTemplate(template, values) {
         if (values[ef.name]) payload.env[ef.name] = values[ef.name];
       }
     } else {
-      payload.url = template.url;
+      // stub templates let the user override the URL at wizard time
+      payload.url = values.url || template.url;
       payload.headers = template.headers || {};
       if (template.oauth) {
         payload.oauth = { enabled: true };
