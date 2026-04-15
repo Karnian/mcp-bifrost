@@ -11,7 +11,7 @@ import { BaseProvider } from './base.js';
  * - sse:   TODO (Phase 5c)
  */
 export class McpClientProvider extends BaseProvider {
-  constructor(workspaceConfig) {
+  constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null } = {}) {
     super(workspaceConfig);
     this.transport = workspaceConfig.transport; // "stdio" | "http" | "sse"
     this.stdioConfig = {
@@ -23,6 +23,8 @@ export class McpClientProvider extends BaseProvider {
       url: workspaceConfig.url,
       headers: workspaceConfig.headers || {},
     };
+    this._tokenProvider = tokenProvider; // async () => string (OAuth access token)
+    this._onUnauthorized = onUnauthorized; // async () => void (triggers refresh)
 
     // Runtime state
     this._child = null;
@@ -116,7 +118,20 @@ export class McpClientProvider extends BaseProvider {
     }
   }
 
-  async _rpcHttp(method, params, { timeoutMs = 30000, notification = false } = {}) {
+  async _buildHeaders() {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      ...this.httpConfig.headers,
+    };
+    if (this._tokenProvider) {
+      const token = await this._tokenProvider();
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
+  }
+
+  async _rpcHttp(method, params, { timeoutMs = 30000, notification = false, _retry = false } = {}) {
     const id = this._nextRpcId++;
     const body = notification
       ? { jsonrpc: '2.0', method, params: params || {} }
@@ -129,15 +144,16 @@ export class McpClientProvider extends BaseProvider {
     try {
       const res = await fetch(this.httpConfig.url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/event-stream',
-          ...this.httpConfig.headers,
-        },
+        headers: await this._buildHeaders(),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
       clearTimeout(timer);
+
+      if (res.status === 401 && this._onUnauthorized && !_retry) {
+        try { await this._onUnauthorized(); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
+        return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true });
+      }
 
       if (notification) return null;
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => '')}`);

@@ -76,11 +76,12 @@ async function writeJsonSecure(path, data, opts) {
 }
 
 export class OAuthManager {
-  constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort } = {}) {
+  constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort, refreshTimeoutMs = REFRESH_TIMEOUT_MS } = {}) {
     this.wm = wm;
     this.platform = platform;
     this.fetch = fetchImpl;
     this._redirectPort = redirectPort;
+    this._refreshTimeoutMs = refreshTimeoutMs;
     this._issuerCachePath = join(stateDir, 'oauth-issuer-cache.json');
     this._pendingPath = join(stateDir, 'oauth-pending.json');
     this._secretPath = join(stateDir, 'server-secret');
@@ -574,12 +575,14 @@ export class OAuthManager {
       return ws.oauth.tokens;
     })();
 
+    let timeoutHandle;
     const timeout = new Promise((_, reject) => {
-      const t = setTimeout(() => reject(new Error('refresh_timeout')), REFRESH_TIMEOUT_MS);
-      t.unref?.();
+      timeoutHandle = setTimeout(() => reject(new Error('refresh_timeout')), this._refreshTimeoutMs);
+      timeoutHandle.unref?.();
     });
-
-    const wrapped = Promise.race([task, timeout]);
+    // Swallow late rejection of the losing promise to avoid unhandledRejection
+    task.catch(() => {});
+    const wrapped = Promise.race([task, timeout]).finally(() => clearTimeout(timeoutHandle));
     this._refreshMutex.set(workspaceId, wrapped);
     try {
       return await wrapped;

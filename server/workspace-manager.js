@@ -122,13 +122,25 @@ export class WorkspaceManager {
     }
   }
 
+  setOAuthManager(oauth) {
+    this._oauth = oauth;
+  }
+
   _createProvider(ws) {
     // Shutdown old provider if replacing
     const old = this.providers.get(ws.id);
     if (old?.shutdown) { try { old.shutdown(); } catch {} }
 
     if (ws.kind === 'mcp-client') {
-      const provider = new McpClientProvider(ws);
+      const opts = {};
+      if (ws.oauth?.enabled && this._oauth) {
+        opts.tokenProvider = async () => this._oauth.getValidAccessToken(ws.id).catch(() => null);
+        opts.onUnauthorized = async () => {
+          try { await this._oauth.forceRefresh(ws.id); }
+          catch (err) { this.logError('oauth.refresh', ws.id, err.message); throw err; }
+        };
+      }
+      const provider = new McpClientProvider(ws, opts);
       provider.onToolsChanged(() => this._notifyChange());
       this.providers.set(ws.id, provider);
       // Warm up cache in background
@@ -431,6 +443,7 @@ export class WorkspaceManager {
 
   _computeStatus(ws, health) {
     if (!ws.enabled) return 'disabled';
+    if (ws.oauthActionNeeded) return 'action_needed';
     if (!health) return 'unknown';
     if (!health.ok) return 'error';
 

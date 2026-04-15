@@ -11,6 +11,7 @@ const tr = new ToolRegistry(wm);
 const mcp = new McpHandler(wm, tr);
 const sse = new SseManager();
 const oauth = new OAuthManager(wm);
+wm.setOAuthManager(oauth);
 
 // Bump tool version + notify SSE clients when workspaces change
 wm.onWorkspaceChange(() => {

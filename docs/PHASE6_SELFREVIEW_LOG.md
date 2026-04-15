@@ -69,3 +69,28 @@ Codex/Gemini 가용 불가 상태 (`demoted: host permission level (suggest) too
 - 만료된 state → `STATE_EXPIRED`
 - state 재사용 → `STATE_NOT_FOUND` (one-shot)
 - chmod 0o600 검증 — pending, server-secret 파일 stat 테스트 포함
+
+---
+
+## 6c (2026-04-15) — PASS
+
+**구현 파일**:
+- 수정: `providers/mcp-client.js` (`tokenProvider`/`onUnauthorized` 주입, `_buildHeaders` 메서드, 401 → onUnauthorized → 한 번 재시도),
+  `server/workspace-manager.js` (`setOAuthManager`, `_createProvider` 가 oauth.enabled 시 tokenProvider 주입, `_computeStatus` oauthActionNeeded 반영),
+  `server/oauth-manager.js` (refreshTimeoutMs 옵션, race 후 loser promise catch 로 unhandledRejection 방지)
+- 신규: `tests/phase6c-refresh.test.js`
+
+**체크리스트 대비**:
+- [x] McpClientProvider 가 oauth.enabled 시 Authorization 헤더 주입 (동적 tokenProvider)
+- [x] 401 → onUnauthorized (= OAuthManager.forceRefresh) → 한 번만 재시도 (_retry 플래그, 무한루프 방지 테스트 포함)
+- [x] getValidAccessToken 이 만료 leeway(60초) 체크 후 자동 refresh
+- [x] Per-workspace refresh mutex (`Map<workspaceId, Promise>`) — concurrent 3회 호출 → fetch 1회만 (테스트)
+- [x] Refresh mutex timeout 30s (기본), 테스트용 refreshTimeoutMs 주입 가능, timeout 시 mutex 해제 + 에러 전파 + 다음 호출 허용
+- [x] Refresh token rotation: 응답의 `refresh_token` 있으면 교체, 없으면 유지 (양쪽 테스트)
+- [x] refresh 실패 시 `ws.oauthActionNeeded=true` → `_computeStatus` 가 `action_needed` 반환 → Dashboard 배너 가능
+- [x] oauth.* audit 이벤트: `authorize_start`, `authorize_complete`, `refresh_success`, `refresh_fail`. 토큰 값 제외, tokenPrefix 메타만
+- [x] logError/logAudit 가 sanitize 통과 (6a 에서 이미 구현)
+
+**테스트**: 9 new. 전체 90/90 PASS.
+
+**비고**: `_rpcHttp` 는 기존 SSE+JSON 파싱을 유지한 채 Authorization 만 추가했으므로 Notion MCP 의 실제 응답 포맷 변경에도 탄력적.
