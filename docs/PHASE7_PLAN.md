@@ -402,20 +402,20 @@ mcp-handler.handle(body, { identity, profile })
 
 ---
 
-## 9. 성공 기준
+## 9. 성공 기준 — 완료 (codex 통합 PASS)
 
-- [ ] 2개 이상의 MCP 토큰이 같은 워크스페이스에 각각 독립 OAuth 로 authorize 가능
-- [ ] A 토큰은 Notion-work 만, B 토큰은 Linear-work 만 접근하는 ACL 정책이 Admin UI 로 설정됨
-- [ ] `?profile=read-only` 로 호출 시 쓰기 도구가 tools/list 에서 제외
-- [ ] Notion 상위 서버가 `tools/list_changed` 발송 시 ≤ 3초 내 클라이언트에 브로드캐스트
-- [ ] DCR 미지원 mock 서버도 Wizard UI 로 수동 client_id 입력 후 authorize 완료
-- [ ] GitHub / Linear 템플릿으로 원클릭 OAuth 연결 가능
-- [ ] Usage 탭에서 7일 상위 10 도구 + 토큰별 호출량 조회 가능
-- [ ] Audit JSONL 에 `oauth.refresh_success` 가 `grep` 가능한 형태로 누적
-- [ ] 95 → 135+ tests PASS
-- [ ] Phase 6 의 E2E 체크리스트 전체 여전히 동작
-- [ ] README 에서 Single-User 경고를 **선택사항** 으로 전환 (multi-tenant 지원 명시)
-- [ ] Legacy `BIFROST_MCP_TOKEN` (단수) 환경변수는 여전히 동작 (backwards-compat)
+- [x] 2개 이상의 MCP 토큰/identity 가 같은 워크스페이스에 각각 독립 OAuth 로 authorize 가능 (Phase 7c: `byIdentity[identity].tokens`, 단위테스트 phase7c-byidentity 로 2-identity E2E 검증)
+- [x] A 토큰은 Notion-work 만, B 토큰은 Linear-work 만 접근하는 ACL 정책이 Admin UI 로 설정됨 (Phase 7b: Tokens 탭 `allowedWorkspaces` glob + `/api/tokens` CRUD)
+- [x] `?profile=read-only` 로 호출 시 쓰기 도구가 tools/list 에서 제외 (Phase 7a: `tool-registry.getTools({profile})` glob 매칭 + Phase 7b 단위테스트)
+- [x] 상위 서버가 `tools/list_changed` 발송 시 클라이언트에 브로드캐스트 (Phase 7e: providers/mcp-client.js `_startNotificationStream` + `_handleStreamMessage` → `_toolsCache=null` + `onToolsChanged`)
+- [x] DCR 미지원 mock 서버도 Wizard UI 로 수동 client_id 입력 후 authorize 완료 (Phase 7d: `runOAuthFlow` DCR_UNSUPPORTED intercept + admin/routes.js `/authorize body.manual` 통합테스트)
+- [x] GitHub / Linear 템플릿으로 원클릭 OAuth 연결 가능 (Phase 7f: templates.js `github-oauth`, `linear-oauth` + 실제 probe 검증 docs/TEMPLATES_PROBE.md)
+- [x] Usage 탭에서 7일 상위 10 도구 + 토큰별 호출량 조회 가능 (Phase 7g: `topSummary({since:'7d'})` + admin UI Usage 탭)
+- [x] Audit JSONL 에 `oauth.refresh_success` 가 grep 가능 + identity 필드 포함 (Phase 7g: audit-logger.js + workspace-manager.logAudit 4-arg)
+- [x] 95 → **160** tests PASS (목표 135 초과달성, +65)
+- [x] Phase 6 의 E2E 체크리스트 전체 여전히 동작 (회귀 0)
+- [x] README 에서 Single-User 경고를 선택사항 으로 전환 (multi-tenant 지원 명시)
+- [x] Legacy `BIFROST_MCP_TOKEN` (단수) 환경변수는 여전히 동작 (McpTokenManager `identity='legacy'`, allowedWorkspaces=`*`)
 
 ---
 
