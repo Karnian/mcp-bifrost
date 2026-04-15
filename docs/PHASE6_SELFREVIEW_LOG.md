@@ -118,3 +118,42 @@ Codex/Gemini 가용 불가 상태 (`demoted: host permission level (suggest) too
 **범위 타협**:
 - **Remote Admin UI 가이드**는 6e USAGE.md 에 SSH tunnel 섹션으로 이관
 - **"13개 도구 발견" 상세 요약**은 기존 wizard summary 를 사용 (Step 4 에서 `/api/tools` 로 확인 가능)
+
+---
+
+## 6e (2026-04-15) — PASS
+
+**구현 파일**:
+- 신규: `tests/fixtures/mock-oauth-server.js`, `tests/phase6e-e2e-mock.test.js`, `tests/integration/notion-oauth.test.js`, `docs/NOTION_E2E_CHECKLIST.md`
+- 수정: `README.md` (Single-User 경고 + OAuth 상태), `docs/USAGE.md` (§11 OAuth 섹션 + SSH tunnel 가이드 + 통합 테스트 env)
+
+**체크리스트 대비**:
+- [x] Mock OAuth server fixture: `/.well-known/*`, `/register` (DCR on/off 토글), `/authorize` (S256 검증 + 자동 redirect), `/token` (authorize + refresh + rotation 옵션), `/mcp` (Bearer 검증 + initialize/tools/list/ping)
+- [x] 단위 테스트 (기존 6a/6b/6c + 신규 6e): 총 29 (목표 15+ 초과달성) + e2e 3 + integration 2 (env skip)
+- [x] 실제 Notion 통합 테스트: `BIFROST_TEST_NOTION_OAUTH=1` 플래그, `BIFROST_TEST_NOTION_CLIENT_ID` / `_REFRESH_TOKEN` env 로 CI 자동화, 기본 skip
+- [x] USAGE.md 업데이트: §11 OAuth 전용 섹션 (Wizard, 수동 client_id, Re-authorize, 토큰 갱신, 보안, SSH tunnel, 통합 테스트)
+- [x] README 업데이트: Single-User 경고 + Phase 6 기능 + 93 tests
+- [x] 수동 E2E 체크리스트: `docs/NOTION_E2E_CHECKLIST.md` (16 항목)
+
+**테스트**: 전체 95 (pass 93, skipped 2 integration). 6e 신규 3 e2e + 2 integration.
+
+**비고**: E2E 테스트 작성 중 `_persistTokens` 반환 객체의 `tokens` 속성이 이후 `forceRefresh` 에서 덮어써지는 live-reference 이슈 발견 — 테스트 스니펫에서 원본 token 값을 문자열로 캡쳐하도록 수정. 구현 버그 아님 (객체 참조 특성).
+
+---
+
+## 전체 통합 self-review (2026-04-15) — PASS
+
+**최종 상태**:
+- 5개 phase 모두 PASS + 6-pre
+- Phase 별 commit: `phase6-pre`(1), `phase6a`, `phase6b`, `phase6c`, `phase6d`, `phase6e` = 6+ commits
+- 테스트: 기준선 60 → 최종 95 (pass 93, skipped 2) — +35 증가 (Phase 6 전용 29 unit + 3 e2e + 2 integration, 나머지는 기존 유지)
+- 문서: NOTION_MCP_PROBE, PHASE6_SELFREVIEW_LOG, NOTION_E2E_CHECKLIST, USAGE §11 추가, README 경고 반영
+- 보안: chmod 0o600 (POSIX) + Windows 경고 배너, sanitize util, HMAC state, PKCE S256, refresh mutex+timeout+rotation, audit 로그 분리
+
+**잠재적 후속 작업**:
+- DCR 미지원 서버의 수동 client_id 입력 **UI** (현재는 API 만) — Phase 6.5
+- Token 암호화 저장 (OS keychain) — Phase 7
+- Multi-user OAuth 격리 — Phase 6.5
+- MCP 알림 구독 (notifications/tools/list_changed over SSE) — Phase 6.5
+
+**최종 판정**: 계획 대비 범위 달성, 테스트 목표 초과, 문서 완결. PASS.

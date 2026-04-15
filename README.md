@@ -77,7 +77,16 @@ tests/
 - ✅ Admin UI (Wizard, Dashboard, Detail, Tools Overview, Connect Guide)
 - ✅ 템플릿 라이브러리 (Filesystem, GitHub, Notion, ...)
 - ✅ Cloudflare Tunnel + .mcp.json 자동 생성
-- ✅ 60 tests passing
+- ✅ **OAuth 2.0 for remote MCP** (Notion 공식, PKCE, DCR, refresh rotation, mutex)
+- ✅ 93 tests passing
+
+## ⚠️ Single-User 경고 (Phase 6 OAuth)
+
+Bifrost 는 **단일 사용자 시나리오** 를 전제로 설계되었습니다. OAuth 로 획득한 access_token 은 Bifrost 인스턴스 전체가 공유하므로:
+
+- 여러 사용자가 같은 Bifrost 를 MCP 엔드포인트로 사용하면, **A 사용자 권한으로 authorize 된 Notion 페이지를 B 사용자도 조회 가능** → 정보 누설 위험
+- 공유 서버 운영 시: **사용자별로 Bifrost 인스턴스를 분리** 권장
+- 토큰 파일 권한은 POSIX 에서 `0600` 강제. Windows 는 OS 수준 보호가 제한적이므로 **공유 PC 사용을 자제**하세요 (Admin UI 상단 경고 배너 노출).
 
 ## License
 

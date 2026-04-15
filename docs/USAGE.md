@@ -615,4 +615,89 @@ curl -s -X POST http://localhost:3100/mcp \
 
 ---
 
+## 11. OAuth 2.0 원격 MCP 서버 (Phase 6)
+
+Notion 공식 hosted MCP (`https://mcp.notion.com/mcp`) 같은 OAuth-only 원격 MCP 서버는 **OAuth 2.0 Authorization Code + PKCE** 로 인증합니다.
+
+### Single-User 전제 (중요)
+
+Bifrost 는 단일 사용자 시나리오 전제로 설계되었습니다. OAuth 로 받은 access_token 은 Bifrost 인스턴스 전체가 공유하므로, 여러 사용자가 같은 Bifrost 엔드포인트를 공유하면 서로의 Notion 데이터에 접근할 수 있습니다. **사용자별 Bifrost 인스턴스 분리**를 권장합니다.
+
+### Wizard 로 등록
+
+1. Admin UI → `+ Add Workspace` → **Notion (공식 MCP · OAuth)** 템플릿 선택
+2. Display Name 입력 → 다음 단계 → 자동으로 discovery + DCR 실행
+3. 팝업에서 Notion 로그인 + 페이지 선택 + `Accept`
+4. 팝업이 닫히면 Admin UI 가 자동으로 완료 화면으로 이동
+
+### 수동 client_id 입력 (DCR 미지원 서버)
+
+DCR 을 지원하지 않는 서버라면 운영자 측에서 Bifrost 를 사전 등록해 `client_id`(필요 시 `client_secret`)를 받은 뒤:
+
+```bash
+curl -X POST http://localhost:3100/api/workspaces/{id}/authorize \
+  -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "manual": {
+          "clientId": "preset_client_id",
+          "clientSecret": "optional_secret",
+          "authMethod": "client_secret_basic"
+        }
+      }'
+```
+
+응답의 `authorizationUrl` 을 브라우저에서 열면 동일한 flow 가 이어집니다.
+
+### Re-authorize
+
+Detail 화면 > OAuth 패널 > **Re-authorize** 버튼. refresh_token 이 만료/revoke 되어 상태가 `action_needed` 로 바뀌면 이 버튼을 사용합니다.
+
+### 토큰 갱신 동작
+
+- Access token 은 만료 60초 전 leeway 로 자동 refresh
+- Per-workspace mutex 로 동시 호출 직렬화 (30s timeout)
+- Refresh token rotation 지원 (OAuth 2.1 권장): 응답에 `refresh_token` 이 있으면 자동 교체
+- 갱신 실패 → 워크스페이스 `action_needed` + Admin UI 배너
+
+### 보안
+
+- `config/workspaces.json`, `.ao/state/oauth-*.json`, `.ao/state/server-secret` 은 POSIX 에서 `chmod 0600` 강제
+- Windows 는 파일 권한 보호가 제한적이므로 **공유 PC 사용 자제** — Admin UI 상단에 경고 배너 자동 노출
+- 로그 sanitize: `Authorization: Bearer`, `access_token=`, `refresh_token=`, `code=`, `client_secret=` 패턴을 정규식으로 `***` 치환
+- Audit 이벤트 (`GET /api/oauth/audit`) 는 토큰 값을 기록하지 않고 `tokenPrefix` 등 메타만 남김
+
+### Remote Admin UI (SSH tunnel 권장)
+
+OAuth flow 는 **localhost 브라우저 + localhost Admin UI** 조합에서만 공식 지원합니다. 원격 Bifrost 를 운영할 때는 SSH tunnel 로 localhost 체감을 만드세요:
+
+```bash
+# 로컬 머신에서
+ssh -L 3100:localhost:3100 user@bifrost-host
+# 이후 로컬 브라우저로 http://localhost:3100/admin/ 접속 → Authorize 팝업 정상 동작
+```
+
+외부에 `0.0.0.0` 로 바인딩된 Bifrost 에 다른 네트워크 브라우저로 직접 접근하면 redirect_uri(`http://localhost:3100/oauth/callback`)가 해석되지 않아 실패합니다.
+
+### 수동 E2E 검증
+
+`docs/NOTION_E2E_CHECKLIST.md` 참고.
+
+### 통합 테스트 (선택)
+
+```bash
+# 첫 실행 — discovery 만 검증 (토큰 불필요)
+BIFROST_TEST_NOTION_OAUTH=1 npm test
+
+# refresh_token 확보 후 반복 실행
+BIFROST_TEST_NOTION_OAUTH=1 \
+BIFROST_TEST_NOTION_CLIENT_ID=dyn_abc \
+BIFROST_TEST_NOTION_REFRESH_TOKEN=RT.xxx \
+  npm test
+```
+
+환경변수가 없으면 integration 테스트는 자동 skip 됩니다.
+
+---
+
 질문/이슈는 README의 링크를 따라가세요.
