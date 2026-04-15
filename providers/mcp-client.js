@@ -143,17 +143,20 @@ export class McpClientProvider extends BaseProvider {
     if (this._streamStopping) return;
     if (this._streamAbort) return; // already running
     const url = this.httpConfig.url;
+    const tag = `[McpClient:${this.id}]`;
     (async () => {
       try {
         const controller = new AbortController();
         this._streamAbort = controller;
         const headers = await this._buildHeaders();
         headers['Accept'] = 'text/event-stream';
+        console.log(`${tag} stream: connecting ${url}`);
         const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
         const sid = res.headers.get('mcp-session-id');
         if (sid) this._sessionId = sid;
 
         if (res.status === 401) {
+          console.warn(`${tag} stream: 401 unauthorized, attempting refresh + reconnect`);
           // Try refresh once, then reconnect
           if (this._onUnauthorized) {
             try { await this._onUnauthorized(this._identity || 'default'); } catch {}
@@ -164,22 +167,27 @@ export class McpClientProvider extends BaseProvider {
         if (res.status === 405 || res.status === 404) {
           // Server doesn't support GET stream — give up silently (not all MCP
           // 2025-03-26 servers implement the optional GET endpoint).
+          console.log(`${tag} stream: server does not support GET stream (${res.status}), disabling`);
           return;
         }
         if (!res.ok || !res.body) {
+          console.warn(`${tag} stream: unexpected status ${res.status}, reconnecting`);
           this._scheduleStreamReconnect();
           return;
         }
         this._streamConnected = true;
         this._streamBackoffMs = 30_000; // reset on successful connect
+        console.log(`${tag} stream: connected (session=${sid || 'none'})`);
         await this._readSseStream(res.body);
         // Normal end → reconnect
         this._streamConnected = false;
+        console.log(`${tag} stream: closed, scheduling reconnect`);
         this._scheduleStreamReconnect();
       } catch (err) {
         // AbortError → shutdown; otherwise reconnect
         this._streamConnected = false;
         if (err.name !== 'AbortError' && !this._streamStopping) {
+          console.warn(`${tag} stream: error ${err.message}, reconnecting`);
           this._scheduleStreamReconnect();
         }
       } finally {
@@ -260,6 +268,7 @@ export class McpClientProvider extends BaseProvider {
     if (this._streamReconnectTimer) return;
     const delay = this._streamBackoffMs;
     this._streamBackoffMs = Math.min(this._streamBackoffMs * 2, this._streamBackoffMaxMs);
+    console.log(`[McpClient:${this.id}] stream: reconnect scheduled in ${delay}ms`);
     this._streamReconnectTimer = setTimeout(() => {
       this._streamReconnectTimer = null;
       if (!this._streamStopping) this._startNotificationStream();

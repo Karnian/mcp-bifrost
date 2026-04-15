@@ -51,7 +51,8 @@ export class McpHandler {
       }
       return { jsonrpc: '2.0', id, result };
     } catch (err) {
-      return this._errorResponse(id, -32603, err.message);
+      const code = typeof err.code === 'number' ? err.code : -32603;
+      return this._errorResponse(id, code, err.message);
     }
   }
 
@@ -133,6 +134,10 @@ export class McpHandler {
   }
 
   async _toolsList(identity, profileObj) {
+    // Defense-in-depth: unknown profile must not silently fall through.
+    // Matches _toolsCall behavior; aligns with _assertAllowed -32602 semantics.
+    this._assertAllowed(identity, profileObj);
+
     let tools = await this.tr.getTools({ identity, profile: profileObj });
 
     // Legacy built-in "read-only" filter — only applied when profile has no toolsInclude

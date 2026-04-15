@@ -261,6 +261,26 @@ test('CRLF-terminated SSE events are parsed correctly', async () => {
   }
 });
 
+test('stream logs connecting/connected transitions (observability for E2E #13)', async () => {
+  const mock = new MockOAuthServer();
+  await mock.start();
+  const origLog = console.log;
+  const logs = [];
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  try {
+    const prov = await seededProvider(mock);
+    await prov._ensureConnected();
+    await waitForStream(prov);
+    await prov.shutdown();
+    const streamLogs = logs.filter(l => l.includes('[McpClient:w1] stream:'));
+    assert.ok(streamLogs.some(l => l.includes('connecting')), `expected 'connecting' log, got: ${streamLogs.join(' | ')}`);
+    assert.ok(streamLogs.some(l => l.includes('connected')), `expected 'connected' log, got: ${streamLogs.join(' | ')}`);
+  } finally {
+    console.log = origLog;
+    await mock.stop();
+  }
+});
+
 test('shutdown clears stream reconnect timer', async () => {
   const mock = new MockOAuthServer();
   await mock.start();

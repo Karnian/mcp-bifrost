@@ -107,6 +107,18 @@ test('Unknown profile → tools/call returns unauthorized-style error', async ()
   assert.equal(res.result._meta.bifrost.category, 'unauthorized');
 });
 
+test('Unknown profile → tools/list returns JSON-RPC error -32602 (defense-in-depth parity with tools/call)', async () => {
+  const wm = fakeWm({
+    workspaces: [{ id: 'n-a', kind: 'mcp-client', provider: 'notion', namespace: 'a', displayName: 'A', enabled: true, _provider: fakeProvider([{ name: 'hello', description: '', inputSchema: {} }]) }],
+  });
+  const tr = new ToolRegistry(wm);
+  const mcp = new McpHandler(wm, tr);
+  const res = await mcp.handle({ jsonrpc: '2.0', id: 9, method: 'tools/list' }, { profile: 'nope' });
+  assert.ok(res.error, 'tools/list with unknown profile must return JSON-RPC error, not silent all-tools');
+  assert.equal(res.error.code, -32602);
+  assert.match(res.error.message, /unknown profile/i);
+});
+
 test('Empty tools/list result when profile excludes everything', async () => {
   const wm = fakeWm({
     workspaces: [
