@@ -78,15 +78,23 @@ tests/
 - ✅ 템플릿 라이브러리 (Filesystem, GitHub, Notion, ...)
 - ✅ Cloudflare Tunnel + .mcp.json 자동 생성
 - ✅ **OAuth 2.0 for remote MCP** (Notion 공식, PKCE, DCR, refresh rotation, mutex)
-- ✅ 93 tests passing
+- ✅ **Multi-tenant (Phase 7)** — `byIdentity` OAuth 격리, 다중 MCP 토큰 + ACL, 프로필, 사용량/감사 로그
+- ✅ 160+ tests passing
 
-## ⚠️ Single-User 경고 (Phase 6 OAuth)
+## 다중 사용자 운영 (Phase 7)
 
-Bifrost 는 **단일 사용자 시나리오** 를 전제로 설계되었습니다. OAuth 로 획득한 access_token 은 Bifrost 인스턴스 전체가 공유하므로:
+Phase 7 부터 **여러 MCP 토큰 + 토큰별 OAuth 격리** 를 지원합니다. 기존 단일 사용자 배포는 추가 설정 없이 그대로 동작합니다.
 
-- 여러 사용자가 같은 Bifrost 를 MCP 엔드포인트로 사용하면, **A 사용자 권한으로 authorize 된 Notion 페이지를 B 사용자도 조회 가능** → 정보 누설 위험
-- 공유 서버 운영 시: **사용자별로 Bifrost 인스턴스를 분리** 권장
-- 토큰 파일 권한은 POSIX 에서 `0600` 강제. Windows 는 OS 수준 보호가 제한적이므로 **공유 PC 사용을 자제**하세요 (Admin UI 상단 경고 배너 노출).
+- **MCP 토큰 발급**: Admin UI "Tokens" 탭에서 `+ Issue Token` → 토큰별 `allowedWorkspaces` / `allowedProfiles` glob 지정. 발급 시 plaintext 가 1회만 노출되며 저장은 `scrypt` 해시. 레거시 `BIFROST_MCP_TOKEN` (단수) 은 identity=`legacy`, 전체 허용으로 계속 동작.
+- **OAuth 격리**: 같은 워크스페이스에 여러 identity 를 authorize 가능. 토큰별 `byIdentity[identity].tokens` 로 저장, refresh mutex 도 identity 별로 독립. A identity 의 refresh_token 은 B 가 접근 불가.
+- **프로필**: `/mcp?profile=read-only` 등으로 도구/워크스페이스 glob 필터. `config/workspaces.json > server.profiles` 또는 Admin UI "Profiles" 탭에서 편집.
+- **사용량 / 감사**: `.ao/state/usage.jsonl` + `audit.jsonl` (chmod 0600, 10MB 로테이션, 30일 보관). Admin UI "Usage" / "Audit" 탭에서 조회.
+
+### 보안 주의사항 (선택)
+
+- 토큰 파일은 POSIX 에서 `chmod 0600`. Windows 는 OS 수준 보호가 제한적이므로 공유 PC 사용 자제.
+- 단일 사용자 환경에서도 `BIFROST_MCP_TOKEN` 을 설정해 익명 접근을 차단할 것.
+- 원격 노출 (Cloudflare Tunnel 등) 시 MCP 토큰 필수. Admin UI 는 기본적으로 localhost 전용, `BIFROST_ADMIN_EXPOSE=1` 로만 외부 노출.
 
 ## License
 
