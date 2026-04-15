@@ -1,10 +1,11 @@
-import { readFile, writeFile, rename, copyFile, watch } from 'node:fs/promises';
+import { readFile, writeFile, rename, copyFile, watch, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NotionProvider } from '../providers/notion.js';
 import { SlackProvider } from '../providers/slack.js';
 import { McpClientProvider } from '../providers/mcp-client.js';
+import { sanitize } from './oauth-sanitize.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -23,6 +24,29 @@ function aliasFromDisplayName(displayName) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '') || 'workspace';
+}
+
+function maskOAuth(oauth) {
+  if (!oauth) return oauth;
+  const masked = { ...oauth };
+  if (oauth.clientId && typeof oauth.clientId === 'string' && oauth.clientId.length > 8) {
+    masked.clientId = `${oauth.clientId.slice(0, 4)}***${oauth.clientId.slice(-4)}`;
+  }
+  if (oauth.clientSecret) masked.clientSecret = '***';
+  if (oauth.tokens) {
+    const t = oauth.tokens;
+    masked.tokens = {
+      // Never expose token values in masked view.
+      hasAccessToken: !!t.accessToken,
+      hasRefreshToken: !!t.refreshToken,
+      accessTokenPrefix: t.accessToken ? `${t.accessToken.slice(0, 4)}***${t.accessToken.slice(-4)}` : null,
+      expiresAt: t.expiresAt || null,
+      tokenType: t.tokenType || null,
+      scope: t.scope || null,
+      lastRefreshAt: t.lastRefreshAt || null,
+    };
+  }
+  return masked;
 }
 
 function maskCredentials(credentials) {
@@ -49,6 +73,8 @@ export class WorkspaceManager {
     this._loaded = false; // only save to disk after explicit load()
     this.errorLog = []; // last 50 errors
     this.auditLog = []; // last 10 config changes
+    this.oauthAuditLog = []; // separate ring (50) for oauth.* events
+    this.fileSecurityWarning = process.platform === 'win32';
   }
 
   async load() {
@@ -121,11 +147,22 @@ export class WorkspaceManager {
     this._writeLock = this._writeLock.then(async () => {
       if (existsSync(CONFIG_PATH)) {
         await copyFile(CONFIG_PATH, BACKUP_PATH);
+        await this._chmod0600(BACKUP_PATH);
       }
       await writeFile(TMP_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
+      await this._chmod0600(TMP_PATH);
       await rename(TMP_PATH, CONFIG_PATH);
+      await this._chmod0600(CONFIG_PATH);
     });
     return this._writeLock;
+  }
+
+  async _chmod0600(path) {
+    if (process.platform === 'win32') {
+      this.fileSecurityWarning = true;
+      return;
+    }
+    try { await chmod(path, 0o600); } catch { /* best-effort */ }
   }
 
   getWorkspaces({ masked = true, includeDeleted = false } = {}) {
@@ -150,6 +187,7 @@ export class WorkspaceManager {
     if (ws.credentials) result.credentials = maskCredentials(ws.credentials);
     if (ws.env) result.env = maskCredentials(ws.env);
     if (ws.headers) result.headers = maskCredentials(ws.headers);
+    if (ws.oauth) result.oauth = maskOAuth(ws.oauth);
   }
 
   _getRawWorkspace(id) {
@@ -199,6 +237,18 @@ export class WorkspaceManager {
       } else if (data.transport === 'http' || data.transport === 'sse') {
         ws.url = data.url;
         ws.headers = data.headers || {};
+        if (data.oauth && typeof data.oauth === 'object') {
+          ws.oauth = {
+            enabled: !!data.oauth.enabled,
+            issuer: data.oauth.issuer || null,
+            clientId: data.oauth.clientId || null,
+            clientSecret: data.oauth.clientSecret || null,
+            authMethod: data.oauth.authMethod || 'none',
+            resource: data.oauth.resource || null,
+            metadataCache: data.oauth.metadataCache || null,
+            tokens: null,
+          };
+        }
       }
     }
 
@@ -437,18 +487,24 @@ export class WorkspaceManager {
       timestamp: new Date().toISOString(),
       category,
       workspace,
-      message,
+      message: sanitize(message),
     });
     if (this.errorLog.length > 50) this.errorLog.length = 50;
   }
 
   logAudit(action, workspace, details) {
-    this.auditLog.unshift({
+    const entry = {
       timestamp: new Date().toISOString(),
       action,
       workspace,
-      details,
-    });
+      details: sanitize(details),
+    };
+    if (typeof action === 'string' && action.startsWith('oauth.')) {
+      this.oauthAuditLog.unshift(entry);
+      if (this.oauthAuditLog.length > 50) this.oauthAuditLog.length = 50;
+      return;
+    }
+    this.auditLog.unshift(entry);
     if (this.auditLog.length > 10) this.auditLog.length = 10;
   }
 
@@ -465,6 +521,8 @@ export class WorkspaceManager {
       })),
       errorLog: this.errorLog,
       auditLog: this.auditLog,
+      oauthAuditLog: this.oauthAuditLog,
+      fileSecurityWarning: this.fileSecurityWarning,
     };
   }
 }
