@@ -185,25 +185,52 @@ function esc(str) {
 // --- Workspace Detail (edit) ---
 function renderOAuthPanel(ws) {
   const o = ws.oauth || {};
-  const tokens = o.tokens || {};
-  const exp = tokens.expiresAt ? new Date(tokens.expiresAt) : null;
+  // Phase 7c: prefer byIdentity map; merge legacy default tokens for display.
+  const byIdRaw = o.byIdentity || {};
+  const identityRows = {};
+  for (const [name, entry] of Object.entries(byIdRaw)) {
+    identityRows[name] = entry.tokens || {};
+  }
+  // Legacy fallback for default
+  if (!identityRows.default && o.tokens) identityRows.default = o.tokens;
+  if (Object.keys(identityRows).length === 0) identityRows.default = {};
+
   const now = new Date();
-  const expLabel = !exp ? '—'
-    : exp.getTime() - now.getTime() < 0 ? '만료됨'
-    : `${Math.round((exp.getTime() - now.getTime()) / 60000)}분 후 만료`;
-  const lastRefresh = tokens.lastRefreshAt ? `${Math.round((now.getTime() - new Date(tokens.lastRefreshAt).getTime()) / 60000)}분 전` : '—';
+  const formatExp = (t) => {
+    const exp = t?.expiresAt ? new Date(t.expiresAt) : null;
+    return !exp ? '—'
+      : exp.getTime() - now.getTime() < 0 ? '만료됨'
+      : `${Math.round((exp.getTime() - now.getTime()) / 60000)}분 후`;
+  };
+  const formatLast = (t) => t?.lastRefreshAt
+    ? `${Math.round((now.getTime() - new Date(t.lastRefreshAt).getTime()) / 60000)}분 전`
+    : '—';
+
+  const rows = Object.entries(identityRows).map(([name, t]) => `
+    <tr>
+      <td><code>${esc(name)}</code></td>
+      <td>${t.hasAccessToken ? `<code>${esc(t.accessTokenPrefix || '***')}</code>` : '<em style="color:var(--text-secondary)">(미발급)</em>'}</td>
+      <td>${formatExp(t)}</td>
+      <td>${formatLast(t)}</td>
+      <td><button type="button" class="btn btn-sm btn-outline" data-reauth-identity="${esc(name)}">Re-authorize</button></td>
+    </tr>`).join('');
+
   return `
     <div class="oauth-panel" style="margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:8px;background:rgba(59,130,246,0.06)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <strong>OAuth 2.0</strong>
-        <button type="button" id="btn-reauthorize" class="btn btn-secondary">Re-authorize</button>
+        <strong>OAuth 2.0 (byIdentity)</strong>
+        <button type="button" id="btn-add-identity" class="btn btn-sm btn-primary">+ Add identity</button>
       </div>
-      <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:13px;line-height:1.6">
+      <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:13px;line-height:1.6;margin-bottom:12px">
         <span style="color:var(--text-secondary)">Issuer</span><span><code>${esc(o.issuer || '—')}</code></span>
         <span style="color:var(--text-secondary)">Client ID</span><span><code>${esc(o.clientId || '—')}</code> <em style="color:var(--text-secondary)">(${esc(o.authMethod || 'none')})</em></span>
-        <span style="color:var(--text-secondary)">Access token</span><span>${tokens.hasAccessToken ? `<code>${esc(tokens.accessTokenPrefix || '***')}</code> — ${expLabel}` : '<em>(미발급)</em>'}</span>
-        <span style="color:var(--text-secondary)">Last refresh</span><span>${lastRefresh}</span>
       </div>
+      <table class="tools-table" style="width:100%">
+        <thead><tr><th>Identity</th><th>Access token</th><th>Expires</th><th>Last refresh</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <!-- Legacy single-button anchor retained for Phase 6 behavior -->
+      <button type="button" id="btn-reauthorize" class="hidden">_</button>
     </div>
   `;
 }
@@ -261,18 +288,41 @@ async function openDetail(id) {
   $('#detail-tools-list').innerHTML = `<p style="font-size:13px;color:var(--text-secondary)">MCP tool pattern: <code>${ws.provider}_${ws.namespace}__*</code></p>`;
   $('#detail-health-info').innerHTML = `<p>Status: ${statusLabel(ws.status)}</p>`;
 
+  // Phase 7c — per-identity Re-authorize buttons
+  document.querySelectorAll('[data-reauth-identity]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const identity = btn.dataset.reauthIdentity;
+      const ok = await runOAuthFlow(ws.id, { identity });
+      if (ok) await refreshDetailAfterOAuth(ws.id);
+    });
+  });
+  const addId = $('#btn-add-identity');
+  if (addId) {
+    addId.addEventListener('click', async () => {
+      const identity = prompt('새 identity 이름 (영숫자/_/-, 1~64자):', '');
+      if (!identity || !/^[a-zA-Z0-9_\-.]{1,64}$/.test(identity)) {
+        if (identity) alert('identity 이름 형식이 맞지 않습니다.');
+        return;
+      }
+      const ok = await runOAuthFlow(ws.id, { identity });
+      if (ok) await refreshDetailAfterOAuth(ws.id);
+    });
+  }
+  // Legacy button (kept hidden for back-compat with Phase 6 event tests)
   const reauth = $('#btn-reauthorize');
   if (reauth) {
     reauth.addEventListener('click', async () => {
       const ok = await runOAuthFlow(ws.id);
-      if (ok) {
-        const wsRes = await api('GET', '/api/workspaces');
-        state.workspaces = wsRes.data || [];
-        const updated = state.workspaces.find(w => w.id === ws.id);
-        if (updated) { state.currentDetail = updated; openDetail(updated.id); }
-      }
+      if (ok) await refreshDetailAfterOAuth(ws.id);
     });
   }
+}
+
+async function refreshDetailAfterOAuth(wsId) {
+  const wsRes = await api('GET', '/api/workspaces');
+  state.workspaces = wsRes.data || [];
+  const updated = state.workspaces.find(w => w.id === wsId);
+  if (updated) { state.currentDetail = updated; openDetail(updated.id); }
 }
 
 $('#btn-back-dashboard').addEventListener('click', async () => {
@@ -567,14 +617,14 @@ async function runWizardTest(payload) {
   wizardState.createdId = id;
 }
 
-async function runOAuthFlow(wsId) {
+async function runOAuthFlow(wsId, { identity = 'default' } = {}) {
   try {
-    let res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, {});
+    let res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { identity });
     // Phase 7d: if DCR is unsupported, prompt for a manual client_id and retry.
     if (!res.ok && res.error?.code === 'DCR_UNSUPPORTED') {
       const manual = await promptManualClientCreds();
       if (!manual) return false;
-      res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { manual });
+      res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { identity, manual });
     }
     if (!res.ok) {
       alert(`OAuth 초기화 실패: ${res.error?.message || 'unknown'}\n\nDCR 미지원 서버인 경우 Admin API 로 수동 client_id 를 등록하세요.`);
@@ -594,7 +644,10 @@ async function runOAuthFlow(wsId) {
         // grace: check once more
       }
       const wsRes = await api('GET', `/api/workspaces/${encodeURIComponent(wsId)}`);
-      if (wsRes.ok && wsRes.data?.oauth?.tokens?.hasAccessToken) {
+      // Phase 7c: check byIdentity[identity] (falls back to legacy tokens for default)
+      const byId = wsRes.ok ? wsRes.data?.oauth?.byIdentity?.[identity]?.tokens : null;
+      const legacy = identity === 'default' ? wsRes.data?.oauth?.tokens : null;
+      if ((byId?.hasAccessToken) || (legacy?.hasAccessToken)) {
         try { popup.close(); } catch {}
         return true;
       }

@@ -132,6 +132,13 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
         if (ws.kind !== 'mcp-client' || (ws.transport !== 'http' && ws.transport !== 'sse')) {
           return sendJson(res, 400, { ok: false, error: { code: 'OAUTH_UNAVAILABLE', message: 'OAuth requires mcp-client HTTP/SSE transport' } });
         }
+        // Phase 7c: validate identity BEFORE any side-effecting work (discover, register, _save).
+        // Treat explicitly-present empty string as invalid (don't silently coerce to 'default').
+        const identityRaw = body?.identity;
+        const identity = identityRaw === undefined || identityRaw === null ? 'default' : String(identityRaw);
+        if (!/^[a-zA-Z0-9_\-.]{1,64}$/.test(identity)) {
+          return sendJson(res, 400, { ok: false, error: { code: 'INVALID_IDENTITY', message: 'identity must match [a-zA-Z0-9_\\-.]{1,64}' } });
+        }
         try {
           // Discovery (use cached when metadataCache is present + not forced)
           const force = body?.forceDiscovery === true;
@@ -169,8 +176,9 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
             authServerMetadata: asMetadata,
             resource,
             scope: body?.scope,
+            identity,
           });
-          sendJson(res, 200, { ok: true, data: { authorizationUrl: init.authorizationUrl, issuer, clientId, authMethod, fileSecurityWarning: oauth.getFileSecurityWarning() } });
+          sendJson(res, 200, { ok: true, data: { authorizationUrl: init.authorizationUrl, issuer, clientId, authMethod, identity, fileSecurityWarning: oauth.getFileSecurityWarning() } });
         } catch (err) {
           const code = err.code || 'OAUTH_ERROR';
           const status = code === 'DCR_UNSUPPORTED' ? 422 : code === 'DCR_FAILED' ? 502 : 500;

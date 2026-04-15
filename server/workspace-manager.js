@@ -171,8 +171,13 @@ export class WorkspaceManager {
       const provider = new McpClientProvider(ws, opts);
       provider.onToolsChanged(() => this._notifyChange());
       this.providers.set(ws.id, provider);
-      // Warm up cache in background
-      provider.refreshTools().catch(() => {});
+      // Phase 7c: skip warm-up when OAuth is enabled but no default tokens exist
+      // — warming up would call refreshTools → 401 → forceRefresh → NO_REFRESH_TOKEN
+      // and set oauthActionNeeded, which is a false positive pre-authorization.
+      const needsAuth = ws.oauth?.enabled && !ws.oauth?.byIdentity?.default?.tokens?.accessToken && !ws.oauth?.tokens?.accessToken;
+      if (!needsAuth) {
+        provider.refreshTools().catch(() => {});
+      }
       return;
     }
     // Native (default for backward compat)

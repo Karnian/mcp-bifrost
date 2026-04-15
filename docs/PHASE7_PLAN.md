@@ -203,7 +203,7 @@ mcp-handler.handle(body, { identity, profile })
 - [x] `tool-registry.getTools({ identity, profile })` — `allowedWorkspaces` + profile globs 기준 필터 (reverse map 은 unfiltered 유지 → 2차 검증 여지)
 - [x] 테스트 (20 신규): hash round-trip, verify 실패 케이스, legacy env, multi env + 4-segment format, issue/resolve/revoke, rotate 무효화, duplicate id, matchPattern glob, ACL helper, tools/list + tools/call + resources/list + profile toolsInclude/workspacesInclude + identity.allowedProfiles + unknown profile + open mode
 
-### 7c-pre — 스키마 + 시그니처 migration (1일) ★ 신규 (Codex REVISE 반영)
+### 7c-pre — 스키마 + 시그니처 migration (1일) ★ 신규 (Codex REVISE 반영) — 완료 (codex PASS 3회차 REVISE → PASS)
 **Rationale**: 현재 `server/workspace-manager.js:139`, `server/oauth-manager.js:506`, `providers/mcp-client.js:127` 가 전부 단일 `oauth.tokens` + no-arg `tokenProvider()` 전제. 7c 직행 시 호환층 없이 회귀 위험.
 - [ ] `ws.oauth.byIdentity` 스키마 도입 — 기존 `ws.oauth.tokens` 는 **보조 미러**로 유지 (`byIdentity.default.tokens` 와 동기화)
 - [ ] 부팅 시 atomic migration: `_save()` 원자적 쓰기 패턴 재사용, 실패 시 backup rollback
@@ -213,7 +213,7 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] Phase 6 테스트 95건 전수 통과 (회귀 0)
 - [ ] 신규 테스트: (a) migration forward (단일→byIdentity), (b) migration backward-compat read (legacy `ws.oauth.tokens` 만 있는 config 로드), (c) tokenProvider 두 시그니처 모두 동작, (d) per-identity action_needed 플래그 독립성
 
-### 7c — 토큰별 OAuth 격리 (2일) ★ Phase 6.5 핵심
+### 7c — 토큰별 OAuth 격리 (2일) ★ Phase 6.5 핵심 — 완료 (codex PASS 2회차 REVISE → PASS)
 - [ ] 7c-pre 의 shim 위에서 authorize/refresh/callback 전 경로에 identity 전파 (pending state, mutex 키 등)
 - [ ] `OAuthManager.initializeAuthorization(workspaceId, { identity, ... })` — pending state 에 identity 포함, completeAuthorization 가 `byIdentity[identity]` 에 저장
 - [ ] `OAuthManager.getValidAccessToken(workspaceId, identity)` — 해당 identity 의 tokens 참조. 없으면 `action_needed` (해당 identity 만)
