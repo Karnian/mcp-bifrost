@@ -33,6 +33,7 @@
           <span id="tool-count-badge" class="badge"></span>
           <button id="btn-nav-tools" class="btn btn-sm btn-outline">Tools</button>
           <button id="btn-nav-tokens" class="btn btn-sm btn-outline">Tokens</button>
+          <button id="btn-nav-profiles" class="btn btn-sm btn-outline">Profiles</button>
           <button id="btn-nav-connect" class="btn btn-sm btn-outline">Connect</button>
           <button id="btn-test-all" class="btn btn-sm">Test All</button>
           <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
@@ -257,6 +258,27 @@
           </thead>
           <tbody id="tokens-tbody"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Profiles (Phase 7a) -->
+    <div id="profiles-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-profiles" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Profiles</h2>
+        </div>
+        <div class="topbar-right">
+          <button id="btn-save-profiles" class="btn btn-primary btn-sm">Save</button>
+        </div>
+      </nav>
+      <div class="tools-overview-content">
+        <p style="color:#94a3b8;font-size:13px;margin-bottom:12px">
+          프로필은 요청 URL 의 <code>?profile=NAME</code> 으로 선택되며, 도구/워크스페이스를 glob 으로 필터합니다. (<code>*search*</code>, <code>notion-*</code> 등)
+        </p>
+        <textarea id="profiles-editor" spellcheck="false"
+          style="width:100%;min-height:320px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:13px"></textarea>
+        <div id="profiles-preview" style="margin-top:16px"></div>
       </div>
     </div>
 

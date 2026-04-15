@@ -181,12 +181,13 @@ mcp-handler.handle(body, { identity, profile })
 
 ## 4. 구현 단계
 
-### 7a — Profile 기반 엔드포인트 (1일) ★ 단순
-- [ ] `config/profiles.json` 로더 + hot reload
-- [ ] `server/tool-registry.js` — `getTools({ profile })` 확장: `profile.toolsInclude` glob 매칭 (`*search*` → `search`, `search_pages` 등)
-- [ ] `server/index.js` — `/mcp?profile=...`, `/sse?profile=...` 파싱 후 mcp-handler 에 전달
-- [ ] Admin UI: "Profiles" 탭 (정의된 프로필 목록 + glob 에디터 + 프리뷰: 매칭되는 도구)
-- [ ] 테스트: 프로필 매칭 glob, 존재하지 않는 프로필 요청 시 에러, 빈 결과 집합
+### 7a — Profile 기반 엔드포인트 (1일) ★ 단순 — 완료 (codex PASS)
+- [x] ~~`config/profiles.json` 로더~~ — `config/workspaces.json > server.profiles` 내부 저장 (계획서 §2 승인 기본값 따름)
+- [x] `server/tool-registry.js` — `getTools({ profile })` glob 매칭 (`*search*`, `notion-*`) — originalName 과 namespaced 양쪽 대상
+- [x] `server/index.js` — `/mcp?profile=...`, `/sse?profile=...` 파싱 후 `mcp.handle(body, { identity, profile })`
+- [x] Admin UI: "Profiles" 탭 (JSON editor + preview: 매칭 도구 수/샘플 5개 per profile)
+- [x] `/api/profiles` GET (profiles + preview) / PUT (validate 후 저장)
+- [x] 테스트 (6 신규): matchPattern escape chars/empty, originalName 과 namespaced 양쪽 매칭, 교집합 (identity ∩ profile), unknown profile tools/call, 프로필로 전부 제외된 tools/list
 
 ### 7b — 다중 MCP 토큰 + ACL (1.5일) — 완료 (codex PASS after REVISE)
 - [x] `server/mcp-token-manager.js`:

@@ -342,10 +342,44 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null) {
         return;
       }
 
-      // GET /api/profiles — list configured profiles (Phase 7a groundwork)
+      // --- Phase 7a: profile CRUD ---
       if (path === '/api/profiles' && method === 'GET') {
         const profiles = wm.config?.server?.profiles || {};
-        sendJson(res, 200, { ok: true, data: profiles });
+        // Include preview: how many tools each profile matches right now.
+        const allTools = await tr.getTools();
+        const { matchPattern } = await import('../server/mcp-token-manager.js');
+        const preview = {};
+        for (const [name, def] of Object.entries(profiles)) {
+          const matched = allTools.filter(t => {
+            if (!t._workspace) return true;
+            if (Array.isArray(def.workspacesInclude) && !def.workspacesInclude.some(p => matchPattern(p, t._workspace))) return false;
+            if (Array.isArray(def.toolsInclude) && !def.toolsInclude.some(p => matchPattern(p, t._originalName) || matchPattern(p, t.name))) return false;
+            return true;
+          });
+          preview[name] = { toolCount: matched.length, sampleTools: matched.slice(0, 5).map(t => t.name) };
+        }
+        sendJson(res, 200, { ok: true, data: { profiles, preview } });
+        return;
+      }
+      if (path === '/api/profiles' && method === 'PUT') {
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILES', message: 'profiles must be an object map' } });
+        }
+        // Shallow validate: each profile may have toolsInclude/workspacesInclude string arrays.
+        for (const [name, def] of Object.entries(body)) {
+          if (!def || typeof def !== 'object') return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILE', message: `profile '${name}' must be object` } });
+          for (const key of ['toolsInclude', 'workspacesInclude']) {
+            if (def[key] !== undefined && (!Array.isArray(def[key]) || def[key].some(x => typeof x !== 'string'))) {
+              return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILE_FIELD', message: `profile '${name}'.${key} must be string[]` } });
+            }
+          }
+        }
+        if (!wm.config.server) wm.config.server = { port: 3100 };
+        wm.config.server.profiles = body;
+        await wm._save();
+        wm.logAudit('profile.update', null, `Updated ${Object.keys(body).length} profile(s)`);
+        sendJson(res, 200, { ok: true, data: body });
         return;
       }
 

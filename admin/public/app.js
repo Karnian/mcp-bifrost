@@ -804,6 +804,46 @@ async function revokeToken(id) {
   } catch (err) { alert(`revoke 실패: ${err.message}`); }
 }
 
+// --- Profiles (Phase 7a) ---
+$('#btn-nav-profiles').addEventListener('click', async () => {
+  showScreen('profiles');
+  await loadProfilesView();
+});
+$('#btn-back-from-profiles').addEventListener('click', async () => await enterDashboard());
+
+async function loadProfilesView() {
+  try {
+    const res = await api('GET', '/api/profiles');
+    const profiles = res.data?.profiles || {};
+    const preview = res.data?.preview || {};
+    $('#profiles-editor').value = JSON.stringify(profiles, null, 2);
+    const previewEl = $('#profiles-preview');
+    previewEl.innerHTML = Object.keys(profiles).length
+      ? `<h4>Preview</h4>` + Object.entries(preview).map(([name, p]) =>
+          `<div style="margin:8px 0;padding:10px;background:#1e293b;border-radius:6px">
+             <strong>${esc(name)}</strong> — ${p.toolCount} tools
+             <div style="color:#94a3b8;font-size:12px;margin-top:4px">${esc(p.sampleTools.join(', '))}${p.toolCount > 5 ? ' …' : ''}</div>
+           </div>`
+        ).join('')
+      : '<p style="color:#64748b">No profiles defined. Add one in the editor above.</p>';
+  } catch (err) { console.error('Profiles load failed:', err); }
+}
+
+$('#btn-save-profiles').addEventListener('click', async () => {
+  let parsed;
+  try { parsed = JSON.parse($('#profiles-editor').value || '{}'); }
+  catch (e) { alert(`JSON 파싱 실패: ${e.message}`); return; }
+  try {
+    const res = await api('PUT', '/api/profiles', parsed);
+    if (res.ok) {
+      alert('프로필이 저장되었습니다.');
+      await loadProfilesView();
+    } else {
+      alert(`저장 실패: ${res.error?.message}`);
+    }
+  } catch (err) { alert(`저장 실패: ${err.message}`); }
+});
+
 // --- Connect Guide ---
 $('#btn-nav-connect').addEventListener('click', async () => {
   showScreen('connect');
