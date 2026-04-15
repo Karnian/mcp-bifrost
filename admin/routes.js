@@ -16,7 +16,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-export function createAdminRoutes(wm, tr, sse) {
+export function createAdminRoutes(wm, tr, sse, oauth) {
   return async (req, res, url) => {
     const path = url.pathname;
     const method = req.method;
@@ -118,6 +118,103 @@ export function createAdminRoutes(wm, tr, sse) {
         const id = decodeURIComponent(testMatch[1]);
         const result = await wm.testConnection(id);
         sendJson(res, 200, { ok: true, data: result });
+        return;
+      }
+
+      // POST /api/workspaces/:id/authorize — OAuth initialize (discovery + DCR + authorizationUrl)
+      const authMatch = path.match(/^\/api\/workspaces\/([^/]+)\/authorize$/);
+      if (authMatch && method === 'POST') {
+        if (!oauth) return sendJson(res, 500, { ok: false, error: { code: 'OAUTH_NOT_CONFIGURED' } });
+        const id = decodeURIComponent(authMatch[1]);
+        const body = await readBody(req).catch(() => ({}));
+        const ws = wm._getRawWorkspace(id);
+        if (!ws) return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `Workspace '${id}' not found` } });
+        if (ws.kind !== 'mcp-client' || (ws.transport !== 'http' && ws.transport !== 'sse')) {
+          return sendJson(res, 400, { ok: false, error: { code: 'OAUTH_UNAVAILABLE', message: 'OAuth requires mcp-client HTTP/SSE transport' } });
+        }
+        try {
+          // Discovery (use cached when metadataCache is present + not forced)
+          const force = body?.forceDiscovery === true;
+          let asMetadata = ws.oauth?.metadataCache;
+          let issuer = ws.oauth?.issuer;
+          let resource = ws.oauth?.resource;
+          if (!asMetadata || force) {
+            const disc = await oauth.discover(ws.url, { wwwAuthenticate: body?.wwwAuthenticate });
+            issuer = disc.issuer;
+            asMetadata = disc.authServerMetadata;
+            resource = disc.resource;
+            ws.oauth = { ...(ws.oauth || {}), enabled: true, issuer, resource, metadataCache: asMetadata };
+          }
+          // Register
+          let authMethod = ws.oauth?.authMethod;
+          let clientId = ws.oauth?.clientId;
+          let clientSecret = ws.oauth?.clientSecret || null;
+          if (!clientId || body?.forceRegister) {
+            if (body?.manual && body.manual.clientId) {
+              const reg = await oauth.registerManual(issuer, body.manual);
+              clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
+            } else {
+              const reg = await oauth.registerClient(issuer, asMetadata, { reuse: body?.reuse !== false });
+              clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
+            }
+            ws.oauth = { ...ws.oauth, clientId, clientSecret, authMethod };
+          }
+          await wm._save();
+
+          const init = await oauth.initializeAuthorization(id, {
+            issuer,
+            clientId,
+            clientSecret,
+            authMethod,
+            authServerMetadata: asMetadata,
+            resource,
+            scope: body?.scope,
+          });
+          sendJson(res, 200, { ok: true, data: { authorizationUrl: init.authorizationUrl, issuer, clientId, authMethod, fileSecurityWarning: oauth.getFileSecurityWarning() } });
+        } catch (err) {
+          const code = err.code || 'OAUTH_ERROR';
+          const status = code === 'DCR_UNSUPPORTED' ? 422 : code === 'DCR_FAILED' ? 502 : 500;
+          sendJson(res, status, { ok: false, error: { code, message: err.message } });
+        }
+        return;
+      }
+
+      // POST /api/oauth/discover — standalone discovery for Wizard preview
+      if (path === '/api/oauth/discover' && method === 'POST') {
+        if (!oauth) return sendJson(res, 500, { ok: false, error: { code: 'OAUTH_NOT_CONFIGURED' } });
+        const body = await readBody(req);
+        if (!body?.url) return sendJson(res, 400, { ok: false, error: { code: 'MISSING_URL' } });
+        try {
+          const disc = await oauth.discover(body.url, { wwwAuthenticate: body.wwwAuthenticate });
+          const cached = await oauth.getCachedClient(disc.issuer, oauth.pickAuthMethod(disc.authServerMetadata));
+          sendJson(res, 200, { ok: true, data: {
+            issuer: disc.issuer,
+            resource: disc.resource,
+            dcrSupported: !!disc.authServerMetadata.registration_endpoint,
+            methodsSupported: disc.authServerMetadata.token_endpoint_auth_methods_supported || [],
+            authorizationEndpoint: disc.authServerMetadata.authorization_endpoint,
+            tokenEndpoint: disc.authServerMetadata.token_endpoint,
+            cachedClient: cached ? { clientId: cached.clientId, authMethod: cached.authMethod, source: cached.source } : null,
+            metadataCache: disc.authServerMetadata,
+          } });
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: { code: 'DISCOVERY_FAILED', message: err.message } });
+        }
+        return;
+      }
+
+      // GET /api/oauth/audit — oauth audit events
+      if (path === '/api/oauth/audit' && method === 'GET') {
+        sendJson(res, 200, { ok: true, data: wm.oauthAuditLog || [] });
+        return;
+      }
+
+      // GET /api/oauth/security — fileSecurityWarning flag
+      if (path === '/api/oauth/security' && method === 'GET') {
+        sendJson(res, 200, { ok: true, data: {
+          fileSecurityWarning: wm.fileSecurityWarning || oauth?.getFileSecurityWarning?.() || false,
+          platform: process.platform,
+        } });
         return;
       }
 

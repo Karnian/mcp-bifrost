@@ -41,3 +41,31 @@ Codex/Gemini 가용 불가 상태 (`demoted: host permission level (suggest) too
 **테스트**: 12 new tests. 전체 72/72 PASS (기준선 60 + 6a 12).
 
 **비고**: 기존 `providers/mcp-client.js:_rpcHttp` 가 이미 SSE+JSON 양쪽 파싱 지원 → 6c 에서 추가 스트림 파싱 작업 없음.
+
+---
+
+## 6b (2026-04-15) — PASS
+
+**구현 파일**:
+- 신규: `tests/phase6b-pkce-state.test.js`
+- 수정: `server/index.js` (OAuthManager 주입 + `/oauth/callback` 라우트 + startup purge), `admin/routes.js` (`POST /api/workspaces/:id/authorize`, `POST /api/oauth/discover`, `GET /api/oauth/audit`, `GET /api/oauth/security`), `server/oauth-manager.js` 는 6a 에서 선반영 (`_newPkce`, `_signState/_verifyState`, `initializeAuthorization`, `completeAuthorization`, pending 영속 + chmod, `purgeStalePending`)
+
+**체크리스트 대비**:
+- [x] PKCE: `crypto.randomBytes(32)` → base64url verifier, SHA256 → base64url challenge, method S256
+- [x] state: HMAC-SHA256(server_secret, `{random, workspaceId, issuedAt}`) + base64url, `body.sig` 포맷
+- [x] server_secret: `.ao/state/server-secret` 최초 기동 시 생성, chmod 0o600, 재기동 생존
+- [x] pending 영속: `.ao/state/oauth-pending.json`, chmod 0o600
+- [x] Startup purge: `server/index.js` 에서 `oauth.purgeStalePending()` 호출
+- [x] One-shot + TTL: flow 완료/만료 시 즉시 삭제, `STATE_NOT_FOUND`/`STATE_EXPIRED`/`INVALID_STATE` 에러 코드
+- [x] `/api/workspaces/:id/authorize` → 자동 discover (metadataCache 없으면) + register (clientId 없으면) + initializeAuthorization → authorizationUrl 반환
+- [x] `/oauth/callback` 엔드포인트: admin token 없이 접근 (state HMAC 이 가드), 한국어 성공/실패 HTML 반환 (auto-close)
+- [x] 토큰 교환: Basic/POST body/None 3가지 auth method 지원 (`_tokenRequest`), `resource` 파라미터 전달
+- [x] tokens 저장 + `_save()` (workspaces.json chmod 0o600)
+
+**테스트**: 9 new tests. 전체 81/81 PASS.
+
+**보안 자체검증**:
+- state 위조 시도 → `INVALID_STATE` 거부 (tampered body 테스트)
+- 만료된 state → `STATE_EXPIRED`
+- state 재사용 → `STATE_NOT_FOUND` (one-shot)
+- chmod 0o600 검증 — pending, server-secret 파일 stat 테스트 포함

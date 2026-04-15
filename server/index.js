@@ -4,11 +4,13 @@ import { ToolRegistry } from './tool-registry.js';
 import { McpHandler } from './mcp-handler.js';
 import { SseManager } from './sse-manager.js';
 import { createAdminRoutes } from '../admin/routes.js';
+import { OAuthManager } from './oauth-manager.js';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
 const mcp = new McpHandler(wm, tr);
 const sse = new SseManager();
+const oauth = new OAuthManager(wm);
 
 // Bump tool version + notify SSE clients when workspaces change
 wm.onWorkspaceChange(() => {
@@ -17,6 +19,9 @@ wm.onWorkspaceChange(() => {
 });
 
 await wm.load();
+
+// Purge stale OAuth pending state (older than 10 minutes) after load
+oauth.purgeStalePending().catch(() => {});
 
 // Run initial health checks in background
 wm.testAll().catch(err => console.error('[Bifrost] Initial health check failed:', err.message));
@@ -27,7 +32,7 @@ setInterval(() => {
   wm.testAll().catch(err => console.error('[Bifrost] Background health check failed:', err.message));
 }, HEALTH_CHECK_INTERVAL);
 
-const adminRoutes = createAdminRoutes(wm, tr, sse);
+const adminRoutes = createAdminRoutes(wm, tr, sse, oauth);
 
 function parseBearerToken(req) {
   const auth = req.headers['authorization'];
@@ -161,6 +166,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // --- OAuth callback (no admin auth — state HMAC is the guard) ---
+  if (path === '/oauth/callback' && req.method === 'GET') {
+    return handleOAuthCallback(req, res, url);
+  }
+
   // --- Admin API & UI ---
   if (path.startsWith('/api/') || path.startsWith('/admin')) {
     return adminRoutes(req, res, url);
@@ -204,4 +214,66 @@ server.listen(port, host, () => {
   }
 });
 
-export { wm, tr, mcp, sse, server };
+function renderOAuthResultPage({ ok, title, message }) {
+  const color = ok ? '#16a34a' : '#dc2626';
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+.card{background:#1e293b;border-radius:12px;padding:2.5rem 3rem;max-width:480px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.3)}
+h1{margin:0 0 .5rem;color:${color};font-size:1.5rem}
+p{margin:.5rem 0;color:#94a3b8;line-height:1.6}
+.hint{margin-top:1.5rem;font-size:.875rem;color:#64748b}</style></head>
+<body><div class="card"><h1>${title}</h1><p>${message}</p>
+<p class="hint">이 창을 닫고 Bifrost Admin UI 로 돌아가세요.</p></div>
+<script>setTimeout(()=>{try{window.close()}catch(e){}},4000)</script></body></html>`;
+}
+
+async function handleOAuthCallback(req, res, url) {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const error = url.searchParams.get('error');
+
+  if (error) {
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderOAuthResultPage({
+      ok: false,
+      title: '인증 실패',
+      message: `OAuth provider 오류: ${error}`,
+    }));
+    return;
+  }
+
+  if (!code || !state) {
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderOAuthResultPage({
+      ok: false,
+      title: '인증 실패',
+      message: 'code 또는 state 파라미터가 누락되었습니다.',
+    }));
+    return;
+  }
+
+  try {
+    const result = await oauth.completeAuthorization(state, code);
+    tr.bumpVersion();
+    sse.broadcastNotification('notifications/tools/list_changed');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderOAuthResultPage({
+      ok: true,
+      title: '✓ 인증 완료',
+      message: `${result.issuer} 에서 access_token 을 발급받았습니다.`,
+    }));
+  } catch (err) {
+    wm.logError('oauth.callback', null, err.message);
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderOAuthResultPage({
+      ok: false,
+      title: '인증 실패',
+      message: err.code === 'INVALID_STATE' ? 'state 검증 실패 (위조 또는 만료)'
+        : err.code === 'STATE_EXPIRED' ? 'state 가 만료되었습니다 (10분 초과). 다시 시작하세요.'
+        : err.code === 'STATE_NOT_FOUND' ? 'state 를 찾을 수 없습니다 (이미 사용되었거나 서버 재시작됨).'
+        : `토큰 교환 실패: ${err.message}`,
+    }));
+  }
+}
+
+export { wm, tr, mcp, sse, oauth, server };
