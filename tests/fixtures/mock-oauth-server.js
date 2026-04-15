@@ -47,7 +47,19 @@ export class MockOAuthServer {
   }
 
   async stop() {
+    if (this._streamRes) { try { this._streamRes.end(); } catch {} }
     if (this.server) await new Promise(resolve => this.server.close(resolve));
+  }
+
+  /**
+   * Phase 7e helper: push a server-sent event (JSON-RPC notification) to the
+   * currently-open GET /mcp stream, if any.
+   */
+  pushNotification(notification) {
+    if (!this._streamRes) return false;
+    const payload = JSON.stringify({ jsonrpc: '2.0', ...notification });
+    this._streamRes.write(`data: ${payload}\n\n`);
+    return true;
   }
 
   _send(res, status, body, headers = {}) {
@@ -151,6 +163,29 @@ export class MockOAuthServer {
         return this._send(res, 200, body);
       }
       return this._send(res, 400, { error: 'unsupported_grant_type' });
+    }
+    // Phase 7e: GET /mcp with Accept: text/event-stream opens a notification stream
+    if (url.pathname === '/mcp' && req.method === 'GET') {
+      const auth = req.headers['authorization'] || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+      if (!token || !this.tokens.has(token)) {
+        return this._send(res, 401, { error: 'invalid_token' }, {
+          'WWW-Authenticate': `Bearer realm="OAuth", resource_metadata="${this.baseUrl}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`,
+        });
+      }
+      const sid = this._streamSessionId || (this._streamSessionId = `sess_${b64url(randomBytes(8))}`);
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Mcp-Session-Id': sid,
+      });
+      // Flush an initial comment line so the client's fetch resolves promptly
+      // and the stream is confirmed connected before we push any events.
+      res.write(': connected\n\n');
+      this._streamRes = res;
+      req.on('close', () => { this._streamRes = null; });
+      return;
     }
     if (url.pathname === '/mcp' && req.method === 'POST') {
       const auth = req.headers['authorization'] || '';

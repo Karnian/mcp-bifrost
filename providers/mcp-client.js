@@ -43,6 +43,15 @@ export class McpClientProvider extends BaseProvider {
     this._lastRestartAt = 0;
     this._stopping = false;
     this._onToolsChanged = null;
+
+    // Phase 7e: HTTP/SSE notification stream state
+    this._sessionId = null;                // Mcp-Session-Id from server
+    this._streamAbort = null;              // AbortController for active GET stream
+    this._streamReconnectTimer = null;
+    this._streamBackoffMs = 30_000;        // initial reconnect delay
+    this._streamBackoffMaxMs = 5 * 60_000; // cap at 5 min
+    this._streamConnected = false;
+    this._streamStopping = false;
   }
 
   onToolsChanged(cb) { this._onToolsChanged = cb; }
@@ -105,22 +114,173 @@ export class McpClientProvider extends BaseProvider {
       throw new Error(`${this.transport}: url is required`);
     }
     // HTTP/SSE doesn't need a persistent connection for initialize in Streamable HTTP mode;
-    // we just POST each request. For SSE, we also open a GET stream for notifications (omitted for simplicity).
+    // we just POST each request. For SSE, we also open a GET stream for notifications (Phase 7e).
     // Handshake: send initialize to verify reachability.
     try {
       await this._rpcHttp('initialize', {
-        protocolVersion: '2025-03-26',
+        protocolVersion: '2025-06-18',
         capabilities: {},
         clientInfo: { name: 'mcp-bifrost', version: '0.1.0' },
       }, { timeoutMs: 5000 });
       // initialized notification
       this._rpcHttp('notifications/initialized', {}, { timeoutMs: 3000, notification: true }).catch(() => {});
       this._initialized = true;
+      // Phase 7e: start long-lived GET stream for server-sent notifications.
+      this._startNotificationStream();
     } catch (err) {
       this._initialized = false;
       throw err;
     }
   }
+
+  /**
+   * Phase 7e: open a long-lived GET /mcp (or /sse) with Accept: text/event-stream.
+   * Parse `data:` lines and dispatch JSON-RPC responses/notifications.
+   * On disconnect, reconnect with exponential backoff (30s → 5min).
+   * 401 → call onUnauthorized then reconnect (fresh token).
+   */
+  _startNotificationStream() {
+    if (this._streamStopping) return;
+    if (this._streamAbort) return; // already running
+    const url = this.httpConfig.url;
+    (async () => {
+      try {
+        const controller = new AbortController();
+        this._streamAbort = controller;
+        const headers = await this._buildHeaders();
+        headers['Accept'] = 'text/event-stream';
+        const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+        const sid = res.headers.get('mcp-session-id');
+        if (sid) this._sessionId = sid;
+
+        if (res.status === 401) {
+          // Try refresh once, then reconnect
+          if (this._onUnauthorized) {
+            try { await this._onUnauthorized(this._identity || 'default'); } catch {}
+          }
+          this._scheduleStreamReconnect();
+          return;
+        }
+        if (res.status === 405 || res.status === 404) {
+          // Server doesn't support GET stream — give up silently (not all MCP
+          // 2025-03-26 servers implement the optional GET endpoint).
+          return;
+        }
+        if (!res.ok || !res.body) {
+          this._scheduleStreamReconnect();
+          return;
+        }
+        this._streamConnected = true;
+        this._streamBackoffMs = 30_000; // reset on successful connect
+        await this._readSseStream(res.body);
+        // Normal end → reconnect
+        this._streamConnected = false;
+        this._scheduleStreamReconnect();
+      } catch (err) {
+        // AbortError → shutdown; otherwise reconnect
+        this._streamConnected = false;
+        if (err.name !== 'AbortError' && !this._streamStopping) {
+          this._scheduleStreamReconnect();
+        }
+      } finally {
+        this._streamAbort = null;
+      }
+    })();
+  }
+
+  async _readSseStream(body) {
+    // Node fetch body is a ReadableStream of Uint8Array.
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by a blank line. Accept both LF ("\n\n")
+        // and CRLF ("\r\n\r\n") terminations to interoperate with servers
+        // that emit the spec-compliant CRLF form.
+        while (true) {
+          const crlfIdx = buffer.indexOf('\r\n\r\n');
+          const lfIdx = buffer.indexOf('\n\n');
+          let sepIdx = -1; let sepLen = 0;
+          if (crlfIdx !== -1 && (lfIdx === -1 || crlfIdx < lfIdx)) { sepIdx = crlfIdx; sepLen = 4; }
+          else if (lfIdx !== -1) { sepIdx = lfIdx; sepLen = 2; }
+          if (sepIdx === -1) break;
+          const rawEvent = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + sepLen);
+          const dataLines = rawEvent.split(/\r?\n/)
+            .filter(l => l.startsWith('data:'))
+            .map(l => l.slice(5).replace(/^ /, ''));
+          if (dataLines.length === 0) continue;
+          const payload = dataLines.join('\n');
+          try {
+            const msg = JSON.parse(payload);
+            this._handleStreamMessage(msg);
+          } catch { /* malformed event — drop */ }
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch {}
+    }
+  }
+
+  _handleStreamMessage(msg) {
+    // Response to an outstanding request (matched by id) — route back to _pending
+    if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+      const pending = this._pending.get(msg.id);
+      if (pending) {
+        this._pending.delete(msg.id);
+        if (msg.error) pending.reject(Object.assign(new Error(msg.error.message || 'RPC error'), { code: msg.error.code }));
+        else pending.resolve(msg.result);
+      }
+      return;
+    }
+    // Server notification
+    if (msg.method === 'notifications/tools/list_changed') {
+      this._toolsCache = null;
+      if (this._onToolsChanged) this._onToolsChanged(this.id);
+      return;
+    }
+    if (msg.method === 'notifications/resources/list_changed') {
+      // passthrough — no cache to invalidate at this layer
+      if (this._onToolsChanged) this._onToolsChanged(this.id);
+      return;
+    }
+    // Server-initiated request (elicitations etc.) — spec range outside
+    // Bifrost's current support. Drop and debug-log.
+    if (msg.method && msg.id !== undefined) {
+      // intentionally dropped — upstream servers must tolerate no response
+    }
+  }
+
+  _scheduleStreamReconnect() {
+    if (this._streamStopping) return;
+    if (this._streamReconnectTimer) return;
+    const delay = this._streamBackoffMs;
+    this._streamBackoffMs = Math.min(this._streamBackoffMs * 2, this._streamBackoffMaxMs);
+    this._streamReconnectTimer = setTimeout(() => {
+      this._streamReconnectTimer = null;
+      if (!this._streamStopping) this._startNotificationStream();
+    }, delay);
+    this._streamReconnectTimer.unref?.();
+  }
+
+  _stopNotificationStream() {
+    this._streamStopping = true;
+    if (this._streamReconnectTimer) {
+      clearTimeout(this._streamReconnectTimer);
+      this._streamReconnectTimer = null;
+    }
+    if (this._streamAbort) {
+      try { this._streamAbort.abort(); } catch {}
+      this._streamAbort = null;
+    }
+    this._streamConnected = false;
+  }
+
+  isStreamConnected() { return this._streamConnected; }
 
   async _buildHeaders(identity) {
     const headers = {
@@ -133,6 +293,8 @@ export class McpClientProvider extends BaseProvider {
       const token = await this._tokenProvider(identity || this._identity || 'default');
       if (token) headers['Authorization'] = `Bearer ${token}`;
     }
+    // Phase 7e: propagate Mcp-Session-Id once the server assigns one.
+    if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId;
     return headers;
   }
 
@@ -146,6 +308,17 @@ export class McpClientProvider extends BaseProvider {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     timer.unref();
 
+    // Phase 7e: register the pending request BEFORE sending so that a response
+    // can arrive via either the POST body OR the long-lived GET stream (per
+    // Streamable HTTP spec: server MAY answer via the open notification stream
+    // when the client has one open). The POST path still wins the race if it
+    // returns the result directly.
+    let streamResolver;
+    const streamPromise = notification ? null : new Promise((resolve, reject) => {
+      streamResolver = { resolve, reject };
+      this._pending.set(id, streamResolver);
+    });
+
     try {
       const res = await fetch(this.httpConfig.url, {
         method: 'POST',
@@ -155,35 +328,63 @@ export class McpClientProvider extends BaseProvider {
       });
       clearTimeout(timer);
 
+      // Phase 7e: capture Mcp-Session-Id on any response (server MAY issue on initialize)
+      const sid = res.headers.get('mcp-session-id');
+      if (sid && sid !== this._sessionId) {
+        this._sessionId = sid;
+      }
+
       if (res.status === 401 && this._onUnauthorized && !_retry) {
+        if (!notification) this._pending.delete(id);
         try { await this._onUnauthorized(identity || this._identity || 'default'); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
         return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true, identity });
       }
 
       if (notification) return null;
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+
+      // 202 Accepted / 204 No Content → server will deliver the response via
+      // the open SSE stream. Wait on the _pending promise (with an overall
+      // timeout) instead of parsing the POST body.
+      if (res.status === 202 || res.status === 204) {
+        const streamTimer = setTimeout(() => {
+          const p = this._pending.get(id);
+          if (p) { this._pending.delete(id); p.reject(new Error(`RPC timeout via stream: ${method}`)); }
+        }, timeoutMs);
+        streamTimer.unref?.();
+        try { return await streamPromise; } finally { clearTimeout(streamTimer); }
+      }
+
+      if (!res.ok) { this._pending.delete(id); throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => '')}`); }
 
       const ctype = res.headers.get('content-type') || '';
       if (ctype.includes('text/event-stream')) {
-        // Parse first JSON-RPC response event from SSE stream
+        // Inline SSE: server emits the response as one SSE event within the POST body.
         const text = await res.text();
-        for (const line of text.split('\n')) {
-          if (line.startsWith('data: ')) {
+        for (const line of text.split(/\r?\n/)) {
+          if (line.startsWith('data:')) {
+            const payload = line.replace(/^data:\s?/, '');
             try {
-              const msg = JSON.parse(line.slice(6));
+              const msg = JSON.parse(payload);
               if (msg.id === id) {
+                this._pending.delete(id);
                 if (msg.error) throw Object.assign(new Error(msg.error.message), { code: msg.error.code });
                 return msg.result;
               }
             } catch { /* continue */ }
           }
         }
+        this._pending.delete(id);
         throw new Error('No matching response in SSE stream');
       }
 
       const msg = await res.json();
+      this._pending.delete(id);
       if (msg.error) throw Object.assign(new Error(msg.error.message), { code: msg.error.code });
       return msg.result;
+    } catch (err) {
+      // Clean up pending entry if still present
+      if (!notification) this._pending.delete(id);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -303,6 +504,7 @@ export class McpClientProvider extends BaseProvider {
 
   async shutdown() {
     if (this.transport === 'stdio') this._killChild();
+    this._stopNotificationStream();
     this._initialized = false;
     this._rejectAll(new Error('Shutting down'));
   }

@@ -224,7 +224,7 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] `/api/workspaces/:id/authorize` body 에 `{ identity }` 파라미터 추가 (기본 `"default"`)
 - [ ] 테스트: 같은 ws 에 2 identity authorize, 각각 독립 refresh, identity 해제 후 해당 tokens 만 purge, cross-identity 접근 거부, concurrent refresh 시 identity-A 와 identity-B 의 mutex 독립
 
-### 7d — DCR 미지원 수동 client_id Wizard UI (0.5일)
+### 7d — DCR 미지원 수동 client_id Wizard UI (0.5일) — 완료 (codex PASS)
 - [ ] Wizard Step 3 에서 `/api/oauth/discover` 응답의 `dcrSupported=false` 면 "수동 Client 입력" 폼 노출:
   - Client ID (required)
   - Client Secret (optional, 빈칸이면 public client)
@@ -233,7 +233,7 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] 성공 시 나머지 flow 동일 (OAuth 팝업)
 - [ ] 테스트: e2e mock server 에 `dcrEnabled=false` 모드로 테스트
 
-### 7e — MCP notifications over HTTP/SSE 구독 (2일) ★ 기술적 리스크 중간
+### 7e — MCP notifications over HTTP/SSE 구독 (2일) ★ 기술적 리스크 중간 — 완료 (codex PASS 2회차 REVISE → PASS)
 - [ ] `providers/mcp-client.js`: transport=http/sse 일 때 backoff 포함 `GET /mcp` (또는 `/sse`) 로 long-lived SSE stream 오픈
 - [ ] `Mcp-Session-Id` 헤더 주고받기 (spec 2025-06-18)
 - [ ] `data:` 라인 파싱 후 JSON-RPC 응답/알림 구분
@@ -244,7 +244,7 @@ mcp-handler.handle(body, { identity, profile })
 - [ ] Admin UI 의 Tools 탭 refresh 시 workspace 의 stream 상태 (connected/disconnected) 배지 표시
 - [ ] 테스트: mock server 에 `/stream` 엔드포인트 추가, upstream 이 notification 보내면 클라이언트가 cache invalidation 수행 확인, 재연결 검증
 
-### 7f — Remote MCP 템플릿 확장 (0.5일)
+### 7f — Remote MCP 템플릿 확장 (0.5일) — 완료 (codex PASS)
 - [ ] `admin/public/templates.js` 에 추가:
   ```js
   { id: 'github-oauth', transport: 'http', url: 'https://api.githubcopilot.com/mcp/', oauth: true, ... }
