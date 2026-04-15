@@ -69,8 +69,23 @@ async function enterDashboard() {
   await loadDashboard();
 }
 
+async function checkSecurityBanner() {
+  try {
+    const res = await api('GET', '/api/oauth/security');
+    const el = $('#security-banner');
+    if (!el) return;
+    if (res.ok && res.data?.fileSecurityWarning) {
+      el.textContent = `⚠️  ${res.data.platform === 'win32' ? 'Windows' : 'OS'}: 토큰 파일 권한(chmod 0600)이 적용되지 않았습니다. 공유 PC 사용을 자제하세요.`;
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  } catch { /* best-effort */ }
+}
+
 async function loadDashboard() {
   try {
+    checkSecurityBanner().catch(() => {});
     const [wsRes, statusRes] = await Promise.all([
       api('GET', '/api/workspaces'),
       api('GET', '/api/status'),
@@ -168,6 +183,31 @@ function esc(str) {
 }
 
 // --- Workspace Detail (edit) ---
+function renderOAuthPanel(ws) {
+  const o = ws.oauth || {};
+  const tokens = o.tokens || {};
+  const exp = tokens.expiresAt ? new Date(tokens.expiresAt) : null;
+  const now = new Date();
+  const expLabel = !exp ? '—'
+    : exp.getTime() - now.getTime() < 0 ? '만료됨'
+    : `${Math.round((exp.getTime() - now.getTime()) / 60000)}분 후 만료`;
+  const lastRefresh = tokens.lastRefreshAt ? `${Math.round((now.getTime() - new Date(tokens.lastRefreshAt).getTime()) / 60000)}분 전` : '—';
+  return `
+    <div class="oauth-panel" style="margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:8px;background:rgba(59,130,246,0.06)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <strong>OAuth 2.0</strong>
+        <button type="button" id="btn-reauthorize" class="btn btn-secondary">Re-authorize</button>
+      </div>
+      <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:13px;line-height:1.6">
+        <span style="color:var(--text-secondary)">Issuer</span><span><code>${esc(o.issuer || '—')}</code></span>
+        <span style="color:var(--text-secondary)">Client ID</span><span><code>${esc(o.clientId || '—')}</code> <em style="color:var(--text-secondary)">(${esc(o.authMethod || 'none')})</em></span>
+        <span style="color:var(--text-secondary)">Access token</span><span>${tokens.hasAccessToken ? `<code>${esc(tokens.accessTokenPrefix || '***')}</code> — ${expLabel}` : '<em>(미발급)</em>'}</span>
+        <span style="color:var(--text-secondary)">Last refresh</span><span>${lastRefresh}</span>
+      </div>
+    </div>
+  `;
+}
+
 async function openDetail(id) {
   const ws = state.workspaces.find(w => w.id === id);
   if (!ws) return;
@@ -193,12 +233,20 @@ async function openDetail(id) {
         <textarea id="detail-cmd-env" rows="3">${Object.entries(ws.env || {}).map(([k,v]) => `${k}=${v}`).join('\n')}</textarea>
       `;
     } else if (ws.transport === 'http' || ws.transport === 'sse') {
-      credDiv.innerHTML = `
-        <label>URL</label>
-        <input type="text" id="detail-http-url" value="${esc(ws.url || '')}">
-        <label>Headers (one per line: Header: value)</label>
-        <textarea id="detail-http-headers" rows="3">${Object.entries(ws.headers || {}).map(([k,v]) => `${k}: ${v}`).join('\n')}</textarea>
-      `;
+      if (ws.oauth?.enabled) {
+        credDiv.innerHTML = `
+          <label>URL</label>
+          <input type="text" id="detail-http-url" value="${esc(ws.url || '')}" readonly>
+          ${renderOAuthPanel(ws)}
+        `;
+      } else {
+        credDiv.innerHTML = `
+          <label>URL</label>
+          <input type="text" id="detail-http-url" value="${esc(ws.url || '')}">
+          <label>Headers (one per line: Header: value)</label>
+          <textarea id="detail-http-headers" rows="3">${Object.entries(ws.headers || {}).map(([k,v]) => `${k}: ${v}`).join('\n')}</textarea>
+        `;
+      }
     }
   } else if (ws.provider === 'notion') {
     credDiv.innerHTML = `<label>Integration Token</label><input type="password" id="detail-cred-token" placeholder="${esc(ws.credentials?.token || 'ntn_...')}">`;
@@ -212,6 +260,19 @@ async function openDetail(id) {
 
   $('#detail-tools-list').innerHTML = `<p style="font-size:13px;color:var(--text-secondary)">MCP tool pattern: <code>${ws.provider}_${ws.namespace}__*</code></p>`;
   $('#detail-health-info').innerHTML = `<p>Status: ${statusLabel(ws.status)}</p>`;
+
+  const reauth = $('#btn-reauthorize');
+  if (reauth) {
+    reauth.addEventListener('click', async () => {
+      const ok = await runOAuthFlow(ws.id);
+      if (ok) {
+        const wsRes = await api('GET', '/api/workspaces');
+        state.workspaces = wsRes.data || [];
+        const updated = state.workspaces.find(w => w.id === ws.id);
+        if (updated) { state.currentDetail = updated; openDetail(updated.id); }
+      }
+    });
+  }
 }
 
 $('#btn-back-dashboard').addEventListener('click', async () => {
@@ -477,6 +538,24 @@ async function runWizardTest(payload) {
     return;
   }
 
+  // OAuth path: skip capability/sample until authorized
+  if (payload.oauth?.enabled) {
+    setTestStep('wiz-ts-capability', true, 'OAuth 필요');
+    const authorized = await runOAuthFlow(id);
+    if (!authorized) {
+      setTestStep('wiz-ts-sample', false, 'Authorization 취소됨');
+      return;
+    }
+    try {
+      const t = await api('POST', `/api/workspaces/${encodeURIComponent(id)}/test`);
+      if (t.ok && t.data?.ok) setTestStep('wiz-ts-sample', true, 'Connected');
+      else setTestStep('wiz-ts-sample', false, t.data?.message);
+    } catch (err) { setTestStep('wiz-ts-sample', false, err.message); }
+    $('.wiz-next-3').disabled = false;
+    wizardState.createdId = id;
+    return;
+  }
+
   try {
     const t = await api('POST', `/api/workspaces/${encodeURIComponent(id)}/test`);
     if (t.ok && t.data?.ok) setTestStep('wiz-ts-capability', true);
@@ -486,6 +565,41 @@ async function runWizardTest(payload) {
   setTestStep('wiz-ts-sample', true, 'Discovered tools');
   $('.wiz-next-3').disabled = false;
   wizardState.createdId = id;
+}
+
+async function runOAuthFlow(wsId) {
+  try {
+    const res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, {});
+    if (!res.ok) {
+      alert(`OAuth 초기화 실패: ${res.error?.message || 'unknown'}\n\nDCR 미지원 서버인 경우 Admin API 로 수동 client_id 를 등록하세요.`);
+      return false;
+    }
+    const { authorizationUrl } = res.data;
+    const popup = window.open(authorizationUrl, 'bifrost-oauth', 'width=560,height=760');
+    if (!popup) {
+      alert(`팝업이 차단되었습니다. 다음 URL 을 직접 열어주세요:\n\n${authorizationUrl}`);
+      return false;
+    }
+    // Poll workspace state until tokens arrive or timeout (5 min)
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 1500));
+      if (popup.closed) {
+        // grace: check once more
+      }
+      const wsRes = await api('GET', `/api/workspaces/${encodeURIComponent(wsId)}`);
+      if (wsRes.ok && wsRes.data?.oauth?.tokens?.hasAccessToken) {
+        try { popup.close(); } catch {}
+        return true;
+      }
+      if (popup.closed) return false;
+    }
+    try { popup.close(); } catch {}
+    return false;
+  } catch (err) {
+    alert(`OAuth flow 오류: ${err.message}`);
+    return false;
+  }
 }
 
 function setTestStep(id, ok, msg) {

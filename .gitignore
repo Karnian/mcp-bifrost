@@ -1,6 +1,9 @@
 node_modules/
 config/workspaces.json
 config/workspaces.backup.json
+.ao/state/oauth-issuer-cache.json
+.ao/state/oauth-pending.json
+.ao/state/server-secret
 .env
 *.db
 .DS_Store

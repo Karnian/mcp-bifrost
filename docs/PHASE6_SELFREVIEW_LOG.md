@@ -94,3 +94,27 @@ Codex/Gemini 가용 불가 상태 (`demoted: host permission level (suggest) too
 **테스트**: 9 new. 전체 90/90 PASS.
 
 **비고**: `_rpcHttp` 는 기존 SSE+JSON 파싱을 유지한 채 Authorization 만 추가했으므로 Notion MCP 의 실제 응답 포맷 변경에도 탄력적.
+
+---
+
+## 6d (2026-04-15) — PASS
+
+**구현 파일**:
+- 수정: `admin/public/templates.js` (notion-official-oauth 템플릿 + oauth payload), `admin/public/app.js` (runOAuthFlow, renderOAuthPanel, checkSecurityBanner, Re-authorize 버튼), `admin/public/index.html` (#security-banner 엘리먼트), `.gitignore` (oauth 상태 파일 제외)
+
+**체크리스트 대비**:
+- [x] Wizard "HTTP (OAuth)" 템플릿 → URL 프리셋 `https://mcp.notion.com/mcp`, oauth.enabled=true payload
+- [x] addWorkspace → /authorize 호출 → 팝업 새탭 → tokens 수신까지 폴링 (5분 timeout, 팝업 닫힘 감지)
+- [x] 팝업 차단 시 URL 직접 열기 안내 alert
+- [x] DCR 실패 / 초기화 실패 시 Admin UI alert (수동 client_id 등록은 API `/authorize` body 의 `manual: {clientId, clientSecret?, authMethod}` 로 가능 — 6e 문서화)
+- [x] Detail 화면: OAuth 워크스페이스는 credentials 편집 UI 숨김, URL readonly, issuer/clientId(masked)/token prefix/만료까지 남은 분/마지막 refresh/Re-authorize 버튼 표시
+- [x] Re-authorize 버튼 → runOAuthFlow 재실행 → 완료 시 detail 재로드
+- [x] Dashboard action_needed 상태: `_computeStatus` 가 oauthActionNeeded + token 만료 7일 이하 시 반환 (기존 로직 재사용)
+- [x] Windows 경고 배너: `/api/oauth/security` 호출, `fileSecurityWarning=true` 시 #security-banner 노출 (dashboard load 시)
+- [x] 완료 UI: 기존 wiz-summary + OAuth 테스트 스텝 재사용 (OAuth 단계 라벨 추가)
+
+**테스트**: UI 변경으로 단위 테스트 증가 없음. 전체 90/90 PASS 유지.
+
+**범위 타협**:
+- **Remote Admin UI 가이드**는 6e USAGE.md 에 SSH tunnel 섹션으로 이관
+- **"13개 도구 발견" 상세 요약**은 기존 wizard summary 를 사용 (Step 4 에서 `/api/tools` 로 확인 가능)

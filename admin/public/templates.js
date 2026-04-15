@@ -54,8 +54,19 @@ export const TEMPLATES = [
     ],
   },
   {
+    id: 'notion-official-oauth',
+    name: 'Notion (공식 MCP · OAuth)',
+    icon: 'N',
+    description: 'Notion 공식 hosted MCP + OAuth 2.0 (권장)',
+    kind: 'mcp-client',
+    transport: 'http',
+    url: 'https://mcp.notion.com/mcp',
+    oauth: true,
+    fields: [],
+  },
+  {
     id: 'notion-official',
-    name: 'Notion (공식 MCP)',
+    name: 'Notion (공식 MCP · stdio)',
     icon: 'N',
     description: 'Notion 공식 MCP 서버 (권장)',
     kind: 'mcp-client',
@@ -124,6 +135,9 @@ export function materializeTemplate(template, values) {
     } else {
       payload.url = template.url;
       payload.headers = template.headers || {};
+      if (template.oauth) {
+        payload.oauth = { enabled: true };
+      }
     }
   }
   return payload;
