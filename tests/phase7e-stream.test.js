@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { McpClientProvider } from '../providers/mcp-client.js';
 import { MockOAuthServer } from './fixtures/mock-oauth-server.js';
+import { logger } from '../server/logger.js';
 
 async function waitForStream(provider, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
@@ -261,12 +262,14 @@ test('CRLF-terminated SSE events are parsed correctly', async () => {
   }
 });
 
-test('stream logs connecting/connected transitions (observability for E2E #13)', async () => {
+test('stream logs connecting/connected at debug level (observability for E2E #13)', async () => {
   const mock = new MockOAuthServer();
   await mock.start();
   const origLog = console.log;
+  const prevLevel = logger._getLevel();
   const logs = [];
   console.log = (...args) => { logs.push(args.join(' ')); };
+  logger._setLevel('debug');
   try {
     const prov = await seededProvider(mock);
     await prov._ensureConnected();
@@ -275,6 +278,27 @@ test('stream logs connecting/connected transitions (observability for E2E #13)',
     const streamLogs = logs.filter(l => l.includes('[McpClient:w1] stream:'));
     assert.ok(streamLogs.some(l => l.includes('connecting')), `expected 'connecting' log, got: ${streamLogs.join(' | ')}`);
     assert.ok(streamLogs.some(l => l.includes('connected')), `expected 'connected' log, got: ${streamLogs.join(' | ')}`);
+  } finally {
+    console.log = origLog;
+    logger._setLevel(prevLevel === 3 ? 'debug' : prevLevel === 2 ? 'info' : prevLevel === 1 ? 'warn' : 'error');
+    await mock.stop();
+  }
+});
+
+test('stream debug logs silent by default (noise control)', async () => {
+  const mock = new MockOAuthServer();
+  await mock.start();
+  const origLog = console.log;
+  const logs = [];
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  // logger defaults to info; debug-level stream transitions must stay silent.
+  try {
+    const prov = await seededProvider(mock);
+    await prov._ensureConnected();
+    await waitForStream(prov);
+    await prov.shutdown();
+    const streamLogs = logs.filter(l => l.includes('[McpClient:w1] stream:'));
+    assert.equal(streamLogs.length, 0, `expected no stream logs at default level, got: ${streamLogs.join(' | ')}`);
   } finally {
     console.log = origLog;
     await mock.stop();
