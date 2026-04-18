@@ -186,8 +186,15 @@ export class McpTokenManager {
       }
     }
 
-    // 3. Persisted tokens — scrypt verify
-    for (const entry of this._storedTokens()) {
+    // 3. Persisted tokens — prefix-based narrowing then scrypt verify
+    const bearerPrefix = bearer.slice(0, 8);
+    // Try prefix-matched entries first (fast path for newly issued tokens)
+    const stored = this._storedTokens();
+    const prefixMatched = stored.filter(e => e.prefix && e.prefix === bearerPrefix);
+    const remaining = prefixMatched.length > 0
+      ? stored.filter(e => !e.prefix || e.prefix !== bearerPrefix)
+      : stored;
+    for (const entry of [...prefixMatched, ...remaining]) {
       if (!entry.token) continue;
       const ok = await verifyToken(bearer, entry.token);
       if (ok) {
@@ -224,11 +231,13 @@ export class McpTokenManager {
     }
     const plaintext = `bft_${b64url(randomBytes(32))}`;
     const hash = await hashToken(plaintext);
+    const prefix = plaintext.slice(0, 8);
 
     const entry = {
       id,
       description: description || '',
       token: hash,
+      prefix,
       allowedWorkspaces,
       allowedProfiles,
       createdAt: new Date().toISOString(),
@@ -262,6 +271,7 @@ export class McpTokenManager {
     if (!existing) throw new Error(`token_not_found: ${id}`);
     const plaintext = `bft_${b64url(randomBytes(32))}`;
     existing.token = await hashToken(plaintext);
+    existing.prefix = plaintext.slice(0, 8);
     existing.rotatedAt = new Date().toISOString();
     await this.wm._save();
     this.wm.logAudit?.('token.rotate', null, `Rotated MCP token id=${id}`);

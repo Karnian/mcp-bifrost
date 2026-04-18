@@ -30,7 +30,13 @@ export class SseManager {
     // Keep-alive ping every 30s
     const keepAlive = setInterval(() => {
       if (this.sessions.has(sessionId)) {
-        res.write(':ping\n\n');
+        try {
+          res.write(':ping\n\n');
+        } catch {
+          // Connection broken — clean up
+          this.sessions.delete(sessionId);
+          clearInterval(keepAlive);
+        }
       } else {
         clearInterval(keepAlive);
       }

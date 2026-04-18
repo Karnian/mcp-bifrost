@@ -542,12 +542,25 @@ export class McpClientProvider extends BaseProvider {
     await this._ensureConnected();
     try {
       const res = await this._rpc('tools/call', { name: toolName, arguments: args });
-      return res; // pass through content/isError from upstream
+      return res; // pass through content/isError from upstream (business errors)
     } catch (err) {
-      return {
-        content: [{ type: 'text', text: err.message }],
-        isError: true,
-      };
+      // Transient HTTP/transport errors → throw so mcp-handler retry logic kicks in
+      const status = err.status || err.statusCode;
+      if (status && status >= 400) {
+        if (status === 429) {
+          // Parse Retry-After header value if available
+          const retryAfter = parseInt(err.retryAfter || err.headers?.['retry-after'] || '', 10);
+          if (retryAfter > 0) err.retryAfter = retryAfter;
+        }
+        err.status = status;
+        throw err;
+      }
+      // Connection-level errors (ECONNREFUSED, ENOTFOUND, timeout, etc.) → throw
+      if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.message?.includes('timeout')) {
+        throw err;
+      }
+      // Unknown/internal errors → throw to let handler decide
+      throw err;
     }
   }
 

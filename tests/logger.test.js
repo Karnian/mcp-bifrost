@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { logger } from '../server/logger.js';
+import { logger, withLogLevel } from '../server/logger.js';
 
 function captureConsole(fn) {
   const orig = { log: console.log, warn: console.warn, error: console.error };
@@ -16,24 +16,19 @@ function captureConsole(fn) {
 }
 
 test('logger: default level (info) emits info/warn/error, suppresses debug', () => {
-  const prev = logger._getLevel();
-  logger._setLevel('info');
-  try {
+  withLogLevel('info', () => {
     const lines = captureConsole(() => {
       logger.debug('D');
       logger.info('I');
       logger.warn('W');
       logger.error('E');
     });
-    const kinds = lines.map(l => l[1]);
-    assert.deepEqual(kinds, ['I', 'W', 'E']);
-  } finally { logger._setLevel(['error','warn','info','debug'][prev]); }
+    assert.deepEqual(lines.map(l => l[1]), ['I', 'W', 'E']);
+  });
 });
 
 test('logger: debug level emits all four', () => {
-  const prev = logger._getLevel();
-  logger._setLevel('debug');
-  try {
+  withLogLevel('debug', () => {
     const lines = captureConsole(() => {
       logger.debug('D');
       logger.info('I');
@@ -41,28 +36,32 @@ test('logger: debug level emits all four', () => {
       logger.error('E');
     });
     assert.deepEqual(lines.map(l => l[1]), ['D', 'I', 'W', 'E']);
-  } finally { logger._setLevel(['error','warn','info','debug'][prev]); }
+  });
 });
 
 test('logger: error level suppresses info/warn/debug', () => {
-  const prev = logger._getLevel();
-  logger._setLevel('error');
-  try {
+  withLogLevel('error', () => {
     const lines = captureConsole(() => {
       logger.debug('D'); logger.info('I'); logger.warn('W'); logger.error('E');
     });
     assert.deepEqual(lines.map(l => l[1]), ['E']);
-  } finally { logger._setLevel(['error','warn','info','debug'][prev]); }
+  });
 });
 
 test('logger: invalid level name falls back to info (no throw)', () => {
-  const prev = logger._getLevel();
-  logger._setLevel('verbose'); // unknown
-  try {
+  withLogLevel('verbose', () => {
     assert.equal(logger._getLevel(), 2, 'unknown level must resolve to info(=2)');
     const lines = captureConsole(() => {
       logger.debug('D'); logger.info('I');
     });
     assert.deepEqual(lines.map(l => l[1]), ['I']);
-  } finally { logger._setLevel(['error','warn','info','debug'][prev]); }
+  });
+});
+
+test('withLogLevel helper restores level after execution', () => {
+  const before = logger._getLevel();
+  withLogLevel('debug', () => {
+    assert.equal(logger._getLevel(), 3);
+  });
+  assert.equal(logger._getLevel(), before, 'level should be restored after withLogLevel');
 });

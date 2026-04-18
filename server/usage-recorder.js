@@ -80,15 +80,19 @@ export class UsageRecorder {
 
   /**
    * Flush queued events to disk, rotating if needed.
-   * Safe to call concurrently: if a flush is already in flight, the caller
-   * receives a promise that also awaits any events that arrive during the
-   * current flush — we chain another flush pass until the queue is drained.
+   * Reentrant-safe: if a flush is already in flight, chains a follow-up pass
+   * that drains events enqueued during the in-flight flush. Only one pending
+   * follow-up is tracked to avoid unbounded recursion.
    */
   async flush() {
     if (this._flushing) {
-      // Chain a second pass: await the in-flight flush, then retry once to
-      // pick up events enqueued while it ran.
-      return this._flushing.then(() => this.flush());
+      if (!this._pendingFlush) {
+        this._pendingFlush = this._flushing.then(() => {
+          this._pendingFlush = null;
+          return this.flush();
+        });
+      }
+      return this._pendingFlush;
     }
     const batch = this._queue.splice(0, this._queue.length);
     if (batch.length === 0) return;

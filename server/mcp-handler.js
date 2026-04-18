@@ -403,6 +403,6 @@ export class McpHandler {
   }
 
   _errorResponse(id, code, message) {
-    return { jsonrpc: '2.0', id, error: { code, message } };
+    return { jsonrpc: '2.0', id: id ?? null, error: { code, message } };
   }
 }

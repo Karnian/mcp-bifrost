@@ -81,6 +81,7 @@ export class WorkspaceManager {
     this._writeLock = Promise.resolve();
     this._onChange = null;
     this._loaded = false; // only save to disk after explicit load()
+    this._saving = false; // self-save guard for file watcher
     this.errorLog = []; // last 50 errors
     this.auditLog = []; // last 10 config changes
     this.oauthAuditLog = []; // separate ring (50) for oauth.* events
@@ -194,14 +195,22 @@ export class WorkspaceManager {
   async _save() {
     if (!this._loaded) return; // skip disk I/O if not loaded from file
     this._writeLock = this._writeLock.then(async () => {
-      if (existsSync(CONFIG_PATH)) {
-        await copyFile(CONFIG_PATH, BACKUP_PATH);
-        await this._chmod0600(BACKUP_PATH);
+      this._saving = true;
+      try {
+        if (existsSync(CONFIG_PATH)) {
+          await copyFile(CONFIG_PATH, BACKUP_PATH);
+          await this._chmod0600(BACKUP_PATH);
+        }
+        await writeFile(TMP_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
+        await this._chmod0600(TMP_PATH);
+        await rename(TMP_PATH, CONFIG_PATH);
+        await this._chmod0600(CONFIG_PATH);
+      } finally {
+        this._saving = false;
       }
-      await writeFile(TMP_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
-      await this._chmod0600(TMP_PATH);
-      await rename(TMP_PATH, CONFIG_PATH);
-      await this._chmod0600(CONFIG_PATH);
+    }).catch(err => {
+      this._saving = false;
+      throw err;
     });
     return this._writeLock;
   }
@@ -239,8 +248,13 @@ export class WorkspaceManager {
     if (ws.oauth) result.oauth = maskOAuth(ws.oauth);
   }
 
-  _getRawWorkspace(id) {
+  getRawWorkspace(id) {
     return this.config.workspaces.find(w => w.id === id);
+  }
+
+  // Alias for backward compat (internal callers)
+  _getRawWorkspace(id) {
+    return this.getRawWorkspace(id);
   }
 
   async addWorkspace(data) {
@@ -513,6 +527,8 @@ export class WorkspaceManager {
       (async () => {
         for await (const event of watcher) {
           if (event.eventType === 'change') {
+            // Skip reload if we triggered this write ourselves
+            if (this._saving) continue;
             try {
               const raw = await readFile(CONFIG_PATH, 'utf-8');
               const newConfig = JSON.parse(raw);

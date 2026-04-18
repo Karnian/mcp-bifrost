@@ -1,7 +1,10 @@
-import { readFile } from 'node:fs/promises';
-import { join, dirname, extname } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { join, dirname, extname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { authenticateAdmin, sendJson, readBody, isCommandAllowed } from './auth.js';
+import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare } from './auth.js';
+import { RateLimiter } from '../server/rate-limiter.js';
+
+const adminRateLimiter = new RateLimiter({ max: 10, windowMs: 60_000 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
@@ -453,6 +456,15 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
 }
 
 async function handleLogin(req, res, wm) {
+  // Rate limit — brute-force protection
+  const ip = req.socket?.remoteAddress || 'unknown';
+  const rl = adminRateLimiter.check(ip);
+  if (!rl.allowed) {
+    const retryAfter = Math.ceil(rl.retryAfterMs / 1000);
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) });
+    res.end(JSON.stringify({ ok: false, error: { code: 'RATE_LIMITED', message: `Too many requests. Retry after ${retryAfter}s` } }));
+    return;
+  }
   const body = await readBody(req);
   const adminToken = wm.getAdminToken();
 
@@ -461,7 +473,9 @@ async function handleLogin(req, res, wm) {
     return;
   }
 
-  if (body.token === adminToken) {
+  if (adminToken && safeTokenCompare(body.token || '', adminToken)) {
+    sendJson(res, 200, { ok: true, data: { message: 'Authenticated' } });
+  } else if (!adminToken) {
     sendJson(res, 200, { ok: true, data: { message: 'Authenticated' } });
   } else {
     sendJson(res, 401, { ok: false, error: { code: 'INVALID_TOKEN', message: '토큰이 일치하지 않습니다' } });
@@ -475,6 +489,20 @@ async function serveStatic(req, res, path) {
   }
 
   const fullPath = join(PUBLIC_DIR, filePath);
+
+  // Path traversal defense: resolve symlinks, then verify the real path is inside PUBLIC_DIR
+  try {
+    const realFullPath = await realpath(fullPath);
+    const realPublicDir = await realpath(PUBLIC_DIR);
+    const rel = relative(realPublicDir, realFullPath);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      sendJson(res, 403, { error: 'Forbidden' });
+      return;
+    }
+  } catch {
+    // File doesn't exist — fall through to SPA fallback below
+  }
+
   try {
     const content = await readFile(fullPath);
     const ext = extname(filePath);

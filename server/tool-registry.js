@@ -17,6 +17,8 @@ export class ToolRegistry {
     this.toolsVersion = 1;
     // mcpName → { workspaceId, originalName }
     this._reverseMap = new Map();
+    // Phase 8b: cooldown for cold provider warm-up (wsId → timestamp)
+    this._lastWarmupAttempt = new Map();
   }
 
   bumpVersion() {
@@ -34,13 +36,18 @@ export class ToolRegistry {
     const reverseMap = new Map();
     const workspaces = this.wm.getEnabledWorkspaces();
 
-    // Concurrently warm up any cold mcp-client caches
+    // Concurrently warm up any cold mcp-client caches (with 60s cooldown)
+    const WARMUP_COOLDOWN_MS = 60_000;
+    const now = Date.now();
     await Promise.all(workspaces.map(async (ws) => {
       const provider = this.wm.getProvider(ws.id);
       if (!provider) return;
       if (typeof provider.refreshTools === 'function') {
         const cached = provider.getTools();
         if (!cached || cached.length === 0) {
+          const lastAttempt = this._lastWarmupAttempt.get(ws.id) || 0;
+          if (now - lastAttempt < WARMUP_COOLDOWN_MS) return; // skip — too soon
+          this._lastWarmupAttempt.set(ws.id, now);
           try { await provider.refreshTools(); } catch { /* keep going */ }
         }
       }

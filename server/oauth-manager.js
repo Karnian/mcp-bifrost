@@ -19,7 +19,7 @@ import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { sanitize, tokenPrefix } from './oauth-sanitize.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -308,7 +308,10 @@ export class OAuthManager {
     const [body, sig] = state.split('.');
     const secret = await this._getServerSecret();
     const expected = b64url(createHmac('sha256', secret).update(body).digest());
-    if (sig !== expected) return null;
+    // Timing-safe comparison to prevent signature forgery via timing attacks
+    const sigBuf = Buffer.from(sig);
+    const expectedBuf = Buffer.from(expected);
+    if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) return null;
     try {
       return JSON.parse(Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8'));
     } catch {

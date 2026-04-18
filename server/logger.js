@@ -30,3 +30,18 @@ export const logger = {
   _setLevel(name) { current = LEVELS[name] ?? LEVELS.info; },
   _getLevel() { return current; },
 };
+
+const LEVEL_NAMES = ['error', 'warn', 'info', 'debug'];
+
+/**
+ * Test helper: run `fn` at the given log level, auto-restoring afterward.
+ */
+export function withLogLevel(level, fn) {
+  const prev = logger._getLevel();
+  logger._setLevel(level);
+  try {
+    return fn();
+  } finally {
+    logger._setLevel(LEVEL_NAMES[prev]);
+  }
+}

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 /**
  * Admin authentication middleware.
  * - Admin API is localhost-only by default (even with Bearer token) for safety,
@@ -31,12 +33,19 @@ export function authenticateAdmin(req, res, wm) {
   }
 
   const token = auth.slice(7);
-  if (token !== adminToken) {
+  if (!safeTokenCompare(token, adminToken)) {
     sendJson(res, 403, { ok: false, error: { code: 'FORBIDDEN', message: '토큰이 일치하지 않습니다' } });
     return false;
   }
 
   return true;
+}
+
+export function safeTokenCompare(input, expected) {
+  const a = Buffer.from(input);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function isLocalRequest(req) {
@@ -68,18 +77,5 @@ export function sendJson(res, statusCode, data) {
   res.end(body);
 }
 
-export function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', () => {
-      try {
-        const text = Buffer.concat(chunks).toString();
-        resolve(text ? JSON.parse(text) : {});
-      } catch (e) {
-        reject(new Error('Invalid JSON'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
+// Re-export readBody from shared http-utils (Phase 8d DRY)
+export { readBody } from '../server/http-utils.js';

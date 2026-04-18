@@ -8,6 +8,9 @@ import { OAuthManager } from './oauth-manager.js';
 import { McpTokenManager } from './mcp-token-manager.js';
 import { UsageRecorder } from './usage-recorder.js';
 import { AuditLogger } from './audit-logger.js';
+import { escapeHtml } from './html-escape.js';
+import { readBody as readBodyUtil } from './http-utils.js';
+import { randomBytes } from 'node:crypto';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
@@ -36,7 +39,7 @@ wm.testAll().catch(err => console.error('[Bifrost] Initial health check failed:'
 
 // Background healthCheck every 5 minutes
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
-setInterval(() => {
+const healthInterval = setInterval(() => {
   wm.testAll().catch(err => console.error('[Bifrost] Background health check failed:', err.message));
 }, HEALTH_CHECK_INTERVAL);
 
@@ -52,20 +55,8 @@ function parseBearerFromQuery(url) {
   return url.searchParams.get('token') || null;
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString()));
-      } catch (e) {
-        reject(new Error('Invalid JSON'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
+// readBody imported from http-utils.js (Phase 8d DRY)
+const readBody = readBodyUtil;
 
 function jsonResponse(res, statusCode, data) {
   const body = JSON.stringify(data);
@@ -150,6 +141,11 @@ const server = createServer(async (req, res) => {
 
       jsonResponse(res, 200, result);
     } catch (err) {
+      if (err.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Payload Too Large' } }));
+        return;
+      }
       jsonResponse(res, 400, {
         jsonrpc: '2.0',
         id: null,
@@ -186,6 +182,11 @@ const server = createServer(async (req, res) => {
       res.writeHead(202);
       res.end();
     } catch (err) {
+      if (err.statusCode === 413) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Payload Too Large' } }));
+        return;
+      }
       jsonResponse(res, 400, {
         jsonrpc: '2.0',
         id: null,
@@ -221,6 +222,10 @@ const server = createServer(async (req, res) => {
   jsonResponse(res, 404, { error: 'Not Found' });
 });
 
+// Slowloris defense — cap header/request timeout to prevent slow connections from hogging slots
+server.headersTimeout = 20_000;
+server.requestTimeout = 30_000;
+
 const port = wm.getServerConfig().port || 3100;
 const host = process.env.BIFROST_HOST || wm.getServerConfig().host || '127.0.0.1';
 server.listen(port, host, () => {
@@ -243,40 +248,57 @@ server.listen(port, host, () => {
   }
 });
 
-function renderOAuthResultPage({ ok, title, message }) {
+// Graceful shutdown: clear healthCheck interval
+server.on('close', () => {
+  clearInterval(healthInterval);
+});
+
+function renderOAuthResultPage({ ok, title, message, nonce }) {
   const color = ok ? '#16a34a' : '#dc2626';
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${safeTitle}</title>
 <style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
 .card{background:#1e293b;border-radius:12px;padding:2.5rem 3rem;max-width:480px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.3)}
 h1{margin:0 0 .5rem;color:${color};font-size:1.5rem}
 p{margin:.5rem 0;color:#94a3b8;line-height:1.6}
 .hint{margin-top:1.5rem;font-size:.875rem;color:#64748b}</style></head>
-<body><div class="card"><h1>${title}</h1><p>${message}</p>
+<body><div class="card"><h1>${safeTitle}</h1><p>${safeMessage}</p>
 <p class="hint">이 창을 닫고 Bifrost Admin UI 로 돌아가세요.</p></div>
-<script>setTimeout(()=>{try{window.close()}catch(e){}},4000)</script></body></html>`;
+<script${nonce ? ` nonce="${nonce}"` : ''}>setTimeout(()=>{try{window.close()}catch(e){}},4000)</script></body></html>`;
+}
+
+function oauthCspHeaders(nonce) {
+  return {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'`,
+  };
 }
 
 async function handleOAuthCallback(req, res, url) {
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
   const error = url.searchParams.get('error');
+  const nonce = randomBytes(16).toString('base64');
 
   if (error) {
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(400, oauthCspHeaders(nonce));
     res.end(renderOAuthResultPage({
       ok: false,
       title: '인증 실패',
       message: `OAuth provider 오류: ${error}`,
+      nonce,
     }));
     return;
   }
 
   if (!code || !state) {
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(400, oauthCspHeaders(nonce));
     res.end(renderOAuthResultPage({
       ok: false,
       title: '인증 실패',
       message: 'code 또는 state 파라미터가 누락되었습니다.',
+      nonce,
     }));
     return;
   }
@@ -285,15 +307,16 @@ async function handleOAuthCallback(req, res, url) {
     const result = await oauth.completeAuthorization(state, code);
     tr.bumpVersion();
     sse.broadcastNotification('notifications/tools/list_changed');
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, oauthCspHeaders(nonce));
     res.end(renderOAuthResultPage({
       ok: true,
       title: '✓ 인증 완료',
       message: `${result.issuer} 에서 access_token 을 발급받았습니다.`,
+      nonce,
     }));
   } catch (err) {
     wm.logError('oauth.callback', null, err.message);
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(400, oauthCspHeaders(nonce));
     res.end(renderOAuthResultPage({
       ok: false,
       title: '인증 실패',
@@ -301,8 +324,9 @@ async function handleOAuthCallback(req, res, url) {
         : err.code === 'STATE_EXPIRED' ? 'state 가 만료되었습니다 (10분 초과). 다시 시작하세요.'
         : err.code === 'STATE_NOT_FOUND' ? 'state 를 찾을 수 없습니다 (이미 사용되었거나 서버 재시작됨).'
         : `토큰 교환 실패: ${err.message}`,
+      nonce,
     }));
   }
 }
 
-export { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server };
+export { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server, healthInterval, renderOAuthResultPage };
