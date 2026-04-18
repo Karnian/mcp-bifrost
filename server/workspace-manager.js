@@ -6,6 +6,7 @@ import { NotionProvider } from '../providers/notion.js';
 import { SlackProvider } from '../providers/slack.js';
 import { McpClientProvider } from '../providers/mcp-client.js';
 import { sanitize } from './oauth-sanitize.js';
+import { logger } from './logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -102,9 +103,9 @@ export class WorkspaceManager {
       if (existsSync(BACKUP_PATH)) {
         const backup = await readFile(BACKUP_PATH, 'utf-8');
         this.config = JSON.parse(backup);
-        console.error('[WorkspaceManager] Loaded from backup');
+        logger.error('[WorkspaceManager] Loaded from backup');
       } else {
-        console.error('[WorkspaceManager] No valid config found, using defaults');
+        logger.error('[WorkspaceManager] No valid config found, using defaults');
       }
     }
     if (!this.config.workspaces) this.config.workspaces = [];
@@ -134,10 +135,10 @@ export class WorkspaceManager {
       }
     }
     if (migrated > 0) {
-      console.log(`[WorkspaceManager] Migrated ${migrated} legacy workspace(s) to kind=native`);
+      logger.info(`[WorkspaceManager] Migrated ${migrated} legacy workspace(s) to kind=native`);
     }
     if (oauthMirrored > 0) {
-      console.log(`[WorkspaceManager] Phase 7c-pre: mirrored ${oauthMirrored} OAuth tokens to byIdentity.default`);
+      logger.info(`[WorkspaceManager] Phase 7c-pre: mirrored ${oauthMirrored} OAuth tokens to byIdentity.default`);
     }
   }
 
@@ -421,8 +422,8 @@ export class WorkspaceManager {
   }
 
   async purgeExpiredWorkspaces() {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const expired = this.config.workspaces.filter(w => w.deletedAt && w.deletedAt < thirtyDaysAgo);
+    const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const expired = this.config.workspaces.filter(w => w.deletedAt && new Date(w.deletedAt).getTime() < thirtyDaysAgoMs);
     for (const ws of expired) {
       const idx = this.config.workspaces.indexOf(ws);
       if (idx !== -1) {
@@ -536,7 +537,7 @@ export class WorkspaceManager {
               if (!this.config.workspaces) this.config.workspaces = [];
               await this._initProviders();
               this._notifyChange();
-              console.log('[WorkspaceManager] Config hot-reloaded');
+              logger.info('[WorkspaceManager] Config hot-reloaded');
             } catch { /* ignore parse errors during write */ }
           }
         }
@@ -582,7 +583,7 @@ export class WorkspaceManager {
       if (this.oauthAuditLog.length > 50) this.oauthAuditLog.length = 50;
     } else {
       this.auditLog.unshift(entry);
-      if (this.auditLog.length > 10) this.auditLog.length = 10;
+      if (this.auditLog.length > 50) this.auditLog.length = 50;
     }
     // Phase 7g: mirror to audit.jsonl when the file-based logger is attached.
     if (this._audit?.record) {

@@ -147,25 +147,29 @@ export class UsageRecorder {
       agg = { identity: event.identity, ws: event.ws, tool: event.tool, count24h: 0, count7d: 0, errors: 0, totalMs: 0, lastAt: event.t };
       this._aggregate.set(key, agg);
     }
-    this._events24h.push({ t: Date.parse(event.t), key, durationMs: event.durationMs, ok: event.ok });
-    this._trimWindow();
-    // Recount rolling windows from window list
-    // (O(n) per record; acceptable for moderate traffic and keeps this precise.)
-    agg.count24h = 0; agg.count7d = 0; agg.errors = 0; agg.totalMs = 0;
-    for (const e of this._events24h) {
-      if (e.key !== key) continue;
-      agg.count7d++;
-      if (!e.ok) agg.errors++;
-      agg.totalMs += e.durationMs;
-      if (this._now() - e.t <= 24 * 60 * 60 * 1000) agg.count24h++;
-    }
+    const t = Date.parse(event.t);
+    this._events24h.push({ t, key, durationMs: event.durationMs, ok: event.ok });
+    // Incremental update — O(1) per record
+    agg.count7d++;
+    if (!event.ok) agg.errors++;
+    agg.totalMs += event.durationMs;
+    if (this._now() - t <= 24 * 60 * 60 * 1000) agg.count24h++;
     agg.lastAt = event.t;
+    this._trimWindow();
   }
 
   _trimWindow() {
     const cutoff = this._now() - 7 * 24 * 60 * 60 * 1000;
     while (this._events24h.length && this._events24h[0].t < cutoff) {
-      this._events24h.shift();
+      const evicted = this._events24h.shift();
+      // Decremental update for evicted event
+      const agg = this._aggregate.get(evicted.key);
+      if (agg) {
+        agg.count7d = Math.max(0, agg.count7d - 1);
+        if (!evicted.ok) agg.errors = Math.max(0, agg.errors - 1);
+        agg.totalMs = Math.max(0, agg.totalMs - evicted.durationMs);
+        // 24h count is recomputed lazily on query (window boundary shifts)
+      }
     }
   }
 

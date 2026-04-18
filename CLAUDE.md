@@ -50,6 +50,9 @@ config/
 - SSE — claude.ai remote connector 호환
 - stdio — Claude Code 로컬 직접 연결 (optional)
 
+### Retry & Backoff
+`mcp-handler.js`의 `_toolsCall`은 transient 에러(connectivity, rate_limit, provider_outage) 시 최대 2회 재시도 + 지수 백오프(1s → 2s, cap 5s). 429 응답의 `Retry-After` 헤더가 있으면 해당 값을 우선 사용. 최악의 경우 단일 tool call이 ~11초 점유할 수 있음. 비동기 큐 분리는 Phase 9 후보.
+
 ## Security
 
 - `config/workspaces.json`은 gitignored — 토큰 절대 커밋 금지

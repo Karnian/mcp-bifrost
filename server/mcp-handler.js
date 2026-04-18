@@ -180,7 +180,21 @@ export class McpHandler {
 
     // Meta tools — always allowed (no workspace context)
     if (resolved.type === 'meta') {
-      return await this._handleMetaTool(resolved.toolName, args, identity, profileObj);
+      const startedAt = Date.now();
+      const result = await this._handleMetaTool(resolved.toolName, args, identity, profileObj);
+      // Phase 8e: record meta tool usage when BIFROST_META_USAGE=1
+      if (this._usage && process.env.BIFROST_META_USAGE === '1') {
+        try {
+          this._usage.record({
+            identity: identity?.id || 'anonymous',
+            workspaceId: null,
+            tool: name,
+            durationMs: Date.now() - startedAt,
+            ok: !result?.isError,
+          });
+        } catch { /* best effort */ }
+      }
+      return result;
     }
 
     // 2nd-line ACL check (defense in depth vs tools/list bypass)

@@ -3,6 +3,7 @@ import { join, dirname, extname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare } from './auth.js';
 import { RateLimiter } from '../server/rate-limiter.js';
+import { matchPattern } from '../server/mcp-token-manager.js';
 
 const adminRateLimiter = new RateLimiter({ max: 10, windowMs: 60_000 });
 
@@ -36,18 +37,11 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       return;
     }
 
-    // Admin exposure guard (also applies to login)
-    if (process.env.BIFROST_ADMIN_EXPOSE !== '1') {
-      const addr = req.socket?.remoteAddress || '';
-      const isLocal = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-      if (!isLocal) {
-        sendJson(res, 403, { ok: false, error: { code: 'ADMIN_LOCAL_ONLY', message: 'Admin API is restricted to localhost. Set BIFROST_ADMIN_EXPOSE=1 to allow remote access.' } });
-        return;
-      }
-    }
-
     // Auth check (except POST /api/auth/login)
+    // authenticateAdmin handles both exposure guard (localhost check) and token check
     if (path === '/api/auth/login' && method === 'POST') {
+      // Login still needs exposure guard before processing
+      if (!_checkExposure(req, res)) return;
       return handleLogin(req, res, wm);
     }
 
@@ -359,7 +353,7 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         const profiles = wm.config?.server?.profiles || {};
         // Include preview: how many tools each profile matches right now.
         const allTools = await tr.getTools();
-        const { matchPattern } = await import('../server/mcp-token-manager.js');
+        // matchPattern imported at top level (Phase 8e)
         const preview = {};
         for (const [name, def] of Object.entries(profiles)) {
           const matched = allTools.filter(t => {
@@ -453,6 +447,17 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       sendJson(res, status, { ok: false, error: { code, message: err.message } });
     }
   };
+}
+
+function _checkExposure(req, res) {
+  if (process.env.BIFROST_ADMIN_EXPOSE === '1') return true;
+  const addr = req.socket?.remoteAddress || '';
+  const isLocal = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  if (!isLocal) {
+    sendJson(res, 403, { ok: false, error: { code: 'ADMIN_LOCAL_ONLY', message: 'Admin API is restricted to localhost. Set BIFROST_ADMIN_EXPOSE=1 to allow remote access.' } });
+    return false;
+  }
+  return true;
 }
 
 async function handleLogin(req, res, wm) {

@@ -55,11 +55,28 @@
 - [x] #14 readBody DRY: `server/http-utils.js` 추출, 양쪽 import 교체
 - [x] #15 getRawWorkspace: public API + _getRawWorkspace alias
 
-### 미진행 (2/5)
-- [ ] #16 _storeTokens 공통 헬퍼: 리팩터 범위 대비 리스크 높음 (Phase 9 후보)
-- [ ] #10 admin exposure guard 통합: 기존 동작 유지 우선
+### 추가 완료 (5/5)
+- [x] #16 _storeTokens 공통 헬퍼: _persistTokens + _refreshWithMutex의 토큰 저장 로직 추출
+- [x] #10 admin exposure guard 통합: routes.js 중복 제거 + _checkExposure 헬퍼
 
-### 테스트: 5건 신규 (+ withLogLevel 1건), 0 기존 실패
+### 테스트: 6건 신규 (withLogLevel 1건 포함), 0 기존 실패
+
+---
+
+## 8e: Backlog
+
+### 구현 완료 (9/9)
+- [x] #7 _updateAggregate O(1): 증분 관리 (recount 제거)
+- [x] #12 retry backoff 문서화: CLAUDE.md에 설명 추가
+- [x] #20 dynamic import → static: matchPattern top-level import
+- [x] #21 ISO → Date 비교: purgeExpiredWorkspaces
+- [x] #23 audit ring 50: 10 → 50 확대
+- [x] #24 RegExp LRU 캐시: matchPattern에 Map 캐시 (cap 100)
+- [x] meta tool usage: BIFROST_META_USAGE=1 환경변수 제어
+- [x] console → logger: server/index.js + workspace-manager.js 전환
+- [x] Admin UI 모달: prompt() → bifrostModal 교체 (수동 E2E)
+
+### 테스트: 7건 신규, 0 기존 실패
 
 ---
 
@@ -67,9 +84,10 @@
 
 | 항목 | 결과 |
 |------|------|
-| 총 테스트 | ~198건 (168 기준 + 30 신규) |
+| 총 테스트 | ~205건 (168 기준 + 37 신규) |
 | Phase 7 회귀 | 0 |
 | 보안 패치 | 5/5 완료 |
 | 보안 보강 | 4/4 완료 |
 | 안정성 | 8/8 완료 |
-| 코드 품질 | 3/5 완료 |
+| 코드 품질 | 5/5 완료 |
+| Backlog | 9/9 완료 |

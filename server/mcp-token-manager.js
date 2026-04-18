@@ -102,13 +102,25 @@ function parseEnvTokens(envStr) {
  * Match pattern against value using simple glob ("*" matches anything,
  * `foo*` prefix, `*foo` suffix, `*foo*` contains, literal otherwise).
  */
+const _patternCache = new Map(); // pattern → RegExp (LRU capped at 100)
+const PATTERN_CACHE_MAX = 100;
+
 export function matchPattern(pattern, value) {
   if (pattern === '*') return true;
   if (!pattern) return false;
   if (!pattern.includes('*')) return pattern === value;
-  // Build a regex. Escape regex metachars except `*`.
-  const re = '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$';
-  return new RegExp(re).test(value);
+  let re = _patternCache.get(pattern);
+  if (!re) {
+    const src = '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$';
+    re = new RegExp(src);
+    if (_patternCache.size >= PATTERN_CACHE_MAX) {
+      // Evict oldest entry
+      const first = _patternCache.keys().next().value;
+      _patternCache.delete(first);
+    }
+    _patternCache.set(pattern, re);
+  }
+  return re.test(value);
 }
 
 export function identityAllowsWorkspace(identity, workspaceId) {

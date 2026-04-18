@@ -4,6 +4,46 @@ import { TEMPLATES, materializeTemplate } from './templates.js';
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+// --- Phase 8e: Modal dialog (replaces window.prompt) ---
+function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '취소' }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'bifrost-modal-overlay';
+    overlay.innerHTML = `
+      <div class="bifrost-modal">
+        <h3>${title}</h3>
+        <form class="bifrost-modal-form">
+          ${fields.map((f, i) => `
+            <label>${f.label}
+              <input type="${f.type || 'text'}" name="f${i}" value="${f.value ?? ''}" placeholder="${f.placeholder || ''}" ${f.required ? 'required' : ''}>
+            </label>
+          `).join('')}
+          <div class="bifrost-modal-actions">
+            <button type="button" class="btn-cancel">${cancelLabel}</button>
+            <button type="submit" class="btn-submit">${submitLabel}</button>
+          </div>
+        </form>
+      </div>`;
+    document.body.appendChild(overlay);
+    const form = overlay.querySelector('form');
+    const firstInput = form.querySelector('input');
+    if (firstInput) firstInput.focus();
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const values = fields.map((_, i) => form.elements[`f${i}`].value);
+      overlay.remove();
+      resolve(values);
+    });
+    overlay.querySelector('.btn-cancel').addEventListener('click', () => {
+      overlay.remove();
+      resolve(null);
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) { overlay.remove(); resolve(null); }
+    });
+  });
+}
+
 const state = {
   token: sessionStorage.getItem('bifrost_token') || '',
   workspaces: [],
@@ -299,7 +339,12 @@ async function openDetail(id) {
   const addId = $('#btn-add-identity');
   if (addId) {
     addId.addEventListener('click', async () => {
-      const identity = prompt('새 identity 이름 (영숫자/_/-, 1~64자):', '');
+      const result = await bifrostModal({
+        title: '새 Identity 추가',
+        fields: [{ label: 'Identity 이름 (영숫자/_/-, 1~64자)', placeholder: 'e.g. bot_ci', required: true }],
+      });
+      if (!result) return;
+      const identity = result[0];
       if (!identity || !/^[a-zA-Z0-9_\-.]{1,64}$/.test(identity)) {
         if (identity) alert('identity 이름 형식이 맞지 않습니다.');
         return;
@@ -666,14 +711,23 @@ async function runOAuthFlow(wsId, { identity = 'default' } = {}) {
  * MCP server does not support Dynamic Client Registration (RFC 7591).
  * Returns `{ clientId, clientSecret, authMethod }` or null if cancelled.
  */
-function promptManualClientCreds() {
-  const msg = 'DCR 미지원 서버입니다. 수동으로 발급한 OAuth client_id 를 입력하세요.';
-  const clientId = prompt(`${msg}\n\nClient ID (필수):`, '');
-  if (!clientId) return null;
-  const clientSecret = prompt('Client Secret (public client 는 빈값):', '') || '';
-  const authMethodRaw = prompt('Auth method: none / client_secret_basic / client_secret_post', clientSecret ? 'client_secret_basic' : 'none');
-  const authMethod = ['none', 'client_secret_basic', 'client_secret_post'].includes(authMethodRaw) ? authMethodRaw : (clientSecret ? 'client_secret_basic' : 'none');
-  return { clientId: clientId.trim(), clientSecret: clientSecret.trim() || null, authMethod };
+async function promptManualClientCreds() {
+  const result = await bifrostModal({
+    title: 'DCR 미지원 — 수동 OAuth Client 입력',
+    fields: [
+      { label: 'Client ID (필수)', placeholder: 'client_id', required: true },
+      { label: 'Client Secret (public client 는 빈값)', placeholder: '' },
+      { label: 'Auth Method', placeholder: 'none / client_secret_basic / client_secret_post', value: 'none' },
+    ],
+    submitLabel: '등록',
+  });
+  if (!result || !result[0]) return null;
+  const clientId = result[0].trim();
+  const clientSecret = (result[1] || '').trim() || null;
+  const authMethodRaw = result[2] || '';
+  const authMethod = ['none', 'client_secret_basic', 'client_secret_post'].includes(authMethodRaw)
+    ? authMethodRaw : (clientSecret ? 'client_secret_basic' : 'none');
+  return { clientId, clientSecret, authMethod };
 }
 
 function setTestStep(id, ok, msg) {
@@ -836,18 +890,25 @@ $('#tokens-plaintext-copy')?.addEventListener('click', () => {
 });
 
 $('#btn-issue-token').addEventListener('click', async () => {
-  const id = prompt('Token ID (공백은 자동 생성):', '');
-  if (id === null) return;
-  const description = prompt('설명 (선택):', '') || '';
-  const wsGlob = prompt('Allowed Workspaces (글롭, 콤마 구분, 빈값=모두 *):', '*') || '*';
-  const profGlob = prompt('Allowed Profiles (글롭, 콤마 구분, 빈값=모두 *):', '*') || '*';
+  const result = await bifrostModal({
+    title: 'MCP 토큰 발급',
+    fields: [
+      { label: 'Token ID (공백은 자동 생성)', placeholder: 'tok_...' },
+      { label: '설명 (선택)', placeholder: '' },
+      { label: 'Allowed Workspaces (글롭, 콤마 구분)', placeholder: '*', value: '*' },
+      { label: 'Allowed Profiles (글롭, 콤마 구분)', placeholder: '*', value: '*' },
+    ],
+    submitLabel: '발급',
+  });
+  if (!result) return;
+  const [id, description, wsGlob, profGlob] = result;
   try {
     const body = {
-      description,
-      allowedWorkspaces: wsGlob.split(',').map(s => s.trim()).filter(Boolean),
-      allowedProfiles: profGlob.split(',').map(s => s.trim()).filter(Boolean),
+      description: description || '',
+      allowedWorkspaces: (wsGlob || '*').split(',').map(s => s.trim()).filter(Boolean),
+      allowedProfiles: (profGlob || '*').split(',').map(s => s.trim()).filter(Boolean),
     };
-    if (id.trim()) body.id = id.trim();
+    if (id?.trim()) body.id = id.trim();
     const res = await api('POST', '/api/tokens', body);
     if (res.ok) {
       showPlaintextBanner(res.data.plaintext);

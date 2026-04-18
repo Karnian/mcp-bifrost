@@ -470,6 +470,26 @@ export class OAuthManager {
     return json;
   }
 
+  /**
+   * Common token storage: writes tokenData into ws.oauth.byIdentity[identity],
+   * mirrors to legacy ws.oauth.tokens for default, clears action_needed flags,
+   * and fires a save. Used by both _persistTokens (authorize) and
+   * _refreshWithMutex (refresh).
+   */
+  _storeTokens(ws, identity, tokenData) {
+    if (!ws.oauth) ws.oauth = {};
+    if (!ws.oauth.byIdentity) ws.oauth.byIdentity = {};
+    ws.oauth.byIdentity[identity] = { tokens: tokenData };
+    // Phase 7c-pre: keep the legacy `tokens` mirror for default identity only
+    if (identity === 'default') ws.oauth.tokens = tokenData;
+    // Per-identity action_needed map + legacy bool
+    if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
+    ws.oauthActionNeededBy[identity] = false;
+    if (identity === 'default') ws.oauthActionNeeded = false;
+    // fire-and-forget save
+    if (this.wm?._save) this.wm._save().catch(() => {});
+  }
+
   _persistTokens(workspaceId, { issuer, clientId, clientSecret, authMethod, resource, tokens, identity = 'default' }) {
     const ws = this.wm?._getRawWorkspace?.(workspaceId);
     if (!ws) throw new Error(`workspace_not_found: ${workspaceId}`);
@@ -479,8 +499,7 @@ export class OAuthManager {
       : null;
 
     // Only fall back to legacy ws.oauth.tokens for the default identity; other
-    // identities must start fresh to preserve isolation (a missing refresh_token
-    // in the new authorize response should NOT inherit the default refresh token).
+    // identities must start fresh to preserve isolation.
     const legacyFallback = identity === 'default' ? (ws.oauth?.tokens || {}) : {};
     const existing = ws.oauth?.byIdentity?.[identity]?.tokens || legacyFallback;
     const newTokens = {
@@ -500,25 +519,9 @@ export class OAuthManager {
       clientSecret: clientSecret || null,
       authMethod,
       resource: resource || ws.oauth?.resource || null,
-      byIdentity: {
-        ...(ws.oauth?.byIdentity || {}),
-        [identity]: { tokens: newTokens },
-      },
     };
 
-    // Phase 7c-pre: keep the legacy `tokens` mirror for default identity only,
-    // so older readers still see a valid token.
-    if (identity === 'default') {
-      ws.oauth.tokens = newTokens;
-    }
-
-    // Per-identity action_needed map + legacy bool (cleared when default re-auths)
-    if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
-    ws.oauthActionNeededBy[identity] = false;
-    if (identity === 'default') ws.oauthActionNeeded = false;
-
-    // fire-and-forget save
-    if (this.wm?._save) this.wm._save().catch(() => {});
+    this._storeTokens(ws, identity, newTokens);
     return ws.oauth;
   }
 
@@ -607,15 +610,7 @@ export class OAuthManager {
         scope: tokens.scope || prev.scope || null,
         lastRefreshAt: new Date().toISOString(),
       };
-      // Write through byIdentity + legacy mirror for default
-      if (!ws.oauth.byIdentity) ws.oauth.byIdentity = {};
-      ws.oauth.byIdentity[identity] = { tokens: updated };
-      if (identity === 'default') ws.oauth.tokens = updated;
-      if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
-      ws.oauthActionNeededBy[identity] = false;
-      if (identity === 'default') ws.oauthActionNeeded = false;
-
-      if (this.wm?._save) this.wm._save().catch(() => {});
+      this._storeTokens(ws, identity, updated);
       if (this.wm?.logAudit) {
         this.wm.logAudit('oauth.refresh_success', workspaceId, JSON.stringify({
           issuer: ws.oauth.issuer,

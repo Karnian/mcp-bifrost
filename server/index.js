@@ -11,6 +11,7 @@ import { AuditLogger } from './audit-logger.js';
 import { escapeHtml } from './html-escape.js';
 import { readBody as readBodyUtil } from './http-utils.js';
 import { randomBytes } from 'node:crypto';
+import { logger } from './logger.js';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
@@ -35,12 +36,12 @@ await wm.load();
 oauth.purgeStalePending().catch(() => {});
 
 // Run initial health checks in background
-wm.testAll().catch(err => console.error('[Bifrost] Initial health check failed:', err.message));
+wm.testAll().catch(err => logger.error('[Bifrost] Initial health check failed:', err.message));
 
 // Background healthCheck every 5 minutes
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
 const healthInterval = setInterval(() => {
-  wm.testAll().catch(err => console.error('[Bifrost] Background health check failed:', err.message));
+  wm.testAll().catch(err => logger.error('[Bifrost] Background health check failed:', err.message));
 }, HEALTH_CHECK_INTERVAL);
 
 const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit });
@@ -230,21 +231,21 @@ const port = wm.getServerConfig().port || 3100;
 const host = process.env.BIFROST_HOST || wm.getServerConfig().host || '127.0.0.1';
 server.listen(port, host, () => {
   const exposed = host === '0.0.0.0' || host === '::';
-  console.log(`[Bifrost] Server running on http://${host}:${port}`);
-  console.log(`[Bifrost] MCP endpoint: POST http://${host}:${port}/mcp`);
-  console.log(`[Bifrost] SSE endpoint: GET http://${host}:${port}/sse`);
-  console.log(`[Bifrost] Admin UI: http://${host}:${port}/admin/`);
-  console.log(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
+  logger.info(`[Bifrost] Server running on http://${host}:${port}`);
+  logger.info(`[Bifrost] MCP endpoint: POST http://${host}:${port}/mcp`);
+  logger.info(`[Bifrost] SSE endpoint: GET http://${host}:${port}/sse`);
+  logger.info(`[Bifrost] Admin UI: http://${host}:${port}/admin/`);
+  logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
   if (exposed) {
-    console.warn('');
-    console.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
+    logger.warn('');
+    logger.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
     if (!tokenManager.isConfigured()) {
-      console.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
+      logger.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
     }
     if (!wm.getAdminToken()) {
-      console.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
+      logger.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
     }
-    console.warn('');
+    logger.warn('');
   }
 });
 
