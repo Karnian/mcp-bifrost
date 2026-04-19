@@ -16,10 +16,15 @@ export function readBody(req, { maxBytes, allowEmpty = false } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let totalBytes = 0;
+    let rejected = false;
     req.on('data', c => {
+      if (rejected) return; // already rejected, drain remaining data
       totalBytes += c.length;
       if (totalBytes > limit) {
-        req.destroy();
+        rejected = true;
+        // Resume reading to drain the request body (so the server can send a response),
+        // but don't accumulate any more data.
+        req.resume();
         reject(Object.assign(new Error('Payload Too Large'), { statusCode: 413 }));
         return;
       }

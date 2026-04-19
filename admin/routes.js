@@ -488,9 +488,21 @@ async function handleLogin(req, res, wm) {
 }
 
 async function serveStatic(req, res, path) {
-  let filePath = path.replace(/^\/admin\/?/, '') || 'index.html';
+  // Decode percent-encoded sequences before checking for traversal
+  let filePath;
+  try {
+    filePath = decodeURIComponent(path.replace(/^\/admin\/?/, '') || 'index.html');
+  } catch {
+    filePath = path.replace(/^\/admin\/?/, '') || 'index.html';
+  }
   if (!filePath || filePath === '' || !filePath.includes('.')) {
     filePath = 'index.html';
+  }
+
+  // Fast reject: block any path containing ".." segments (before filesystem access)
+  if (filePath.includes('..')) {
+    sendJson(res, 403, { error: 'Forbidden' });
+    return;
   }
 
   const fullPath = join(PUBLIC_DIR, filePath);
