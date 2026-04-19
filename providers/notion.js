@@ -202,6 +202,34 @@ export class NotionProvider extends BaseProvider {
     return result;
   }
 
+  getPrompts() {
+    return [
+      {
+        name: 'search_and_summarize',
+        description: '워크스페이스에서 키워드로 페이지를 검색하고 요약합니다.',
+        arguments: [
+          { name: 'query', description: '검색할 키워드', required: true },
+        ],
+      },
+    ];
+  }
+
+  async getPromptMessages(promptName, args = {}) {
+    if (promptName === 'search_and_summarize') {
+      const query = args.query || '';
+      return [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text: `${this.displayName} 워크스페이스에서 "${query}" 관련 페이지를 검색하고 핵심 내용을 요약해주세요. 먼저 notion_${this.namespace}__search_pages 도구를 사용하여 관련 페이지를 찾은 후, 각 페이지의 내용을 읽고 요약하세요.`,
+          },
+        },
+      ];
+    }
+    return [{ role: 'user', content: { type: 'text', text: '지원되지 않는 프롬프트입니다.' } }];
+  }
+
   _extractTitle(obj) {
     if (obj.properties?.title?.title) {
       return obj.properties.title.title.map(t => t.plain_text).join('');

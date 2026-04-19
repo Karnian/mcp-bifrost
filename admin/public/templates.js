@@ -3,12 +3,47 @@
  * Each template describes how to configure a specific MCP server with
  * minimal user input. Sensitive values are exposed as `fields` to fill in.
  */
+/**
+ * Template categories for filtering.
+ */
+export const TEMPLATE_CATEGORIES = [
+  { id: 'all', label: '전체' },
+  { id: 'productivity', label: '생산성' },
+  { id: 'development', label: '개발' },
+  { id: 'communication', label: '커뮤니케이션' },
+  { id: 'storage', label: '저장소' },
+  { id: 'demo', label: '데모/테스트' },
+];
+
+/**
+ * Search templates by name, description, or category.
+ * @param {string} query
+ * @param {string} [category] - filter by category id
+ * @returns {Array}
+ */
+export function searchTemplates(query, category) {
+  let results = TEMPLATES;
+  if (category && category !== 'all') {
+    results = results.filter(t => t.category === category);
+  }
+  if (query) {
+    const q = query.toLowerCase();
+    results = results.filter(t =>
+      t.name.toLowerCase().includes(q) ||
+      t.description.toLowerCase().includes(q) ||
+      t.id.toLowerCase().includes(q)
+    );
+  }
+  return results;
+}
+
 export const TEMPLATES = [
   // --- Built-in MCP servers ---
   {
     id: 'filesystem',
     name: 'Filesystem',
     icon: 'FS',
+    category: 'storage',
     description: '로컬 파일 시스템 접근 (MCP 공식)',
     kind: 'mcp-client',
     transport: 'stdio',
@@ -22,6 +57,7 @@ export const TEMPLATES = [
     id: 'fetch',
     name: 'Fetch',
     icon: 'HTTP',
+    category: 'development',
     description: 'HTTP fetch via MCP (MCP 공식)',
     kind: 'mcp-client',
     transport: 'stdio',
@@ -33,6 +69,7 @@ export const TEMPLATES = [
     id: 'everything',
     name: 'Everything (Demo)',
     icon: 'DEMO',
+    category: 'demo',
     description: '모든 MCP 기능을 보여주는 테스트 서버',
     kind: 'mcp-client',
     transport: 'stdio',
@@ -44,6 +81,7 @@ export const TEMPLATES = [
     id: 'github',
     name: 'GitHub',
     icon: 'GH',
+    category: 'development',
     description: 'GitHub API (공식 MCP)',
     kind: 'mcp-client',
     transport: 'stdio',
@@ -57,6 +95,7 @@ export const TEMPLATES = [
     id: 'github-oauth',
     name: 'GitHub (Remote MCP · OAuth)',
     icon: 'GH',
+    category: 'development',
     description: 'GitHub 공식 hosted MCP (Copilot MCP) + OAuth 2.0',
     kind: 'mcp-client',
     transport: 'http',
@@ -70,6 +109,7 @@ export const TEMPLATES = [
     id: 'linear-oauth',
     name: 'Linear (Remote MCP · OAuth)',
     icon: 'L',
+    category: 'productivity',
     description: 'Linear 공식 hosted MCP + OAuth 2.0',
     kind: 'mcp-client',
     transport: 'http',
@@ -81,6 +121,7 @@ export const TEMPLATES = [
     id: 'google-drive-oauth',
     name: 'Google Drive (Remote MCP · OAuth, stub)',
     icon: 'GD',
+    category: 'storage',
     description: 'Google Drive hosted MCP (URL 미공개 — 사용자가 직접 입력 필요)',
     kind: 'mcp-client',
     transport: 'http',
@@ -95,6 +136,7 @@ export const TEMPLATES = [
     id: 'notion-official-oauth',
     name: 'Notion (공식 MCP · OAuth)',
     icon: 'N',
+    category: 'productivity',
     description: 'Notion 공식 hosted MCP + OAuth 2.0 (권장)',
     kind: 'mcp-client',
     transport: 'http',
@@ -106,6 +148,7 @@ export const TEMPLATES = [
     id: 'notion-official',
     name: 'Notion (공식 MCP · stdio)',
     icon: 'N',
+    category: 'productivity',
     description: 'Notion 공식 MCP 서버 (권장)',
     kind: 'mcp-client',
     transport: 'stdio',
@@ -121,6 +164,7 @@ export const TEMPLATES = [
     id: 'notion-native',
     name: 'Notion (내장)',
     icon: 'N',
+    category: 'productivity',
     description: 'Bifrost 내장 Notion 어댑터 (legacy)',
     legacy: true,
     kind: 'native',
@@ -133,6 +177,7 @@ export const TEMPLATES = [
     id: 'slack-native',
     name: 'Slack (내장)',
     icon: 'S',
+    category: 'communication',
     description: 'Bifrost 내장 Slack 어댑터 (legacy)',
     legacy: true,
     kind: 'native',
