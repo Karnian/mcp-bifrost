@@ -222,6 +222,49 @@ export class UsageRecorder {
     };
   }
 
+  /**
+   * Timeseries query — hourly buckets for chart display.
+   * @param {{ range?: '24h'|'7d'|'30d' }} opts
+   * @returns {Array<{ hour: string, callCount: number, errorCount: number, avgLatency: number }>}
+   */
+  /**
+   * Timeseries query — hourly buckets for chart display.
+   * Note: in-memory _events24h only holds 7 days. For ranges > 7d,
+   * we read from disk. For 24h/7d, we use the fast in-memory path.
+   * @param {{ range?: '24h'|'7d' }} opts
+   * @returns {Array<{ hour: string, callCount: number, errorCount: number, avgLatency: number }>}
+   */
+  timeseries({ range = '24h' } = {}) {
+    // In-memory path supports up to 7d (the _events24h window)
+    const rangeMs = range === '7d' ? 7 * 24 * 60 * 60 * 1000
+      : 24 * 60 * 60 * 1000;
+    const cutoff = this._now() - rangeMs;
+    const buckets = new Map();
+
+    for (const e of this._events24h) {
+      if (e.t < cutoff) continue;
+      const hourTs = e.t - (e.t % (60 * 60 * 1000));
+      const hourKey = new Date(hourTs).toISOString().slice(0, 13) + ':00:00Z';
+      let b = buckets.get(hourKey);
+      if (!b) {
+        b = { hour: hourKey, callCount: 0, errorCount: 0, totalMs: 0 };
+        buckets.set(hourKey, b);
+      }
+      b.callCount++;
+      if (!e.ok) b.errorCount++;
+      b.totalMs += (e.durationMs || 0);
+    }
+
+    return Array.from(buckets.values())
+      .map(b => ({
+        hour: b.hour,
+        callCount: b.callCount,
+        errorCount: b.errorCount,
+        avgLatency: b.callCount > 0 ? Math.round(b.totalMs / b.callCount) : 0,
+      }))
+      .sort((a, b) => a.hour.localeCompare(b.hour));
+  }
+
   /** Read raw events from disk, newest first. Used for debugging / export. */
   async readRecent({ limit = 100 } = {}) {
     if (!existsSync(this._path)) return [];

@@ -434,12 +434,24 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILES', message: 'profiles must be an object map' } });
         }
-        // Shallow validate: each profile may have toolsInclude/workspacesInclude string arrays.
+        // Validate: each profile may have toolsInclude/workspacesInclude string arrays.
         for (const [name, def] of Object.entries(body)) {
           if (!def || typeof def !== 'object') return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILE', message: `profile '${name}' must be object` } });
           for (const key of ['toolsInclude', 'workspacesInclude']) {
-            if (def[key] !== undefined && (!Array.isArray(def[key]) || def[key].some(x => typeof x !== 'string'))) {
-              return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILE_FIELD', message: `profile '${name}'.${key} must be string[]` } });
+            if (def[key] !== undefined) {
+              if (!Array.isArray(def[key]) || def[key].some(x => typeof x !== 'string')) {
+                return sendJson(res, 400, { ok: false, error: { code: 'INVALID_PROFILE_FIELD', message: `profile '${name}'.${key} must be string[]` } });
+              }
+              // Glob pattern length + ReDoS prevention
+              for (const pattern of def[key]) {
+                if (pattern.length > 256) {
+                  return sendJson(res, 400, { ok: false, error: { code: 'PATTERN_TOO_LONG', message: `profile '${name}'.${key}: pattern exceeds 256 chars` } });
+                }
+                // Reject nested quantifiers (ReDoS risk): patterns like a{*}{*} or **/**/**
+                if (/(\*{2,}.*){3,}/.test(pattern)) {
+                  return sendJson(res, 400, { ok: false, error: { code: 'PATTERN_REDOS', message: `profile '${name}'.${key}: pattern has potential ReDoS risk` } });
+                }
+              }
             }
           }
         }
@@ -452,6 +464,17 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       }
 
       // --- Phase 7g: Usage + Audit endpoints ---
+      // GET /api/usage/timeseries
+      if (path === '/api/usage/timeseries' && method === 'GET') {
+        if (!usage) return sendJson(res, 500, { ok: false, error: { code: 'USAGE_UNAVAILABLE' } });
+        const range = url.searchParams.get('range') || '24h';
+        if (!['24h', '7d'].includes(range)) {
+          return sendJson(res, 400, { ok: false, error: { code: 'INVALID_RANGE', message: 'range must be 24h or 7d' } });
+        }
+        sendJson(res, 200, { ok: true, data: usage.timeseries({ range }) });
+        return;
+      }
+
       if (path === '/api/usage' && method === 'GET') {
         if (!usage) return sendJson(res, 500, { ok: false, error: { code: 'USAGE_UNAVAILABLE' } });
         const since = url.searchParams.get('since') || '24h';
