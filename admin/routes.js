@@ -338,6 +338,20 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             results.push({ displayName: wsData.displayName, status: 'error', message: `Validation: ${importValidation.errors.join('; ')}` });
             continue;
           }
+          // Command whitelist + env injection defense (same as POST/PUT)
+          if (wsData.kind === 'mcp-client' && wsData.transport === 'stdio') {
+            if (wsData.command && !isCommandAllowed(wsData.command)) {
+              results.push({ displayName: wsData.displayName, status: 'error', message: `Command "${wsData.command}" is not in BIFROST_ALLOWED_COMMANDS whitelist` });
+              continue;
+            }
+            if (wsData.env) {
+              const { valid, blocked } = validateEnvVars(wsData.env);
+              if (!valid) {
+                results.push({ displayName: wsData.displayName, status: 'error', message: `Blocked environment variables: ${blocked.join(', ')}` });
+                continue;
+              }
+            }
+          }
           try {
             const ws = await wm.addWorkspace(wsData);
             results.push({ id: ws.id, status: 'created' });

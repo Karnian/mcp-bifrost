@@ -9,7 +9,7 @@ import { z } from 'zod';
 // tool/prompt naming collisions between workspaces)
 const namespacePattern = /^[a-z0-9][a-z0-9-]*$/;
 
-const credentialsSchema = z.record(z.string()).optional();
+const credentialsSchema = z.record(z.string(), z.string()).optional();
 
 const baseWorkspaceSchema = z.object({
   displayName: z.string().min(1).max(200).optional(),
@@ -31,10 +31,10 @@ const mcpClientWorkspaceSchema = baseWorkspaceSchema.extend({
   // stdio fields
   command: z.string().max(1000).optional(),
   args: z.array(z.string().max(1000)).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   // http/sse fields
   url: z.string().url().max(2000).optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
 });
 
 /**
@@ -53,11 +53,16 @@ export function validateWorkspacePayload(body, options = {}) {
 
   // Schema validation
   const schema = body.kind === 'mcp-client' ? mcpClientWorkspaceSchema : nativeWorkspaceSchema;
-  const result = schema.safeParse(body);
-  if (!result.success) {
-    for (const issue of result.error.issues) {
-      errors.push(`${issue.path.join('.')}: ${issue.message}`);
+  try {
+    const result = schema.safeParse(body);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        errors.push(`${issue.path.join('.')}: ${issue.message}`);
+      }
     }
+  } catch {
+    // Zod internal error — treat as validation failure rather than crash
+    errors.push('Schema validation failed (internal error)');
   }
 
   // Self-reference check for mcp-client

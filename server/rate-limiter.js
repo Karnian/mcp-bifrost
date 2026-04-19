@@ -22,15 +22,25 @@ export function getClientIp(req) {
     return directIp;
   }
 
+  // Trusted proxies from env (CIDR not supported yet — exact IP match)
+  const trustedRaw = process.env.BIFROST_TRUSTED_PROXIES || '';
+  const trusted = new Set(trustedRaw.split(',').map(s => s.trim()).filter(Boolean));
+
+  // Only trust XFF if the direct peer is itself a trusted proxy (or localhost).
+  // Without this check, any client can spoof XFF to evade IP-based rate limiting.
+  const peerIsTrusted = trusted.size === 0
+    ? _isLoopback(directIp)  // no trusted proxies configured — only trust loopback
+    : trusted.has(directIp) || trusted.has(_normalizeIp(directIp));
+
+  if (!peerIsTrusted) {
+    return directIp;
+  }
+
   const xff = req.headers['x-forwarded-for'];
   if (!xff) return directIp;
 
   const ips = xff.split(',').map(s => s.trim()).filter(Boolean);
   if (ips.length === 0) return directIp;
-
-  // Trusted proxies from env (CIDR not supported yet — exact IP match)
-  const trustedRaw = process.env.BIFROST_TRUSTED_PROXIES || '';
-  const trusted = new Set(trustedRaw.split(',').map(s => s.trim()).filter(Boolean));
 
   // Walk from rightmost to find first untrusted IP
   for (let i = ips.length - 1; i >= 0; i--) {
@@ -40,6 +50,16 @@ export function getClientIp(req) {
   }
   // All IPs are trusted — use leftmost (client)
   return ips[0];
+}
+
+function _isLoopback(ip) {
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+function _normalizeIp(ip) {
+  // Strip IPv6-mapped IPv4 prefix
+  if (ip.startsWith('::ffff:')) return ip.slice(7);
+  return ip;
 }
 
 export class RateLimiter {

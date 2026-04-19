@@ -437,11 +437,20 @@ export class McpHandler {
       throw Object.assign(new Error('Prompt name is required'), { code: -32602 });
     }
 
+    // ACL check (same as tools/list)
+    this._assertAllowed(identity, profileObj);
+
     // Built-in prompt
     if (name === 'bifrost__workspace_summary') {
       let workspaces = this.wm.getWorkspaces();
       if (identity) {
         workspaces = workspaces.filter(ws => identityAllowsWorkspace(identity, ws.id));
+      }
+      // Respect profile workspace filter
+      if (profileObj && Array.isArray(profileObj.workspacesInclude)) {
+        workspaces = workspaces.filter(ws =>
+          profileObj.workspacesInclude.some(p => matchPattern(p, ws.id))
+        );
       }
       const summary = workspaces.map(ws =>
         `- ${ws.displayName} (${ws.provider}/${ws.namespace}): ${ws.status}${ws.enabled ? '' : ' [disabled]'}`

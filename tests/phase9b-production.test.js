@@ -30,7 +30,7 @@ describe('getClientIp', () => {
     }
   });
 
-  it('returns rightmost untrusted IP when trust proxy is enabled', async () => {
+  it('returns rightmost untrusted IP when peer is trusted proxy', async () => {
     ({ getClientIp } = await import('../server/rate-limiter.js'));
     const origTrust = process.env.BIFROST_TRUST_PROXY;
     const origProxies = process.env.BIFROST_TRUSTED_PROXIES;
@@ -38,7 +38,7 @@ describe('getClientIp', () => {
     process.env.BIFROST_TRUSTED_PROXIES = '172.16.0.1';
     try {
       const req = {
-        socket: { remoteAddress: '172.16.0.1' },
+        socket: { remoteAddress: '172.16.0.1' },  // peer IS a trusted proxy
         headers: { 'x-forwarded-for': '10.0.0.1, 192.168.1.5, 172.16.0.1' },
       };
       // 172.16.0.1 is trusted, so rightmost untrusted is 192.168.1.5
@@ -51,7 +51,28 @@ describe('getClientIp', () => {
     }
   });
 
-  it('returns leftmost IP when all are trusted', async () => {
+  it('ignores XFF when peer is NOT a trusted proxy (spoofing prevention)', async () => {
+    ({ getClientIp } = await import('../server/rate-limiter.js'));
+    const origTrust = process.env.BIFROST_TRUST_PROXY;
+    const origProxies = process.env.BIFROST_TRUSTED_PROXIES;
+    process.env.BIFROST_TRUST_PROXY = '1';
+    process.env.BIFROST_TRUSTED_PROXIES = '172.16.0.1';
+    try {
+      const req = {
+        socket: { remoteAddress: '203.0.113.50' },  // peer is NOT trusted
+        headers: { 'x-forwarded-for': '10.0.0.1, 192.168.1.5' },
+      };
+      // Should return direct IP, NOT XFF
+      assert.equal(getClientIp(req), '203.0.113.50');
+    } finally {
+      if (origTrust !== undefined) process.env.BIFROST_TRUST_PROXY = origTrust;
+      else delete process.env.BIFROST_TRUST_PROXY;
+      if (origProxies !== undefined) process.env.BIFROST_TRUSTED_PROXIES = origProxies;
+      else delete process.env.BIFROST_TRUSTED_PROXIES;
+    }
+  });
+
+  it('returns leftmost IP when all XFF entries are trusted', async () => {
     ({ getClientIp } = await import('../server/rate-limiter.js'));
     const origTrust = process.env.BIFROST_TRUST_PROXY;
     const origProxies = process.env.BIFROST_TRUSTED_PROXIES;
@@ -59,7 +80,7 @@ describe('getClientIp', () => {
     process.env.BIFROST_TRUSTED_PROXIES = '10.0.0.1,172.16.0.1';
     try {
       const req = {
-        socket: { remoteAddress: '172.16.0.1' },
+        socket: { remoteAddress: '172.16.0.1' },  // peer is trusted
         headers: { 'x-forwarded-for': '10.0.0.1, 172.16.0.1' },
       };
       assert.equal(getClientIp(req), '10.0.0.1');
