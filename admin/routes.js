@@ -106,12 +106,19 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
 
         if (method === 'PUT') {
           const body = await readBody(req);
+          const existing = wm.getRawWorkspace(id);
+          const effectiveKind = body.kind || existing?.kind;
+          const effectiveTransport = body.transport || existing?.transport;
+          // Command whitelist enforcement for stdio mcp-client (same as POST)
+          if (effectiveKind === 'mcp-client' && effectiveTransport === 'stdio' && body.command) {
+            if (!isCommandAllowed(body.command)) {
+              sendJson(res, 403, { ok: false, error: { code: 'COMMAND_NOT_ALLOWED', message: `Command "${body.command}" is not in BIFROST_ALLOWED_COMMANDS whitelist` } });
+              return;
+            }
+          }
           // Env vars injection defense for stdio mcp-client
           // Check both existing and target state (body may change kind/transport)
           if (body.env && typeof body.env === 'object') {
-            const existing = wm.getRawWorkspace(id);
-            const effectiveKind = body.kind || existing?.kind;
-            const effectiveTransport = body.transport || existing?.transport;
             if (effectiveKind === 'mcp-client' && effectiveTransport === 'stdio') {
               const { valid, blocked } = validateEnvVars(body.env);
               if (!valid) {
