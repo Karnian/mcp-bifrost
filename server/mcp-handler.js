@@ -8,6 +8,8 @@
  */
 import { identityAllowsWorkspace, identityAllowsProfile, matchPattern } from './mcp-token-manager.js';
 
+const MAX_RESOURCE_SIZE = parseInt(process.env.BIFROST_MAX_RESOURCE_SIZE || '', 10) || 5 * 1024 * 1024; // 5MB
+
 export class McpHandler {
   constructor(workspaceManager, toolRegistry, { usage = null } = {}) {
     this.wm = workspaceManager;
@@ -36,13 +38,14 @@ export class McpHandler {
           result = this._resourcesList(identity);
           break;
         case 'resources/read':
-          result = this._resourcesRead(params, identity);
+          result = await this._resourcesRead(params, identity);
           break;
         case 'prompts/list':
-          result = { prompts: [] };
+          result = this._promptsList(identity);
           break;
         case 'prompts/get':
-          return this._errorResponse(id, -32601, 'prompts/get not implemented');
+          result = await this._promptsGet(params, identity);
+          break;
         case 'ping':
           result = {};
           break;
@@ -62,6 +65,7 @@ export class McpHandler {
       capabilities: {
         tools: { listChanged: true },
         resources: {},
+        prompts: {},
       },
       serverInfo: {
         name: 'mcp-bifrost',
@@ -373,20 +377,133 @@ export class McpHandler {
       .filter(t => t._workspace === ws.id)
       .map(t => ({ name: t._originalName, usable: true }));
 
+    const text = JSON.stringify({
+      id: ws.id,
+      provider: ws.provider,
+      namespace: ws.namespace,
+      displayName: ws.displayName,
+      status: ws.status,
+      tools,
+      lastChecked: new Date().toISOString(),
+    });
+    if (Buffer.byteLength(text, 'utf-8') > MAX_RESOURCE_SIZE) {
+      const err = new Error(`Resource size exceeds limit (${MAX_RESOURCE_SIZE} bytes)`);
+      err.code = -32600;
+      throw err;
+    }
     return {
       contents: [{
         uri,
         mimeType: 'application/json',
-        text: JSON.stringify({
-          id: ws.id,
-          provider: ws.provider,
-          namespace: ws.namespace,
-          displayName: ws.displayName,
-          status: ws.status,
-          tools,
-          lastChecked: new Date().toISOString(),
-        }),
+        text,
       }],
+    };
+  }
+
+  _promptsList(identity) {
+    const prompts = [
+      {
+        name: 'bifrost__workspace_summary',
+        description: '전체 워크스페이스 상태 요약을 생성합니다.',
+        arguments: [],
+      },
+    ];
+    // Collect prompts from providers
+    const workspaces = this.wm.getWorkspaces();
+    for (const ws of workspaces) {
+      if (!ws.enabled) continue;
+      if (identity && !identityAllowsWorkspace(identity, ws.id)) continue;
+      const provider = this.wm.getProvider(ws.id);
+      if (!provider || typeof provider.getPrompts !== 'function') continue;
+      const providerPrompts = provider.getPrompts();
+      for (const p of providerPrompts) {
+        prompts.push({
+          name: `${ws.provider}_${ws.namespace}__${p.name}`,
+          description: `[${ws.displayName}] ${p.description}`,
+          arguments: p.arguments || [],
+        });
+      }
+    }
+    return { prompts };
+  }
+
+  async _promptsGet(params, identity) {
+    const { name, arguments: args = {} } = params || {};
+    if (!name) {
+      throw Object.assign(new Error('Prompt name is required'), { code: -32602 });
+    }
+
+    // Built-in prompt
+    if (name === 'bifrost__workspace_summary') {
+      let workspaces = this.wm.getWorkspaces();
+      if (identity) {
+        workspaces = workspaces.filter(ws => identityAllowsWorkspace(identity, ws.id));
+      }
+      const summary = workspaces.map(ws =>
+        `- ${ws.displayName} (${ws.provider}/${ws.namespace}): ${ws.status}${ws.enabled ? '' : ' [disabled]'}`
+      ).join('\n');
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Bifrost 워크스페이스 상태 요약:\n\n${summary || '등록된 워크스페이스가 없습니다.'}`,
+            },
+          },
+        ],
+      };
+    }
+
+    // Provider prompts: reverse-lookup by matching against registered workspace prompts.
+    // This avoids regex parsing issues when provider/namespace contain underscores.
+    let foundWs = null;
+    let foundPromptName = null;
+    const workspaces = this.wm.getWorkspaces();
+    for (const ws of workspaces) {
+      if (!ws.enabled) continue;
+      if (identity && !identityAllowsWorkspace(identity, ws.id)) continue;
+      const prefix = `${ws.provider}_${ws.namespace}__`;
+      if (name.startsWith(prefix)) {
+        foundWs = ws;
+        foundPromptName = name.slice(prefix.length);
+        break;
+      }
+    }
+    if (!foundWs || !foundPromptName) {
+      throw Object.assign(new Error(`Unknown prompt: ${name}`), { code: -32602 });
+    }
+
+    const ws = foundWs;
+    const promptName = foundPromptName;
+
+    const provider = this.wm.getProvider(ws.id);
+    if (!provider || typeof provider.getPrompts !== 'function') {
+      throw Object.assign(new Error(`Provider does not support prompts: ${name}`), { code: -32602 });
+    }
+
+    const providerPrompts = provider.getPrompts();
+    const promptDef = providerPrompts.find(p => p.name === promptName);
+    if (!promptDef) {
+      throw Object.assign(new Error(`Unknown prompt: ${name}`), { code: -32602 });
+    }
+
+    // If provider has a getPromptMessages method, use it
+    if (typeof provider.getPromptMessages === 'function') {
+      return { messages: await provider.getPromptMessages(promptName, args) };
+    }
+
+    // Default: return a simple text message
+    return {
+      messages: [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text: promptDef.description,
+          },
+        },
+      ],
     };
   }
 

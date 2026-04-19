@@ -68,6 +68,39 @@ export function isCommandAllowed(command) {
   return allowed.some(a => a === command || a === cmdBase);
 }
 
+/**
+ * Validate env vars for stdio mcp-client workspaces.
+ * Block dangerous environment variables that could be used for injection.
+ * Only BIFROST_*, NODE_ENV, HOME, LANG, TERM, and user-defined prefixes are allowed.
+ */
+const DANGEROUS_ENV_KEYS = new Set([
+  'PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH', 'PYTHONPATH', 'RUBYLIB',
+  'NODE_OPTIONS', 'NODE_PATH', 'SHELL', 'COMSPEC', 'IFS',
+]);
+
+const ALLOWED_ENV_PREFIXES = ['BIFROST_', 'NODE_ENV', 'HOME', 'LANG', 'TERM', 'TZ', 'LC_'];
+
+export function validateEnvVars(env) {
+  if (!env || typeof env !== 'object') return { valid: true, blocked: [] };
+  const blocked = [];
+  for (const key of Object.keys(env)) {
+    if (DANGEROUS_ENV_KEYS.has(key)) {
+      blocked.push(key);
+      continue;
+    }
+    // Allow keys matching allowed prefixes
+    const allowed = ALLOWED_ENV_PREFIXES.some(prefix => key.startsWith(prefix));
+    // Also allow custom env vars specified via BIFROST_ALLOWED_ENV_PREFIXES
+    const customPrefixes = (process.env.BIFROST_ALLOWED_ENV_PREFIXES || '').split(',').filter(Boolean);
+    const customAllowed = customPrefixes.some(prefix => key.startsWith(prefix.trim()));
+    if (!allowed && !customAllowed) {
+      blocked.push(key);
+    }
+  }
+  return { valid: blocked.length === 0, blocked };
+}
+
 export function sendJson(res, statusCode, data) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {

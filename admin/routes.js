@@ -1,7 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { join, dirname, extname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare } from './auth.js';
+import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars } from './auth.js';
 import { RateLimiter } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
 
@@ -66,6 +66,14 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             return;
           }
         }
+        // Env vars injection defense for stdio mcp-client
+        if (body.kind === 'mcp-client' && body.transport === 'stdio' && body.env) {
+          const { valid, blocked } = validateEnvVars(body.env);
+          if (!valid) {
+            sendJson(res, 400, { ok: false, error: { code: 'ENV_NOT_ALLOWED', message: `Blocked environment variables: ${blocked.join(', ')}` } });
+            return;
+          }
+        }
         const ws = await wm.addWorkspace(body);
         sendJson(res, 201, { ok: true, data: wm.getWorkspace(ws.id) });
         return;
@@ -98,6 +106,20 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
 
         if (method === 'PUT') {
           const body = await readBody(req);
+          // Env vars injection defense for stdio mcp-client
+          // Check both existing and target state (body may change kind/transport)
+          if (body.env && typeof body.env === 'object') {
+            const existing = wm.getRawWorkspace(id);
+            const effectiveKind = body.kind || existing?.kind;
+            const effectiveTransport = body.transport || existing?.transport;
+            if (effectiveKind === 'mcp-client' && effectiveTransport === 'stdio') {
+              const { valid, blocked } = validateEnvVars(body.env);
+              if (!valid) {
+                sendJson(res, 400, { ok: false, error: { code: 'ENV_NOT_ALLOWED', message: `Blocked environment variables: ${blocked.join(', ')}` } });
+                return;
+              }
+            }
+          }
           await wm.updateWorkspace(id, body);
           sendJson(res, 200, { ok: true, data: wm.getWorkspace(id) });
           return;

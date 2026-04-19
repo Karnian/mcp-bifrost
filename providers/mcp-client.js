@@ -8,8 +8,8 @@ import { logger } from '../server/logger.js';
  *
  * Transport modes:
  * - stdio: spawns a child process and speaks JSON-RPC over stdin/stdout
- * - http:  TODO (Phase 5c)
- * - sse:   TODO (Phase 5c)
+ * - http:  Streamable HTTP (POST JSON-RPC + optional GET SSE stream)
+ * - sse:   SSE-based transport (same as http, with notification stream)
  */
 export class McpClientProvider extends BaseProvider {
   constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null, identity = 'default' } = {}) {

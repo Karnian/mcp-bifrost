@@ -44,4 +44,12 @@ export class BaseProvider {
   async capabilityCheck() {
     throw new Error('capabilityCheck() must be implemented');
   }
+
+  /**
+   * Optional: return prompt definitions for this provider.
+   * @returns {Array<{name: string, description: string, arguments?: Array}>}
+   */
+  getPrompts() {
+    return [];
+  }
 }
