@@ -2,7 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { join, dirname, extname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars } from './auth.js';
-import { RateLimiter } from '../server/rate-limiter.js';
+import { RateLimiter, getClientIp } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
 import { validateWorkspacePayload } from '../server/workspace-schema.js';
 
@@ -509,8 +509,8 @@ function _checkExposure(req, res) {
 }
 
 async function handleLogin(req, res, wm) {
-  // Rate limit — brute-force protection
-  const ip = req.socket?.remoteAddress || 'unknown';
+  // Rate limit — brute-force protection (respects trust proxy)
+  const ip = getClientIp(req);
   const rl = adminRateLimiter.check(ip);
   if (!rl.allowed) {
     const retryAfter = Math.ceil(rl.retryAfterMs / 1000);

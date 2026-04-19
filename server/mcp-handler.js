@@ -40,10 +40,10 @@ export class McpHandler {
           result = await this._resourcesRead(params, identity);
           break;
         case 'prompts/list':
-          result = this._promptsList(identity);
+          result = this._promptsList(identity, profileObj);
           break;
         case 'prompts/get':
-          result = await this._promptsGet(params, identity);
+          result = await this._promptsGet(params, identity, profileObj);
           break;
         case 'ping':
           result = {};
@@ -399,7 +399,8 @@ export class McpHandler {
     };
   }
 
-  _promptsList(identity) {
+  _promptsList(identity, profileObj) {
+    this._assertAllowed(identity, profileObj);
     const prompts = [
       {
         name: 'bifrost__workspace_summary',
@@ -412,6 +413,10 @@ export class McpHandler {
     for (const ws of workspaces) {
       if (!ws.enabled) continue;
       if (identity && !identityAllowsWorkspace(identity, ws.id)) continue;
+      // Respect profile workspace filter
+      if (profileObj && Array.isArray(profileObj.workspacesInclude)) {
+        if (!profileObj.workspacesInclude.some(p => matchPattern(p, ws.id))) continue;
+      }
       const provider = this.wm.getProvider(ws.id);
       if (!provider || typeof provider.getPrompts !== 'function') continue;
       const providerPrompts = provider.getPrompts();
@@ -426,7 +431,7 @@ export class McpHandler {
     return { prompts };
   }
 
-  async _promptsGet(params, identity) {
+  async _promptsGet(params, identity, profileObj) {
     const { name, arguments: args = {} } = params || {};
     if (!name) {
       throw Object.assign(new Error('Prompt name is required'), { code: -32602 });
@@ -462,6 +467,9 @@ export class McpHandler {
     for (const ws of workspaces) {
       if (!ws.enabled) continue;
       if (identity && !identityAllowsWorkspace(identity, ws.id)) continue;
+      if (profileObj && Array.isArray(profileObj.workspacesInclude)) {
+        if (!profileObj.workspacesInclude.some(p => matchPattern(p, ws.id))) continue;
+      }
       const prefix = `${ws.provider}_${ws.namespace}__`;
       if (name.startsWith(prefix)) {
         foundWs = ws;
