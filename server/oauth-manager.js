@@ -214,7 +214,16 @@ export class OAuthManager {
 
   async getCachedClient(issuer, authMethod) {
     const cache = await this._loadIssuerCache();
-    return cache[this._cacheKey(issuer, authMethod)] || null;
+    const entry = cache[this._cacheKey(issuer, authMethod)];
+    if (!entry) return null;
+    // TTL: expire cached entries after 24 hours
+    const ttlMs = parseInt(process.env.BIFROST_OAUTH_CACHE_TTL_MS || '', 10) || 24 * 60 * 60 * 1000;
+    if (entry.registeredAt && Date.now() - new Date(entry.registeredAt).getTime() > ttlMs) {
+      delete cache[this._cacheKey(issuer, authMethod)];
+      await this._saveIssuerCache();
+      return null;
+    }
+    return entry;
   }
 
   async _storeCachedClient(issuer, authMethod, entry) {

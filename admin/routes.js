@@ -161,6 +161,32 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // POST /api/workspaces/:id/tools/:toolName/test — tool test execution
+      // Note: this calls the real tool (not a dry-run). Admin-only endpoint.
+      const toolTestMatch = path.match(/^\/api\/workspaces\/([^/]+)\/tools\/([^/]+)\/test$/);
+      if (toolTestMatch && method === 'POST') {
+        const wsId = decodeURIComponent(toolTestMatch[1]);
+        const toolName = decodeURIComponent(toolTestMatch[2]);
+        const provider = wm.getProvider(wsId);
+        if (!provider) {
+          return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: `Workspace '${wsId}' not found or not connected` } });
+        }
+        const tools = provider.getTools();
+        const tool = tools.find(t => t.name === toolName);
+        if (!tool) {
+          return sendJson(res, 404, { ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool '${toolName}' not found in workspace '${wsId}'` } });
+        }
+        try {
+          const body = await readBody(req).catch(() => ({}));
+          const args = body?.arguments || {};
+          const result = await provider.callTool(toolName, args);
+          sendJson(res, 200, { ok: true, data: { tool: toolName, result, warning: 'This executed the real tool, not a dry-run' } });
+        } catch (err) {
+          sendJson(res, 200, { ok: true, data: { tool: toolName, result: { content: [{ type: 'text', text: err.message }], isError: true }, warning: 'This executed the real tool, not a dry-run' } });
+        }
+        return;
+      }
+
       // POST /api/workspaces/:id/authorize — OAuth initialize (discovery + DCR + authorizationUrl)
       const authMatch = path.match(/^\/api\/workspaces\/([^/]+)\/authorize$/);
       if (authMatch && method === 'POST') {
