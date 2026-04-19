@@ -9,6 +9,39 @@ const DEFAULT_WINDOW_MS = 60 * 1000; // 1 minute
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const STALE_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * Extract client IP from request, respecting trust proxy settings.
+ * When BIFROST_TRUST_PROXY=1, uses rightmost untrusted IP from X-Forwarded-For.
+ * @param {IncomingMessage} req
+ * @returns {string}
+ */
+export function getClientIp(req) {
+  const directIp = req.socket?.remoteAddress || '127.0.0.1';
+
+  if (process.env.BIFROST_TRUST_PROXY !== '1') {
+    return directIp;
+  }
+
+  const xff = req.headers['x-forwarded-for'];
+  if (!xff) return directIp;
+
+  const ips = xff.split(',').map(s => s.trim()).filter(Boolean);
+  if (ips.length === 0) return directIp;
+
+  // Trusted proxies from env (CIDR not supported yet — exact IP match)
+  const trustedRaw = process.env.BIFROST_TRUSTED_PROXIES || '';
+  const trusted = new Set(trustedRaw.split(',').map(s => s.trim()).filter(Boolean));
+
+  // Walk from rightmost to find first untrusted IP
+  for (let i = ips.length - 1; i >= 0; i--) {
+    if (!trusted.has(ips[i])) {
+      return ips[i];
+    }
+  }
+  // All IPs are trusted — use leftmost (client)
+  return ips[0];
+}
+
 export class RateLimiter {
   constructor({ max = DEFAULT_MAX, windowMs = DEFAULT_WINDOW_MS } = {}) {
     this._max = max;

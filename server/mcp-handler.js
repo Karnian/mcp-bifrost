@@ -7,8 +7,7 @@
  * prevent tools/list bypass via name guessing.
  */
 import { identityAllowsWorkspace, identityAllowsProfile, matchPattern } from './mcp-token-manager.js';
-
-const MAX_RESOURCE_SIZE = parseInt(process.env.BIFROST_MAX_RESOURCE_SIZE || '', 10) || 5 * 1024 * 1024; // 5MB
+import { MAX_RESOURCE_SIZE } from './config-constants.js';
 
 export class McpHandler {
   constructor(workspaceManager, toolRegistry, { usage = null } = {}) {

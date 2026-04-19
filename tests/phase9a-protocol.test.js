@@ -127,13 +127,16 @@ describe('McpHandler prompts', () => {
 
 describe('McpHandler resource size limit', () => {
   it('MAX_RESOURCE_SIZE constant is defined and used', async () => {
-    // Verify the constant is accessible by reading the module source
     const { readFile } = await import('node:fs/promises');
-    const src = await readFile(new URL('../server/mcp-handler.js', import.meta.url), 'utf-8');
-    assert.ok(src.includes('MAX_RESOURCE_SIZE'));
-    assert.ok(src.includes('BIFROST_MAX_RESOURCE_SIZE'));
-    assert.ok(src.includes('Buffer.byteLength'));
-    assert.ok(src.includes('Resource size exceeds limit'));
+    // Check handler uses the constant
+    const handlerSrc = await readFile(new URL('../server/mcp-handler.js', import.meta.url), 'utf-8');
+    assert.ok(handlerSrc.includes('MAX_RESOURCE_SIZE'));
+    assert.ok(handlerSrc.includes('Buffer.byteLength'));
+    assert.ok(handlerSrc.includes('Resource size exceeds limit'));
+    // Verify constant is defined in config-constants
+    const configSrc = await readFile(new URL('../server/config-constants.js', import.meta.url), 'utf-8');
+    assert.ok(configSrc.includes('BIFROST_MAX_RESOURCE_SIZE'));
+    assert.ok(configSrc.includes('MAX_RESOURCE_SIZE'));
   });
 
   it('rejects oversized resource with -32600 error', async () => {

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars } from './auth.js';
 import { RateLimiter } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
+import { validateWorkspacePayload } from '../server/workspace-schema.js';
 
 const adminRateLimiter = new RateLimiter({ max: 10, windowMs: 60_000 });
 
@@ -59,6 +60,12 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       // POST /api/workspaces
       if (path === '/api/workspaces' && method === 'POST') {
         const body = await readBody(req);
+        // Schema validation
+        const validation = validateWorkspacePayload(body);
+        if (!validation.valid) {
+          sendJson(res, 400, { ok: false, error: { code: 'VALIDATION_ERROR', message: validation.errors.join('; ') } });
+          return;
+        }
         // Command whitelist enforcement for stdio mcp-client
         if (body.kind === 'mcp-client' && body.transport === 'stdio' && body.command) {
           if (!isCommandAllowed(body.command)) {
@@ -106,6 +113,12 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
 
         if (method === 'PUT') {
           const body = await readBody(req);
+          // Schema validation (same as POST)
+          const putValidation = validateWorkspacePayload(body);
+          if (!putValidation.valid) {
+            sendJson(res, 400, { ok: false, error: { code: 'VALIDATION_ERROR', message: putValidation.errors.join('; ') } });
+            return;
+          }
           const existing = wm.getRawWorkspace(id);
           const effectiveKind = body.kind || existing?.kind;
           const effectiveTransport = body.transport || existing?.transport;
@@ -319,6 +332,12 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         const imported = body.workspaces || [];
         const results = [];
         for (const wsData of imported) {
+          // Per-entry schema validation
+          const importValidation = validateWorkspacePayload(wsData);
+          if (!importValidation.valid) {
+            results.push({ displayName: wsData.displayName, status: 'error', message: `Validation: ${importValidation.errors.join('; ')}` });
+            continue;
+          }
           try {
             const ws = await wm.addWorkspace(wsData);
             results.push({ id: ws.id, status: 'created' });

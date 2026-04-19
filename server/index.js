@@ -12,6 +12,8 @@ import { escapeHtml } from './html-escape.js';
 import { readBody as readBodyUtil } from './http-utils.js';
 import { randomBytes } from 'node:crypto';
 import { logger } from './logger.js';
+import { applySecurityHeaders } from './security-headers.js';
+import { HEALTH_CHECK_INTERVAL_MS, HEADERS_TIMEOUT, REQUEST_TIMEOUT } from './config-constants.js';
 
 const wm = new WorkspaceManager();
 const tr = new ToolRegistry(wm);
@@ -38,11 +40,10 @@ oauth.purgeStalePending().catch(() => {});
 // Run initial health checks in background
 wm.testAll().catch(err => logger.error('[Bifrost] Initial health check failed:', err.message));
 
-// Background healthCheck every 5 minutes
-const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
+// Background healthCheck (configurable via BIFROST_HEALTH_CHECK_INTERVAL)
 const healthInterval = setInterval(() => {
   wm.testAll().catch(err => logger.error('[Bifrost] Background health check failed:', err.message));
-}, HEALTH_CHECK_INTERVAL);
+}, HEALTH_CHECK_INTERVAL_MS);
 
 const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit });
 
@@ -115,8 +116,18 @@ async function authenticateMcpSse(req, res, url) {
 }
 
 const server = createServer(async (req, res) => {
+  // Apply security headers to every response
+  applySecurityHeaders(res, req);
+
   const url = new URL(req.url, `http://${req.headers.host}`);
   const path = url.pathname;
+
+  // --- CORS preflight ---
+  if (req.method === 'OPTIONS' && process.env.BIFROST_CORS_ORIGIN) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   // --- MCP Streamable HTTP ---
   if (path === '/mcp' && req.method === 'POST') {
@@ -223,9 +234,9 @@ const server = createServer(async (req, res) => {
   jsonResponse(res, 404, { error: 'Not Found' });
 });
 
-// Slowloris defense — cap header/request timeout to prevent slow connections from hogging slots
-server.headersTimeout = 20_000;
-server.requestTimeout = 30_000;
+// Slowloris defense — cap header/request timeout (configurable via env)
+server.headersTimeout = HEADERS_TIMEOUT;
+server.requestTimeout = REQUEST_TIMEOUT;
 
 const port = wm.getServerConfig().port || 3100;
 const host = process.env.BIFROST_HOST || wm.getServerConfig().host || '127.0.0.1';
