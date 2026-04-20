@@ -107,10 +107,14 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ### 3.4 평면 필드 → `ws.oauth.client` 마이그레이션 shim (Codex Round 2+3 반영)
 
-**현재 코드에서 평면 필드 직참조 위치** (grep 검증):
+**현재 코드에서 평면 필드 직참조 위치** (grep 검증 — Round 6 에서 2곳 추가):
 1. `server/oauth-manager.js:592-594` — `_refreshWithMutex` 가 `ws.oauth.clientId / clientSecret / authMethod` 읽음
-2. `server/workspace-manager.js:46-49` — `maskOAuth()` 의 마스킹 로직
-3. `server/workspace-manager.js:308-310` — POST/PUT workspace 입력 파싱
+2. `server/oauth-manager.js:527-529` — `_persistTokens` 가 refresh 성공 후 `ws.oauth.{clientId,clientSecret,authMethod}` 쓰기
+3. `server/workspace-manager.js:46-49` — `maskOAuth()` 의 마스킹 로직
+4. `server/workspace-manager.js:308-310` — POST/PUT workspace 입력 파싱
+5. `admin/routes.js:222-247` — OAuth authorization init (POST /api/workspaces/:id/oauth/authorize)
+   — `ws.oauth?.clientId/authMethod/clientSecret` **읽기 + 쓰기 둘 다**
+6. `admin/routes.js:271` — diagnostics 응답에 `cached.clientId` 노출 (메타 표시용)
 
 **마이그레이션 전략**:
 - **읽기 경로**: 헬퍼 `getOAuthClient(ws)` 도입 → `ws.oauth.client?.clientId ?? ws.oauth.clientId` 순으로 fallback.
@@ -154,6 +158,20 @@ B 발급 시 A 의 refresh-token 을 supersede.
 - [ ] 테스트: 같은 issuer 로 서로 다른 workspace 2개 등록 → 서로 다른 clientId 반환
 - [ ] 테스트: soft delete → cache 유지, restore → 재인증 불필요; expire → cache purge
 
+### 10a-1b — `/api/oauth/discover` 정책 결정 (0.1 일, 10a-1 과 번들)
+
+**배경**: 현재 `admin/routes.js:257-277` 의 POST `/api/oauth/discover` 는 Wizard
+preview 단계에서 호출되며 `oauth.getCachedClient(issuer, authMethod)` 를 조회해서
+`cachedClient` 필드를 반환. workspace-scoped cache 로 전환하면 이 API 는
+workspaceId 맥락이 없음 (preview 시점엔 workspace 미생성).
+
+**결정**: **Option Y 채택 — 응답에서 `cachedClient` 필드 제거**.
+- 이유: Wizard preview 는 "이 issuer 가 DCR 지원하는지 + auth method 뭐가 있는지"
+  만 알면 충분. cachedClient 유무는 workspace 생성 이후 의미.
+- 변경 범위: admin/routes.js:271 의 `cachedClient` 필드 제거, 응답 스키마 업데이트.
+  Admin UI (`admin/public/app.js`) 에서 해당 필드 참조 있으면 같이 제거.
+- 테스트: discover 응답에 `cachedClient` 키 부재 검증.
+
 ### 10a-2 — Static client 우선 + DCR fallback (0.5 일)
 
 - [ ] `workspace-manager.js` 에서 OAuth 초기화 시 우선순위:
@@ -178,8 +196,16 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 - [ ] **신규 공개 진단 API** (Round 5 반영 — 현재 미존재):
   - `provider.getStreamStatus()` in `providers/mcp-client.js`
-    - 반환: `'connecting' | 'connected' | 'reconnecting' | 'stopped:auth_failed' | 'stopped:unsupported'`
-    - 내부 상태 (`_streamConnected`, `_streamStopping`, `_consecutive401Count`) 를 외부 가시 상태로 매핑
+    - 반환 enum (Round 6 반영 — 전체 상태 완전성):
+      - `'idle'` — transport=http/sse 이지만 아직 `_startNotificationStream()` 호출 전
+      - `'connecting'` — stream open 시도 중
+      - `'connected'` — SSE read 루프 진행 중
+      - `'reconnecting'` — 일시 끊김 + backoff 재연결 대기
+      - `'stopped:auth_failed'` — 401 × N 초과 → markAuthFailed 발동 후 영구 중단
+      - `'stopped:unsupported'` — 405/404 받음 (서버가 GET stream 미지원 → 조용히 중단)
+      - `'stopped:shutdown'` — `shutdown()` 호출 후
+      - `'not_applicable'` — transport=stdio (notification stream 개념 없음)
+    - 내부 상태 (`_streamConnected`, `_streamStopping`, `_streamAbort`, `_consecutive401Count`) 를 외부 enum 으로 매핑
     - 테스트 검증 + Admin UI 표시 둘 다 사용
   - `wm.getOAuthClient(workspaceId)` in `server/workspace-manager.js`
     - 반환: `ws.oauth.client ?? null` (load-time migration 후엔 항상 nested 반환)
@@ -193,7 +219,10 @@ B 발급 시 A 의 refresh-token 을 supersede.
   ```js
   // (workspaceId, identity) 튜플 mutex — identity 간 병렬성 유지 (Round 5 반영)
   await this._withIdentityMutex(workspaceId, identity, async () => {
-    const ws = this.wm.getWorkspace(workspaceId);
+    // _getRawWorkspace() 는 mutation 가능한 raw 참조 반환 (getWorkspace() 는 masked clone).
+    // _save() 가 실제 저장. 기존 _markActionNeeded() 패턴과 동일 (oauth-manager.js:651-653).
+    const ws = this.wm?._getRawWorkspace?.(workspaceId);
+    if (!ws) return;
     // by-identity 저장 구조 (Phase 7c 이후 표준)
     if (ws.oauth?.byIdentity?.[identity]?.tokens) {
       ws.oauth.byIdentity[identity].tokens.accessToken = null;
@@ -207,7 +236,8 @@ B 발급 시 A 의 refresh-token 을 supersede.
     if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
     ws.oauthActionNeededBy[identity] = true;
     if (identity === 'default') ws.oauthActionNeeded = true;
-    await this.wm.save();
+    // _save() 는 private 이지만 `oauth-manager.js:499` 이미 사용 중인 패턴
+    if (this.wm?._save) await this.wm._save();
     // Observability: audit event + metric counter
     this.audit?.record({ action: 'oauth.threshold_trip', workspace: workspaceId, details: { identity, threshold: this._authFailThreshold } });
   });
@@ -285,13 +315,15 @@ B 발급 시 A 의 refresh-token 을 supersede.
 - reload/reconnect 시 카운터 리셋 — 일시적 서버 오류와 영구 토큰 문제를 구별 가능
 - 3회 임계치는 `BIFROST_AUTH_FAIL_THRESHOLD` 환경변수로 조정 가능
 
-### 6.4 동시성 제어 (Codex Round 3+5 반영)
+### 6.4 동시성 제어 (Codex Round 3+5+6 반영)
 - `markAuthFailed()` 와 `_refreshWithMutex()` 는 **`(workspaceId, identity)` 튜플 단위 mutex** 로 직렬화.
 - 현재 `oauth-manager.js:575-580` 은 이미 identity 별 병렬 refresh 를 보장하고 있음
   (`tests/phase7c-pre-migration.test.js:148-160` 에서 default/bot_ci 병렬 refresh 검증).
   **workspace-단위로 격상하면 기존 계약 깨짐** → 튜플 키로 유지.
-- 구현: `_identityMutex[`${wsId}::${identity}`]` Map 사용 (기존 `_refreshMutex` 와 동일 구조).
-  `_withIdentityMutex(wsId, identity, fn)` 헬퍼 도입.
+- 구현: **기존 `_refreshMutex` Map 을 `_identityMutex` 로 rename** + `_withIdentityMutex(wsId, identity, fn)` 헬퍼 도입.
+  - `_refreshWithMutex()` 와 `markAuthFailed()` 가 **동일 Map 을 공유** 해야 실제 직렬화 성립
+    (Codex Round 6 지적 — 서로 다른 Map 쓰면 상호배제 안 됨).
+  - 기존 `_refreshMutex` 사용처 전부 `_withIdentityMutex` 헬퍼로 전환.
 - 경쟁 시나리오 방지:
   - 시나리오 1: refresh 진행 중 markAuthFailed(동일 identity) 호출 → markAuthFailed 대기 → refresh 완료 후 action_needed 처리
   - 시나리오 2: markAuthFailed 중 동일 identity refresh 트리거 → refresh 대기 → action_needed 플래그 확인 후 early-return (`{ skipped: true, reason: 'action_needed' }`)
@@ -498,7 +530,7 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 | # | 지적 | 반영 |
 |---|------|------|
 | B (부분재반영) | `oauthActionNeededBy` 는 **루트 필드** (`ws.oauthActionNeededBy`) — 중첩 아님 | §3.1 데이터 모델 + §4.10a-4 코드블록 주석으로 명시 |
-| 경합 | `markAuthFailed` 와 `_refreshWithMutex`/`save` 동시성 last-write-wins | §6.4 동시성 제어 + §4.10a-4 `_withWorkspaceMutex` 직렬화 |
+| 경합 | `markAuthFailed` 와 `_refreshWithMutex`/`save` 동시성 last-write-wins | §6.4 동시성 제어 + §4.10a-4 `_withIdentityMutex` 직렬화 |
 | 관측성 | threshold trip / DCR fallback / cache purge 의 audit + metric 미정의 | §6-OBS 신설 — 이벤트 5종 + counter 4종 + correlationId |
 | 롤백/mixed-version | write-new-only 는 구 버전/외부 스크립트 호환 깨짐 | §3.4 — 최소 1 릴리즈 평면필드 미러 유지 + deprecation WARN |
 | Soft delete 상호작용 | cache purge 정책 미결정 | §4.10a-1 — Option Y 채택 (soft delete 기간 유지, expire 시 purge) |
@@ -513,7 +545,7 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 | §9 assertion 비결정성 | 24h 수동 E2E / Codex APPROVE / 내부 캐시 키 직접 검증 | §9 — 모의 시계 (`clock.tick`) + 외부 리뷰 항목 제거 + 공개 API (`wm.getOAuthClient(id)`, `provider.getStreamStatus()`) 기준 |
 | Refresh early-return 보장 검증 포인트 | "action_needed 보고 중단" 이 설명뿐 | §9 신규 assertion — `markAuthFailed` 후 refresh 호출 시 fetch POST 0회 + `{ skipped, reason }` 반환 |
 
-### Round 5 — 2026-04-20 (REVISE → 반영 후 Round 6 검토 예정)
+### Round 5 — 2026-04-20 (REVISE)
 
 | # | 지적 | 반영 |
 |---|------|------|
@@ -522,6 +554,22 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 | 공개 API 미존재 | `provider.getStreamStatus()`, `wm.getOAuthClient()` 가 가상 API | §4.10a-4 — 신규 공개 진단 API 명시적 추가 작업 항목 |
 | 함수명 불일치 | `_purgeExpiredWorkspaces()` vs 실제 `purgeExpiredWorkspaces()` | 전역 치환 |
 | `clock.tick` 추상 | 구체 구현 모호 | §9 — `node:test` `mock.timers.tick` 로 명시 |
+
+### Round 6 — 2026-04-20 (REVISE)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| Mutex 공유 누락 | `markAuthFailed` 만 `_withIdentityMutex` 쓰고 `_refreshWithMutex` 는 다른 Map 이면 상호배제 실패 | §6.4 — 기존 `_refreshMutex` 를 `_identityMutex` 로 rename, 헬퍼 통해 **같은 Map 공유** 명시 |
+| `getStreamStatus()` enum 불완전 | `idle` / `stopped:shutdown` / `not_applicable` (stdio) 누락 | §4.10a-4 — enum 8개 상태로 확장 |
+| 평면필드 참조 위치 2곳 추가 발견 | `admin/routes.js:222-247` (init 엔드포인트), `server/oauth-manager.js:527-529` (`_persistTokens`) | §3.4 — 참조 위치 목록 3→6 확장 |
+| §11 문서 불일치 | Round 3 이력에 `_withWorkspaceMutex` 잔존 | 전역 치환으로 통일 |
+
+### Round 7 — 2026-04-20 (REVISE → 반영 후 Round 8 검토 예정)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| `markAuthFailed()` 저장경로 오류 | `getWorkspace()` masked clone + `save()` 미존재 | §4.10a-4 코드블록 — `_getRawWorkspace()` + `_save()` 로 수정 (기존 `oauth-manager.js:499, 503, 651-653` 패턴 일치) |
+| `/api/oauth/discover` cachedClient 의미 충돌 | workspace-aware 전환 후 workspaceId 없는 맥락에서 조회 의미 희박 | §4.10a-1b 신규 단계 — cachedClient 필드 제거 (Option Y) |
 
 ---
 
