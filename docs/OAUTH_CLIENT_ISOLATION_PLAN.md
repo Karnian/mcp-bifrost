@@ -286,26 +286,54 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ---
 
-## 6-OBS. Observability (Codex Round 3 반영)
+## 6-OBS. Observability (Codex Round 3+4 반영)
 
 ### 6-OBS.1 Audit events (`.ao/state/audit.jsonl`)
-| Action | Payload | 발생 시점 |
-|--------|---------|-----------|
-| `oauth.client_registered` | `{workspace, issuer, source, clientId}` | DCR 성공 / manual 등록 완료 |
-| `oauth.threshold_trip` | `{workspace, identity, threshold, consecutiveCount}` | 401 fail-fast 트리거 |
-| `oauth.dcr_fallback` | `{workspace, issuer, from, to, reason}` | DCR → static 또는 역방향 fallback |
-| `oauth.cache_purge` | `{workspace, issuer, cause: 'delete'\|'expire'}` | cache entry 제거 |
-| `oauth.dcr_rate_limited` | `{workspace, issuer, retryAfterMs}` | 429 수신 |
 
-### 6-OBS.2 Metric counters (UsageRecorder 확장)
-- `oauth_threshold_trip_total{workspace,identity}` — 401 fail-fast 발생 수
-- `oauth_dcr_total{workspace,issuer,status}` — DCR 호출 결과별
-- `oauth_refresh_total{workspace,identity,status}` — refresh 시도 결과별
-- `oauth_cache_hits_total / oauth_cache_misses_total`
+현재 `AuditLogger.record({ action, identity, workspace, details })` 만 제공 + `details` 는
+자유 문자열. **Phase 10a 는 새로운 스키마 변경 없이 현 계약에 맞춘 인코딩 규약을 고정한다.**
+
+| Action | `identity` | `workspace` | `details` (JSON.stringify 전 객체) | 발생 시점 |
+|--------|------------|-------------|------------------------------------|-----------|
+| `oauth.client_registered` | 없음 | `wsId` | `{issuer, source: 'dcr'\|'manual', clientIdMasked, authMethod}` | DCR 성공 / manual 등록 |
+| `oauth.threshold_trip` | `identity` | `wsId` | `{threshold, consecutiveCount, correlationId}` | 401 fail-fast 트리거 |
+| `oauth.dcr_fallback` | 없음 | `wsId` | `{issuer, from, to, reason, correlationId}` | DCR → static 또는 역방향 fallback |
+| `oauth.cache_purge` | 없음 | `wsId` | `{issuer, cause: 'delete'\|'expire', correlationId}` | cache entry 제거 |
+| `oauth.dcr_rate_limited` | 없음 | `wsId` | `{issuer, retryAfterMs, correlationId}` | 429 수신 |
+
+**인코딩 규약**:
+- `details` 는 JSON 직렬화 가능한 단일 객체. 필드 순서는 고정 아님 (reader 가 key 기반 파싱).
+- `correlationId` 는 `details` 내부 key 로 포함 (별도 1급 필드 승격 없음).
+- **`clientId` 는 raw 저장 금지** — `maskClientId(clientId)` 로 `abcd***wxyz` 포맷 고정.
+  이유: audit.jsonl 이 backup/외부 도구로 유출될 때 토큰 발급 요청 재구성 위험 감소.
+
+### 6-OBS.2 Metrics — 별도 Recorder (UsageRecorder 와 분리)
+
+현재 `UsageRecorder` 는 tool-call 집계기라 Phase 10a counter 를 직접 담기 불가.
+**신규 `server/oauth-metrics.js` 도입** (lightweight, in-memory Map):
+
+```js
+export class OAuthMetrics {
+  constructor() { this._counters = new Map(); }
+  inc(name, labels = {}, delta = 1) { /* key = name + JSON(labels) */ }
+  snapshot() { return [...this._counters]; }  // Admin UI /api/oauth/metrics
+}
+```
+
+| Counter | Labels | 의미 |
+|---------|--------|------|
+| `oauth_threshold_trip_total` | `{workspace, identity}` | 401 fail-fast 발생 |
+| `oauth_dcr_total` | `{workspace, issuer, status: 200\|4xx\|5xx\|429}` | DCR 호출 결과별 |
+| `oauth_refresh_total` | `{workspace, identity, status: ok\|fail_4xx\|fail_net}` | refresh 시도 결과별 |
+| `oauth_cache_hit_total / oauth_cache_miss_total` | `{workspace}` | cache 이력 |
+
+Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus export 는 Phase 11+.
 
 ### 6-OBS.3 로그 표준화
-- 동일 workspace + identity 의 401 에는 같은 `correlationId` 부여 → 여러 줄의 관련 로그 연결 가능.
-- `logger.warn` 대신 구조화 필드 사용: `{ wsId, identity, event: 'stream_401', attempt: N }`
+- 동일 workspace + identity 의 401 시퀀스에는 같은 `correlationId` (randomUUID) 부여.
+  → audit.jsonl 과 logger 두 경로에서 동일 id 로 상관 가능.
+- logger 호출도 구조화 형식: `logger.warn('[oauth]', { wsId, identity, event: 'stream_401', attempt: N, correlationId })`
+- `correlationId` 는 `_consecutive401Count` 가 0 → 1 될 때 새로 생성, fail-fast 발동 또는 성공 후 리셋.
 
 ---
 
@@ -347,47 +375,68 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ---
 
-## 9. 성공 기준 (assertion-style, Codex Round 3 반영)
+## 9. 성공 기준 (assertion-style, Codex Round 3+4 반영)
 
-각 항목은 검증 가능한 단정형으로. "정상 동작" 같은 주관적 표현 금지.
+모든 항목은 자동화 테스트로 검증 가능한 단정형. 외부 리뷰/수동 E2E 기준 제거.
+내부 구현 symbol (cache key 문자열 등) 대신 **공개 API / 파일 상태** 기준.
 
 ### 핵심
 - [ ] **테스트 수**: `npm test` 결과 `# pass ≥ 286`, `# fail == 0`
-- [ ] **다중 Notion isolation (수동 E2E)**:
-  - Workspace A, B 두 개 등록 후 24시간 경과 시점에도
-  - `.oauth.byIdentity.default.tokens.accessToken` 값이 A ≠ B (prefix 까지 다름)
-  - `oauthActionNeededBy.default === false` 양쪽 모두
-  - MCP tools/call 으로 Notion search 호출 시 둘 다 HTTP 200
-- [ ] **마이그레이션 검증**: 마이그레이션 후 `ws.oauth.client.clientId` 필드 존재 +
-  평면필드 `ws.oauth.clientId` 는 동일 값 (미러 유지) + 백업 파일 `workspaces.json.pre-10a.bak` 존재 + 권한 `0o600`
-- [ ] **401 루프 fail-fast**: 테스트에서 401 응답 3회 주입 후 `_consecutive401Count === 0` (리셋됨) +
-  `ws.oauthActionNeededBy.default === true` + `ws.oauthActionNeeded === true` + 스트림 reconnect 추가 시도 없음 (타이머 count 검증)
-- [ ] **DCR 에러 분기**: 429 응답 → 에러 코드 `DCR_RATE_LIMITED` + `err.retryAfterMs` 세팅;
-  400 응답 → `DCR_REJECTED` + 재시도 안 함; 503 응답 → `DCR_TRANSIENT` + 3회 retry 후 실패
-- [ ] **Codex 교차 리뷰**: 판정 `APPROVE`
+- [ ] **다중 Notion isolation (자동 테스트, 모의 시계)**:
+  - 2개 workspace 등록 + 첫 token 저장
+  - `clock.tick(24 * 60 * 60 * 1000)` 로 24h 경과 시뮬레이션 + refresh 트리거
+  - 검증: `wm.getWorkspace(A).oauth.byIdentity.default.tokens.accessToken` 값이
+    `wm.getWorkspace(B).oauth.byIdentity.default.tokens.accessToken` 과 상위 12자 이상 다름
+  - 검증: 양쪽 `wm.getDiagnostics().workspaces[i].status === 'healthy'`
+  - **수동 E2E 제거** (자동화로 동일 검증)
+- [ ] **마이그레이션 파일 상태**:
+  - `workspaces.json` → `ws.oauth.client.clientId === ws.oauth.clientId` (미러 일치)
+  - `workspaces.json.pre-10a.bak` 파일 존재 + `mode & 0o777 === 0o600`
+  - `ws.oauth.client.source ∈ {'dcr', 'manual'}`
+- [ ] **401 루프 fail-fast (공개 상태 기준)**:
+  - 테스트: 401 주입 3회 → `wm.getWorkspace(id).oauthActionNeededBy.default === true`
+  - `wm.getWorkspace(id).oauthActionNeeded === true`
+  - `provider.getStreamStatus()` (신규 공개 메서드) === `'stopped:auth_failed'`
+  - `setTimeout` spy 로 backoff timer 예약 count === 0 (추가 reconnect 없음)
+- [ ] **DCR 에러 분기**:
+  - 429 응답 → throw `err.code === 'DCR_RATE_LIMITED'` + `typeof err.retryAfterMs === 'number'`
+  - 400 응답 → throw `err.code === 'DCR_REJECTED'` + fetch spy call count === 1 (재시도 없음)
+  - 503 응답 → throw `err.code === 'DCR_TRANSIENT'` + fetch spy call count === 3 (3회 retry)
 
-### 추가 검증 (Codex Round 2~3 반영)
-- [ ] **재시작 시 DCR endpoint 호출 0회**: 테스트에서 fetch mock spy 로 첫 기동 시 DCR POST 1회 관찰 → 재시작 후 DCR POST 호출 count === 0 + workspace 는 여전히 tools/list 응답 성공
-- [ ] **비 default identity 401 경로**: `bot_ci` 에서 401 × 3 후
-  - `ws.oauth.byIdentity.bot_ci.tokens.accessToken === null`
-  - `ws.oauthActionNeededBy.bot_ci === true`
-  - `ws.oauth.byIdentity.default.tokens.accessToken` 변경 없음 (원값 유지)
-  - `ws.oauth.tokens.accessToken` 변경 없음 (default legacy mirror 미영향)
-  - `ws.oauthActionNeeded === false` (default 는 영향 없음)
-- [ ] **Cache purge 대상 격리**: workspace A 영구 삭제 → `_clientCache[`${A.id}::*`]` 부재 검증
-  + workspace B 의 `_clientCache[`${B.id}::*`]` 존재 유지 검증
+### 추가 검증
+- [ ] **재시작 시 DCR 0회**: 테스트 (fetch spy) — 첫 OAuth 사이클 DCR POST 1회,
+  서버 재시작 (OAuthManager 재생성) 후 `tools/list` 호출 시 추가 DCR POST 0회 + tools/list 응답 성공
+- [ ] **비 default identity 401 경로**:
+  - `wm.getWorkspace(id).oauth.byIdentity.bot_ci.tokens.accessToken === null`
+  - `wm.getWorkspace(id).oauthActionNeededBy.bot_ci === true`
+  - `wm.getWorkspace(id).oauth.byIdentity.default.tokens.accessToken !== null` (원값 유지)
+  - `wm.getWorkspace(id).oauth.tokens.accessToken !== null` (legacy mirror 미변경)
+  - `wm.getWorkspace(id).oauthActionNeeded === false` (root 플래그는 default 전용)
+- [ ] **Cache purge 대상 격리 (공개 API 기준)**:
+  - workspace A 영구 삭제 후 A 재인증 시 `wm.getOAuthClient(A)` → null
+  - workspace B 의 `wm.getOAuthClient(B)` → 여전히 이전 값
 - [ ] **Soft delete cache 정책**:
-  - `softDelete(A)` 직후 → cache entry 유지
-  - `restoreWorkspace(A)` → 재인증 없이 tools/list 성공
-  - `_purgeExpiredWorkspaces()` 가 A 영구 삭제 → cache entry 제거
+  - `softDelete(A)` 직후 → `wm.getOAuthClient(A)` 이전 값 유지
+  - `restoreWorkspace(A)` + `tools/list` → HTTP 200 (재인증 요구 없음)
+  - `_purgeExpiredWorkspaces()` 실행 후 → `wm.getOAuthClient(A)` === null
 - [ ] **마이그레이션 3 경로**:
-  - `--dry-run`: stdout 에 변경 내역 JSON 출력, config 파일 수정 0 bytes (mtime 동일)
-  - `--apply`: `workspaces.json.pre-10a.bak` 생성 + chmod `0o600` + 새 포맷 저장 + startup 에 WARN 없음
-  - `--restore`: `workspaces.json` 이 `.bak` 내용과 diff === 0
-- [ ] **Concurrency 안전성**: `markAuthFailed` 와 `_refreshWithMutex` 를 동시에 트리거 하는
-  테스트에서 최종 상태의 `oauthActionNeededBy[identity] === true` (역순 write 로 되돌아가지 않음)
-- [ ] **Observability**: 401 fail-fast 발생 시 audit.jsonl 에 `action=oauth.threshold_trip`
-  이벤트 1건 추가 확인
+  - `--dry-run`: stdout JSON 출력 0 ≠ empty, `stat(workspaces.json).mtime` 변경 없음
+  - `--apply`: `.bak` 존재 + `0o600` + 원본 변경됨 + process 종료 후 WARN 로그 0건
+  - `--restore`: `diff workspaces.json workspaces.json.pre-10a.bak === ''`
+- [ ] **Concurrency 안전성**:
+  - `Promise.all([markAuthFailed(A,'default'), refreshWithMutex(A,'default')])` 후
+    최종 `wm.getWorkspace(A).oauthActionNeededBy.default === true` (어떤 순서든)
+- [ ] **Refresh early-return 검증** (Codex Round 4 신규):
+  - `markAuthFailed(A, 'default')` 호출 후 `refreshWithMutex(A, 'default')` 호출
+  - fetch spy → token endpoint POST call count === 0 (refresh 시도하지 않음)
+  - 반환값에 `{ skipped: true, reason: 'action_needed' }`
+- [ ] **Audit clientId 마스킹** (Codex Round 4 신규):
+  - audit.jsonl 의 `oauth.client_registered` 이벤트 `details` 파싱 결과
+  - `clientIdMasked` 필드 존재 + 포맷 `^[a-zA-Z0-9]{4}\*{3}[a-zA-Z0-9]{4}$`
+  - `clientId` 필드 부재 (raw 저장 금지)
+- [ ] **Observability 인코딩**:
+  - 401 × 3 주입 후 audit.jsonl 에 `action === 'oauth.threshold_trip'` 이벤트 1건
+  - `JSON.parse(event.details)` 결과에 `correlationId` (string) + `threshold` (number) + `consecutiveCount` (number) 포함
 
 ---
 
@@ -429,7 +478,7 @@ B 발급 시 A 의 refresh-token 을 supersede.
 | D | 의존성 그래프가 과도하게 선형적, 병행 가능성 무시 | §5 — 재배열 + 병렬 트랙 표기 |
 | 성공기준 | 재시작 DCR 미호출 / byIdentity 경로 / cache purge / 마이그레이션 3경로 누락 | §9 추가 검증 4건 |
 
-### Round 3 — 2026-04-20 (REVISE → 반영 후 Round 4 검토 예정)
+### Round 3 — 2026-04-20 (REVISE)
 
 | # | 지적 | 반영 |
 |---|------|------|
@@ -439,6 +488,15 @@ B 발급 시 A 의 refresh-token 을 supersede.
 | 롤백/mixed-version | write-new-only 는 구 버전/외부 스크립트 호환 깨짐 | §3.4 — 최소 1 릴리즈 평면필드 미러 유지 + deprecation WARN |
 | Soft delete 상호작용 | cache purge 정책 미결정 | §4.10a-1 — Option Y 채택 (soft delete 기간 유지, expire 시 purge) |
 | 성공기준 느슨 | "정상 동작"/"network 모니터링" → assertion | §9 전체 재작성 (단정형 assertion) |
+
+### Round 4 — 2026-04-20 (REVISE → 반영 후 Round 5 검토 예정)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| Obs 접합 | `AuditLogger.record()` 계약과 불일치, `UsageRecorder` 는 tool-call 집계기 | §6-OBS.1 — 현 계약에 맞춘 `details` JSON 인코딩 규약 + correlationId 를 details 내부 key 로. §6-OBS.2 — `server/oauth-metrics.js` 별도 Recorder 도입 |
+| Raw clientId 노출 | audit.jsonl 에 raw clientId → 유출면 증가 | §6-OBS.1 — `maskClientId(clientId)` 저장 원칙 고정. §9 에 마스킹 포맷 assertion 추가 |
+| §9 assertion 비결정성 | 24h 수동 E2E / Codex APPROVE / 내부 캐시 키 직접 검증 | §9 — 모의 시계 (`clock.tick`) + 외부 리뷰 항목 제거 + 공개 API (`wm.getOAuthClient(id)`, `provider.getStreamStatus()`) 기준 |
+| Refresh early-return 보장 검증 포인트 | "action_needed 보고 중단" 이 설명뿐 | §9 신규 assertion — `markAuthFailed` 후 refresh 호출 시 fetch POST 0회 + `{ skipped, reason }` 반환 |
 
 ---
 
