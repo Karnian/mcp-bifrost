@@ -62,15 +62,28 @@ B 발급 시 A 의 refresh-token 을 supersede.
     "client": {
       "clientId": "abc123...",
       "clientSecret": null,
-      "authMethod": "none",
+      "authMethod": "none" | "client_secret_basic" | "client_secret_post",
       "source": "dcr" | "manual",     // manual = static pre-registered
       "registeredAt": "2026-04-20T..."
     },
-    "tokens": { /* 기존 그대로 */ },
+    // byIdentity 는 Phase 7c 도입된 실제 토큰 저장 구조 (기존)
+    "byIdentity": {
+      "default": { "tokens": { "accessToken": "...", "refreshToken": "..." } },
+      "bot_ci":  { "tokens": { "accessToken": "...", "refreshToken": "..." } }
+    },
+    // ws.oauth.tokens 는 default identity 의 legacy mirror (기존)
+    "tokens": { /* ws.oauth.byIdentity.default.tokens 와 동일 */ },
     "oauthActionNeededBy": { /* 기존 그대로 */ }
   }
 }
 ```
+
+**Auth method 범위 한정** (Codex 리뷰 반영):
+- 본 Phase 10a 는 `none` / `client_secret_basic` / `client_secret_post` 만 지원.
+- `private_key_jwt` / `tls_client_auth` / `self_signed_tls_client_auth` 등 PKI 계열은
+  추가 메타(`keyId`, `alg`, `jwks`, 인증서 경로 등)가 필요하므로 Phase 10+ 로 이관.
+- `pickAuthMethod()` 에서 지원 외 메서드 선택 시 `Error('UNSUPPORTED_AUTH_METHOD')` 로
+  명시 실패 (silent fallback 금지).
 
 ### 3.2 Cache Key 변경
 ```
@@ -81,13 +94,30 @@ B 발급 시 A 의 refresh-token 을 supersede.
 ### 3.3 신규/수정 파일
 | 파일 | 변경 |
 |------|------|
-| `server/oauth-manager.js` | `registerClient(issuer, md, { workspaceId, authMethod, ... })` 시그니처 확장, cache key 변경, DCR 에러 분기 |
-| `server/workspace-manager.js` | `ws.oauth.client` 로드 우선 로직 (static → stored DCR → 신규 DCR) |
-| `providers/mcp-client.js` | 401 루프 카운터 추가: 연속 N 회 refresh 실패 시 `action_needed` fail-fast |
-| `admin/routes.js` | `/api/workspaces/:id/oauth/register` 수동 재등록 엔드포인트 |
+| `server/oauth-manager.js` | `registerClient(issuer, md, { workspaceId, authMethod, ... })` 시그니처 확장, cache key 변경, DCR 에러 분기, `_refreshWithMutex` 에서 `ws.oauth.client.*` 참조 (§3.4 마이그레이션 shim 포함), `markAuthFailed(workspaceId, identity)` 신규 |
+| `server/workspace-manager.js` | `ws.oauth.client` 로드 우선 로직 (static → stored DCR → 신규 DCR), masking 및 POST/PUT input parsing 을 `ws.oauth.client.*` 로 전환, 기존 평면필드 legacy shim |
+| `providers/mcp-client.js` | 401 루프 카운터 추가: 연속 N 회 refresh 실패 시 `oauth-manager.markAuthFailed(workspaceId, identity)` 호출 + 스트림 재연결 중단 |
+| `admin/routes.js` | `/api/workspaces/:id/oauth/register` 수동 재등록 엔드포인트, POST/PUT workspace 입력 스키마 `oauth.client` 수용 |
 | `admin/public/app.js` | 상세 화면에 "OAuth Client" 섹션 (clientId + source + 재등록 버튼) |
-| `scripts/migrate-oauth-clients.mjs` | 기존 공유 clientId 를 workspace 별로 분리하는 일회성 스크립트 |
+| `scripts/migrate-oauth-clients.mjs` | 기존 공유 clientId 를 workspace 별로 분리하는 일회성 스크립트 (dry-run / apply / rollback) |
 | `tests/phase10a-oauth-isolation.test.js` | 신규 테스트 |
+
+### 3.4 평면 필드 → `ws.oauth.client` 마이그레이션 shim (Codex 리뷰 반영)
+
+**현재 코드에서 평면 필드 직참조 위치** (grep 검증):
+1. `server/oauth-manager.js:592-594` — `_refreshWithMutex` 가 `ws.oauth.clientId / clientSecret / authMethod` 읽음
+2. `server/workspace-manager.js:46-49` — `maskOAuth()` 의 마스킹 로직
+3. `server/workspace-manager.js:308-310` — POST/PUT workspace 입력 파싱
+
+**마이그레이션 전략**:
+- **읽기 경로**: 헬퍼 `getOAuthClient(ws)` 도입 → `ws.oauth.client?.clientId ?? ws.oauth.clientId` 순으로 fallback.
+  기존 workspaces.json 의 평면 필드를 그대로 읽을 수 있도록 **양방향 호환**.
+- **쓰기 경로**: DCR 성공 / `registerManual` / POST/PUT 입력 → **반드시 `ws.oauth.client.*` 로만 저장**.
+  평면 필드는 쓰지 않음 (새로 쓸 땐 새 포맷만).
+- **Load-time 마이그레이션**: `workspace-manager.load()` 가 평면 필드 발견 시 자동으로 `ws.oauth.client`
+  로 복사 (write-time only, 저장 시점에 새 포맷으로 영구 전환). 이미 Phase 7c-pre 에서
+  `ws.oauth.tokens → byIdentity.default` 미러를 해 놓은 패턴과 동일.
+- **호환 제거 시점**: Phase 11 또는 2회 major release 뒤 (현재는 유지).
 
 ---
 
@@ -127,14 +157,35 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 > refresh 가 실패하는 데도 반복하는 현재 문제 차단.
 
-- [ ] `providers/mcp-client.js` 에 `_consecutive401Count` 상태 추가
+- [ ] `providers/mcp-client.js` 에 `_consecutive401Count` 상태 추가 (identity 별 Map)
 - [ ] `_startNotificationStream()` 의 401 분기:
   - 첫 번째 401 → refresh 시도 (기존 동작)
-  - refresh 이후 다시 401 이면 `_consecutive401Count++`
-  - 3회 초과 → `_onAuthFailed(identity)` 호출 + 스트림 재연결 중단
-  - `oauth-manager` 에 `markAuthFailed(workspaceId, identity)` 추가: `oauthActionNeededBy[identity] = true` + `tokens.accessToken = null` (다음 요청이 토큰 없다고 즉시 action_needed 응답)
-- [ ] `_rpc()` 의 HTTP 401 처리도 동일 카운터 공유 (동시 경로 통합)
-- [ ] 테스트: 401 → refresh → 401 시퀀스 3회 후 스트림 재연결 중단 확인
+  - refresh 이후 다시 401 이면 `_consecutive401Count[identity]++`
+  - 3회 초과 (`BIFROST_AUTH_FAIL_THRESHOLD` 환경변수 조정 가능) → `oauth-manager.markAuthFailed(workspaceId, identity)` 호출 + 해당 identity 스트림 재연결 중단
+- [ ] `OAuthManager.markAuthFailed(workspaceId, identity)` 신규 (byIdentity 모델 정확 처리):
+  ```js
+  const ws = this.wm.getWorkspace(workspaceId);
+  // by-identity 저장 구조 (Phase 7c 이후 표준)
+  if (ws.oauth.byIdentity?.[identity]?.tokens) {
+    ws.oauth.byIdentity[identity].tokens.accessToken = null;
+  }
+  // default identity 는 legacy mirror 도 동기화
+  if (identity === 'default' && ws.oauth?.tokens) {
+    ws.oauth.tokens.accessToken = null;
+  }
+  // per-identity action_needed flag 세팅
+  if (!ws.oauth.oauthActionNeededBy) ws.oauth.oauthActionNeededBy = {};
+  ws.oauth.oauthActionNeededBy[identity] = true;
+  if (identity === 'default') ws.oauthActionNeeded = true;
+  await this.wm.save();
+  ```
+  - 단순히 `tokens.accessToken = null` 만 하던 이전 설계안은 byIdentity 경로에서
+    작동 안 함 (Codex 리뷰 반영).
+- [ ] `_rpc()` 의 HTTP 401 처리도 동일 카운터 공유 (스트림/RPC 통합)
+- [ ] 테스트 시나리오:
+  - default identity: 401 → refresh → 401 × 3 → markAuthFailed → `byIdentity.default.tokens.accessToken === null` + `oauthActionNeededBy.default === true` + `ws.oauth.tokens.accessToken === null`
+  - bot_ci identity: 동일 패턴, **단 ws.oauth.tokens (legacy) 는 건드리지 않음** 확인
+  - 성공 요청 1회 후 카운터 리셋 확인
 
 ### 10a-5 — Admin UI (0.5 일)
 
@@ -157,20 +208,28 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ---
 
-## 5. 의존성 그래프
+## 5. 의존성 그래프 (Codex 리뷰 반영 — 재배열)
 
 ```
 10a-1 (cache key) ★ Gate
-  └─► 10a-2 (static 우선) — cache key 변경 전제
-       └─► 10a-3 (에러 분기) — DCR 경로 신뢰성 강화
-            └─► 10a-4 (401 루프 감지) ★ Gate — 근본 결함 방어
-                 └─► 10a-5 (Admin UI) — 운영 편의
-                      └─► 10a-6 (마이그레이션) — 배포 시점에 1회 실행
+  └─► 10a-2 (static 우선 + shim)
+       ├─► 10a-3 (DCR 에러 분기) ┐
+       ├─► 10a-4 (401 fail-fast) ★ Gate ─ (둘 병행 가능)
+       │                           │
+       │                           └─► 10a-6 (마이그레이션)
+       │
+       └─► 10a-5 (Admin UI) — 별도 병렬
 ```
 
-권장 실행 순서: **10a-1 → 10a-2 → 10a-3 → 10a-4 → 10a-5 → 10a-6**
+**병행 가능성 (이전 버전의 선형 구조 → 병렬로 수정)**:
+- 10a-4 는 **10a-3/5 와 독립**. 10a-2 직후 바로 착수 가능. 지금 당장 401 무한 루프
+  방어가 가장 시급하므로 우선순위가 높음.
+- 10a-5 (UI) 는 10a-3/4 어떤 것에도 의존하지 않음 — 백엔드 이미 완성되어 있을 때만
+  붙이면 됨. 별도 트랙.
+- 10a-6 (마이그레이션) 은 10a-2/4 완료 후 실행 가능 (10a-5 불필요).
 
-10a-1 + 10a-4 는 동시 gate. 둘 다 통과하지 못하면 다음 단계 진행 금지.
+**추천 실행 순서**: `10a-1 → 10a-2 → [10a-3 ∥ 10a-4] → 10a-6 → 10a-5`
+(gate 10a-1/10a-4 는 각각 엄수)
 
 ---
 
@@ -232,12 +291,27 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ## 9. 성공 기준
 
+### 핵심
 - [ ] `npm test` ≥ 286 PASS (278 기준선 + 8 신규)
 - [ ] 같은 Notion 계정으로 2개 이상 workspace 등록 시 상호 간섭 없음 (수동 E2E)
 - [ ] 기존 workspaces.json 마이그레이션 성공 + 재인증 1회 후 정상
 - [ ] 401 루프 3회 후 자동 stream 재연결 중단 확인
 - [ ] DCR 429 / 4xx / 5xx 각각 올바른 에러 분기
 - [ ] Codex 교차 리뷰 PASS
+
+### 추가 검증 (Codex 리뷰 반영)
+- [ ] **재시작 후 DCR endpoint 미호출 검증**: workspace 재인증 없이 서버 재시작 →
+  `ws.oauth.client` 재사용 → network 모니터링으로 `/register` POST 없음 확인
+- [ ] **비 default identity(byIdentity) 경로에서 401 fail-fast 정확 동작**:
+  `bot_ci` identity 에서 401 × 3 → `byIdentity.bot_ci.tokens.accessToken === null`
+  + `oauthActionNeededBy.bot_ci === true` + **`ws.oauth.tokens` 는 미변경** 확인
+- [ ] **Workspace 삭제 시 cache purge**: `deleteWorkspace(id)` 후 `_clientCache`
+  에 해당 workspace 관련 entry 제거 확인 + 다른 workspace 의 entry 는 영향 없음
+- [ ] **마이그레이션 dry-run / apply / rollback 전수 확인**:
+  - dry-run: 실제 쓰기 없이 변경 예정 내역 stdout 출력
+  - apply: `workspaces.json.pre-10a.bak` 백업 후 실제 변환
+  - rollback: `--restore` 플래그로 백업에서 복원
+  - 세 경로 모두 `workspaces.json` invariants (chmod 0o600 등) 유지 검증
 
 ---
 
@@ -258,8 +332,7 @@ B 발급 시 A 의 refresh-token 을 supersede.
 
 ## 11. Codex 리뷰 결과 반영 이력
 
-**일시**: 2026-04-20 / 리뷰어: Codex (async)
-**판정**: **REVISE** → 아래 반영
+### Round 1 — 2026-04-20 (REVISE)
 
 | # | 지적 | 반영 |
 |---|------|------|
@@ -269,6 +342,16 @@ B 발급 시 A 의 refresh-token 을 supersede.
 | 4 | 재시작 시 재등록 금지, 기존 값 재사용 | §4.10a-2 단계 2번 |
 | 5 | A 만으로 부족 — C (401 fail-fast) 동반 필수 | §4.10a-4 ★ Gate |
 | 6 | 더 나은 대안: static client 우선, DCR fallback | §4.10a-2 단계 1번 |
+
+### Round 2 — 2026-04-20 (REVISE)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| A | 평면 필드 (`ws.oauth.clientId/clientSecret/authMethod`) 직참조 범위 과소평가 | §3.4 신규 — 마이그레이션 shim + 읽기/쓰기 경로 분리 |
+| B | `markAuthFailed` 가 byIdentity 모델과 어긋남, 비 default identity 처리 누락 | §4.10a-4 코드 블록 — `byIdentity[identity].tokens` 처리 + 조건부 legacy mirror |
+| C | `auth_method` 스키마 포괄성 부족 (private_key_jwt 등) | §3.1 — 범위 `none/client_secret_basic/client_secret_post` 명시, Phase 10+ 이관 |
+| D | 의존성 그래프가 과도하게 선형적, 병행 가능성 무시 | §5 — 재배열 + 병렬 트랙 표기 |
+| 성공기준 | 재시작 DCR 미호출 / byIdentity 경로 / cache purge / 마이그레이션 3경로 누락 | §9 추가 검증 4건 |
 
 ---
 
