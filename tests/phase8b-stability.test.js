@@ -156,11 +156,15 @@ describe('WorkspaceManager _writeLock error propagation', () => {
 // ─── 8. Graceful shutdown healthInterval ───
 
 describe('Graceful shutdown clears healthInterval', () => {
-  it('healthInterval is exported and is a timer', async () => {
-    const { healthInterval, server } = await import('../server/index.js');
-    assert.ok(healthInterval, 'healthInterval should be exported');
-    // Verify the close event listener is registered
-    const listeners = server.listeners('close');
-    assert.ok(listeners.length > 0, 'server should have close listener for cleanup');
+  it('healthInterval is a timer + close listener is registered', async () => {
+    const { startServer } = await import('../server/index.js');
+    const { healthInterval, server } = await startServer({ port: 0 });
+    try {
+      assert.ok(healthInterval, 'healthInterval should be returned');
+      const listeners = server.listeners('close');
+      assert.ok(listeners.length > 0, 'server should have close listener for cleanup');
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
   });
 });
