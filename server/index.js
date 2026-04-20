@@ -306,42 +306,68 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
   const port = portOverride ?? wm.getServerConfig().port ?? 3100;
   const host = hostOverride ?? process.env.BIFROST_HOST ?? wm.getServerConfig().host ?? '127.0.0.1';
 
-  await new Promise((resolve, reject) => {
-    const onError = (err) => {
-      server.removeListener('listening', onListen);
-      reject(err);
-    };
-    const onListen = () => {
-      server.removeListener('error', onError);
-      const exposed = host === '0.0.0.0' || host === '::';
-      logger.info(`[Bifrost] Server running on http://${host}:${server.address().port}`);
-      logger.info(`[Bifrost] MCP endpoint: POST http://${host}:${server.address().port}/mcp`);
-      logger.info(`[Bifrost] SSE endpoint: GET http://${host}:${server.address().port}/sse`);
-      logger.info(`[Bifrost] Admin UI: http://${host}:${server.address().port}/admin/`);
-      logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
-      if (exposed) {
-        logger.warn('');
-        logger.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
-        if (!tokenManager.isConfigured()) {
-          logger.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
+  let boundPort = null;
+  try {
+    await new Promise((resolve, reject) => {
+      const onError = (err) => {
+        server.removeListener('listening', onListen);
+        reject(err);
+      };
+      const onListen = () => {
+        server.removeListener('error', onError);
+        const addr = server.address();
+        boundPort = typeof addr === 'object' && addr ? addr.port : port;
+        const base = `http://${host}:${boundPort}`;
+        const exposed = host === '0.0.0.0' || host === '::';
+        logger.info(`[Bifrost] Server running on ${base}`);
+        logger.info(`[Bifrost] MCP endpoint: POST ${base}/mcp`);
+        logger.info(`[Bifrost] SSE endpoint: GET ${base}/sse`);
+        logger.info(`[Bifrost] Admin UI: ${base}/admin/`);
+        logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
+        if (exposed) {
+          logger.warn('');
+          logger.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
+          if (!tokenManager.isConfigured()) {
+            logger.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
+          }
+          if (!wm.getAdminToken()) {
+            logger.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
+          }
+          logger.warn('');
         }
-        if (!wm.getAdminToken()) {
-          logger.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
-        }
-        logger.warn('');
-      }
-      resolve();
-    };
-    server.once('error', onError);
-    server.once('listening', onListen);
-    server.listen(port, host);
-  });
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListen);
+      server.listen(port, host);
+    });
+  } catch (err) {
+    // listen() failed — clean up partially-built state so we don't leak
+    // the healthInterval timer or provider handles.
+    clearInterval(healthInterval);
+    for (const [, provider] of wm.providers ?? []) {
+      try { await provider.shutdown?.(); } catch { /* best effort */ }
+    }
+    throw err;
+  }
 
   server.on('close', () => {
     clearInterval(healthInterval);
   });
 
-  return { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server, healthInterval };
+  async function stop() {
+    clearInterval(healthInterval);
+    if (server.listening) {
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
+    for (const [, provider] of wm.providers ?? []) {
+      try { await provider.shutdown?.(); } catch { /* best effort */ }
+    }
+    try { await usage.flush?.(); } catch { /* best effort */ }
+    try { await audit.flush?.(); } catch { /* best effort */ }
+  }
+
+  return { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server, healthInterval, port: boundPort, host, stop };
 }
 
 // Auto-start only when executed as the entry point (not when imported).
