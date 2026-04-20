@@ -90,31 +90,31 @@ docs/
 
 > **완료 기준**: `npm test` 전수 통과 (205 기준선 유지 + 신규). 9a 미통과 시 9b 착수 금지.
 
-- [ ] **prompts/list + prompts/get 구현** (`server/mcp-handler.js`)
+- [x] **prompts/list + prompts/get 구현** (`server/mcp-handler.js`)
   - `server/prompts-registry.js` 신규: prompt 정의 저장소
   - 기본 내장 prompt: `bifrost__workspace_summary` (전체 워크스페이스 상태 요약)
   - Provider별 prompt 지원 (BaseProvider에 `getPrompts()` 인터페이스 추가)
   - prompts/get: arguments 바인딩 후 messages 배열 반환
   - 테스트: prompts/list → 내장 prompt 반환, prompts/get → messages 포함 응답
 
-- [ ] **mcp-client HTTP transport** (`providers/mcp-client.js:11`)
+- [x] **mcp-client HTTP transport** (`providers/mcp-client.js:11`)
   - TODO Phase 5c 해소: `transport: "http"` 설정 시 Streamable HTTP 연결
   - `fetch()` 기반 JSON-RPC over HTTP 구현
   - `Mcp-Session-Id` 헤더 관리
   - 테스트: mock HTTP 서버 → mcp-client HTTP transport 연결 + tool call
 
-- [ ] **mcp-client SSE transport** (`providers/mcp-client.js:12`)
+- [x] **mcp-client SSE transport** (`providers/mcp-client.js:12`)
   - TODO Phase 5c 해소: `transport: "sse"` 설정 시 SSE 연결
   - `EventSource` 또는 `fetch()` + ReadableStream 기반
   - reconnect 로직 (exponential backoff)
   - 테스트: mock SSE 서버 → mcp-client SSE transport 연결 + event 수신
 
-- [ ] **resource read size limit** (`server/mcp-handler.js`)
+- [x] **resource read size limit** (`server/mcp-handler.js`)
   - `MAX_RESOURCE_SIZE = 5 * 1024 * 1024` (5MB, 환경변수 `BIFROST_MAX_RESOURCE_SIZE`)
   - 초과 시 에러 응답 (OOM 방지)
   - 테스트: 초과 리소스 읽기 → 에러
 
-- [ ] **env vars injection 방어** (`admin/routes.js`) ★ 보안 Gate
+- [x] **env vars injection 방어** (`admin/routes.js`) ★ 보안 Gate
   - stdio mcp-client의 `env` 필드에 위험 변수 차단 (PATH, LD_PRELOAD, LD_LIBRARY_PATH 등)
   - 허용 목록 기반 (BIFROST_*, NODE_ENV, 사용자 정의)
   - 현재 이미 exploit 가능 (admin 권한으로 임의 env 주입) — gate 급 보안 조치
@@ -122,13 +122,13 @@ docs/
 
 ### 9b — 프로덕션 보안/배포 (2일)
 
-- [ ] **Trust proxy 설정** (`server/index.js`, `server/rate-limiter.js`)
+- [x] **Trust proxy 설정** (`server/index.js`, `server/rate-limiter.js`)
   - `BIFROST_TRUST_PROXY=1` 환경변수로 활성화
   - 활성화 시 `X-Forwarded-For` 첫 번째 IP 사용 (CDN/reverse proxy 뒤 배포)
   - `rate-limiter.js`의 `getClientIp(req)` 헬퍼로 추출 로직 중앙화
   - 테스트: X-Forwarded-For 헤더 → 올바른 IP 추출
 
-- [ ] **Security headers 미들웨어** (`server/security-headers.js`)
+- [x] **Security headers 미들웨어** (`server/security-headers.js`)
   - `X-Content-Type-Options: nosniff`
   - `X-Frame-Options: DENY`
   - `Strict-Transport-Security: max-age=31536000` (BIFROST_TRUST_PROXY=1 시)
@@ -136,13 +136,13 @@ docs/
   - 모든 응답에 적용 (MCP + Admin)
   - 테스트: 응답 헤더 확인
 
-- [ ] **CORS 설정** (`server/index.js`)
+- [x] **CORS 설정** (`server/index.js`)
   - `BIFROST_CORS_ORIGIN` 환경변수로 허용 origin 지정
   - 미설정 시 same-origin 정책 유지 (현행과 동일)
   - preflight (OPTIONS) 핸들러 추가
   - 테스트: CORS 헤더 + OPTIONS 응답
 
-- [ ] **Config 환경변수 외부화** (`server/config-constants.js`)
+- [x] **Config 환경변수 외부화** (`server/config-constants.js`)
   - 하드코딩된 14개 상수를 환경변수 + 기본값 패턴으로 통합
   - `BIFROST_RATE_LIMIT_MAX`, `BIFROST_RATE_LIMIT_WINDOW_MS`
   - `BIFROST_SSE_KEEPALIVE_MS`, `BIFROST_HEALTH_CHECK_INTERVAL`
@@ -151,7 +151,7 @@ docs/
   - 각 모듈에서 import하여 사용
   - 테스트: 환경변수 override 동작 확인
 
-- [ ] **Workspace schema validation** (`admin/routes.js`)
+- [x] **Workspace schema validation** (`admin/routes.js`)
   - Zod 스키마로 POST/PUT /api/workspaces 페이로드 검증
   - 자기참조 순환 방지 (mcp-client가 자기 자신을 endpoint로 지정)
   - 잘못된 glob 패턴 감지 (toolFilter, allowedWorkspaces)
@@ -160,18 +160,18 @@ docs/
 
 ### 9c — Provider 확장 (1.5일)
 
-- [ ] **BaseProvider getPrompts() 인터페이스** (`providers/base.js`)
+- [x] **BaseProvider getPrompts() 인터페이스** (`providers/base.js`)
   - `getPrompts()` → `[]` 기본 반환 (optional override)
   - Notion provider: `notion_{ns}__summarize_workspace` prompt 예시 구현
   - 테스트: 기본 + Notion prompt 반환
 
-- [ ] **Provider template system 강화** (`admin/public/templates.js`)
+- [x] **Provider template system 강화** (`admin/public/templates.js`)
   - 템플릿 카테고리 필터 (productivity, communication, development)
   - 검색 기능 (이름, provider 타입)
   - OAuth 필요 여부 표시 아이콘
   - 테스트: 수동 E2E
 
-- [ ] **Provider 개발 가이드** (`docs/PROVIDER_GUIDE.md`)
+- [x] **Provider 개발 가이드** (`docs/PROVIDER_GUIDE.md`)
   - BaseProvider 인터페이스 설명
   - 새 provider 추가 체크리스트
   - capabilityCheck 구현 패턴
@@ -180,44 +180,44 @@ docs/
 
 ### 9d — 운영 기능 (2.5일)
 
-- [ ] **설정 export/import** (`server/workspace-manager.js`, `admin/routes.js`)
+- [x] **설정 export/import** (`server/workspace-manager.js`, `admin/routes.js`)
   - `GET /api/config/export` → 워크스페이스 설정 JSON 다운로드 (토큰 제외)
   - `POST /api/config/import` → 설정 JSON 업로드 (충돌 해결: skip/overwrite/rename)
   - 버전 호환성 검증 (export 시 format version 포함)
   - 테스트: export → import → 동일 상태 복원
 
-- [ ] **Soft delete** (`server/workspace-manager.js`)
+- [x] **Soft delete** (`server/workspace-manager.js`)
   - DELETE 시 즉시 삭제 대신 `deletedAt` 타임스탬프 설정
   - 삭제된 워크스페이스는 MCP에 노출 안 됨, Admin에서 "휴지통" 표시
   - 30일 후 자동 영구 삭제 (healthCheck 주기에서 purge)
   - `POST /api/workspaces/:id/restore` → 복원
   - 테스트: 삭제 → MCP 미노출, 복원 → 정상 노출, 30일 후 → 영구 삭제
 
-- [ ] **Audit log 강화** (`server/audit-logger.js`)
+- [x] **Audit log 강화** (`server/audit-logger.js`)
   - 파일 기반 로그 추가 (in-memory ring + 파일 append)
   - `BIFROST_AUDIT_FILE` 환경변수로 경로 지정 (기본: `config/audit.jsonl`)
   - 로그 항목: timestamp, action, actor (admin/mcp-token), target, details
   - 테스트: audit 이벤트 → 파일 기록 확인
 
-- [ ] **Usage 시계열 데이터** (`server/usage-recorder.js`)
+- [x] **Usage 시계열 데이터** (`server/usage-recorder.js`)
   - 시간별 집계 (hourly buckets)
   - `GET /api/usage/timeseries?range=24h|7d|30d` API
   - 응답: `[{ hour, callCount, errorCount, avgLatency }]`
   - 테스트: 시계열 집계 + API 응답 확인
 
-- [ ] **Profile 기반 엔드포인트** (`server/mcp-handler.js`, `server/index.js`)
+- [x] **Profile 기반 엔드포인트** (`server/mcp-handler.js`, `server/index.js`)
   - SPEC Phase 4: `/mcp?profile=read-only`
   - Profile 정의: `config/profiles.json` (워크스페이스 glob + toolFilter)
   - MCP 토큰별 기본 profile 바인딩 가능
   - 테스트: profile 파라미터 → 필터링된 tools/list
 
-- [ ] **MCP 토큰 스코프** (`server/mcp-token-manager.js`)
+- [x] **MCP 토큰 스코프** (`server/mcp-token-manager.js`)
   - 토큰 발급 시 workspace glob + tool glob 지정
   - 기존 토큰은 전체 접근 (하위 호환)
   - tools/list, tools/call 시 스코프 필터링
   - 테스트: 스코프 제한 토큰 → 허용된 도구만 노출
 
-- [ ] **Audit log 파일 rotation** (`server/audit-logger.js`)
+- [x] **Audit log 파일 rotation** (`server/audit-logger.js`)
   - `BIFROST_AUDIT_MAX_BYTES` 환경변수 (기본: 10MB)
   - 초과 시 `.1` 로 rotate (최대 3세대 보관)
   - 쓰기 전 크기 확인 → rotate 판정
@@ -229,32 +229,32 @@ docs/
   - 잘못된 profile → 서버 시작 시 경고 + 해당 profile 비활성화 (서버 중단 방지)
   - 테스트: ReDoS 패턴 → 거부, 유효 패턴 → 통과
 
-- [ ] **다중 MCP 토큰 관리 UI** (`admin/public/app.js`)
+- [x] **다중 MCP 토큰 관리 UI** (`admin/public/app.js`)
   - 토큰별 이름, 스코프, 생성일, 마지막 사용일 표시
   - 토큰 발급/폐기/갱신 UI (Phase 8e 모달 기반 확장)
   - 테스트: 수동 E2E
 
 ### 9e — Admin UI 개선 (2일)
 
-- [ ] **Identity 관리 UI** (`admin/public/app.js`)
+- [x] **Identity 관리 UI** (`admin/public/app.js`)
   - 워크스페이스별 identity 목록 표시
   - Per-identity 토큰 상태 (만료일, 마지막 갱신)
   - Identity별 토큰 폐기 UI
   - 테스트: 수동 E2E
 
-- [ ] **Tool dry-run** (`admin/public/app.js`, `admin/routes.js`)
+- [~] **Tool dry-run** (`admin/public/app.js`, `admin/routes.js`)
   - 도구 상세 뷰에서 "Test" 버튼
   - `POST /api/workspaces/:id/tools/:name/test` → 기본 파라미터로 실행
   - inputSchema 시각화 (JSON Schema → 폼)
   - 결과 표시 (성공/실패 + 응답 프리뷰)
   - 테스트: API 엔드포인트 + mock tool call
 
-- [ ] **Wizard progress indicator** (`admin/public/app.js`)
+- [x] **Wizard progress indicator** (`admin/public/app.js`)
   - Step 1~4 진행 표시줄 (현재 단계 강조)
   - 각 단계 클릭으로 자유 이동 (SPEC UX 원칙)
   - 테스트: 수동 E2E
 
-- [ ] **Dark mode** (`admin/public/`)
+- [~] **Dark mode** (`admin/public/`)
   - `prefers-color-scheme` 미디어 쿼리 기반 자동 전환
   - 수동 토글 버튼 (localStorage에 preference 저장)
   - CSS 변수 기반 테마 시스템
@@ -286,13 +286,13 @@ docs/
   - SSE 연결 끊김 + 재연결
   - 테스트: 각 시나리오별 graceful 처리 확인
 
-- [ ] **대규모 성능 벤치마크** (`tests/benchmarks/`)
+- [x] **대규모 성능 벤치마크** (`tests/benchmarks/`)
   - 100개 워크스페이스 + 1000개 도구 → tools/list 응답 시간
   - 10000건 audit 항목 → 조회 성능
   - 동시 50개 MCP 세션 → 메모리/CPU 프로파일
   - 테스트: 벤치마크 결과 기록 (regression 감지용)
 
-- [ ] **테스트 coverage 리포트**
+- [x] **테스트 coverage 리포트**
   - `c8` 또는 `node --experimental-test-coverage` 활용
   - `npm run test:coverage` 스크립트 추가
   - 최소 coverage 목표: 80% statement, 70% branch
@@ -308,7 +308,7 @@ docs/
   - 복잡도 높음 — MCP 프로토콜이 비동기 응답을 기본 지원하지 않아 클라이언트 호환성 확인 필요
   - 테스트: async tool call → SSE 알림 수신
 
-- [ ] **OAuth issuer cache TTL** (`server/oauth-manager.js`)
+- [x] **OAuth issuer cache TTL** (`server/oauth-manager.js`)
   - 현재: issuer metadata 무기한 캐시
   - 변경: 24시간 TTL, 만료 시 재조회
   - 테스트: TTL 초과 → 재조회 확인
@@ -428,17 +428,17 @@ docs/
 
 ## 9. 성공 기준
 
-- [ ] `npm test` ≥ 241 PASS (기준선 205 + 36 신규)
-- [ ] prompts/list, prompts/get 정상 동작
-- [ ] mcp-client HTTP transport로 원격 MCP 서버 연결 성공
-- [ ] trust proxy 활성화 시 X-Forwarded-For 기반 rate limiting 동작
-- [ ] 전체 응답에 security headers 포함
-- [ ] workspace 설정 export → 다른 환경 import → 동일 상태 복원
-- [ ] soft delete → 30일 보관 → restore 가능
-- [ ] profile 파라미터로 tools/list 필터링 동작
+- [x] `npm test` ≥ 241 PASS — 실제 278 tests (pass 276, skipped 2, fail 0)
+- [x] prompts/list, prompts/get 정상 동작
+- [x] mcp-client HTTP transport로 원격 MCP 서버 연결 성공
+- [x] trust proxy 활성화 시 X-Forwarded-For 기반 rate limiting 동작
+- [x] 전체 응답에 security headers 포함
+- [x] workspace 설정 export → 다른 환경 import → 동일 상태 복원
+- [x] soft delete → 30일 보관 → restore 가능
+- [x] profile 파라미터로 tools/list 필터링 동작
 - [ ] Playwright E2E 기본 시나리오 5건 통과
-- [ ] Phase 8 테스트 205건 회귀 0
-- [ ] Codex 교차 리뷰 PASS (phase 단위)
+- [x] Phase 8 테스트 205건 회귀 0
+- [x] Codex 교차 리뷰 PASS (phase 단위)
 
 ---
 
