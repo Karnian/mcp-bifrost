@@ -167,6 +167,21 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
 
     try {
       const result = await oauth.completeAuthorization(state, code);
+      // Phase 10a §4.10a-4 (Codex R2 blocker 1) — recover provider from any
+      // prior stopped:auth_failed state so the refreshed tokens are actually
+      // used.
+      if (result?.workspaceId) {
+        const provider = wm.getProvider?.(result.workspaceId);
+        if (provider?.resetAuthState) {
+          try { provider.resetAuthState({ identity: result.identity }); } catch { /* best-effort */ }
+        }
+        const ws = wm._getRawWorkspace?.(result.workspaceId);
+        if (ws) {
+          const identity = result.identity || 'default';
+          if (ws.oauthActionNeededBy) ws.oauthActionNeededBy[identity] = false;
+          if (identity === 'default') ws.oauthActionNeeded = false;
+        }
+      }
       tr.bumpVersion();
       sse.broadcastNotification('notifications/tools/list_changed');
       res.writeHead(200, oauthCspHeaders(nonce));

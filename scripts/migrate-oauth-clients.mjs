@@ -30,7 +30,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, '..', 'config', 'workspaces.json');
-const BACKUP_PATH = join(__dirname, '..', 'config', 'workspaces.json.pre-10a.bak');
+
+function backupPathFor(configPath) {
+  // Phase 10a (Codex R2 cleanup): backup file must be a sibling of the actual
+  // config file, not always the repo-global path. Previously `--config=...`
+  // override was silently dropped here.
+  return `${configPath}.pre-10a.bak`;
+}
 
 function parseArgs(argv) {
   const args = { dryRun: true, apply: false, restore: false, configPath: CONFIG_PATH };
@@ -44,6 +50,7 @@ function parseArgs(argv) {
       process.exit(0);
     }
   }
+  args.backupPath = backupPathFor(args.configPath);
   return args;
 }
 
@@ -134,17 +141,17 @@ function applyMigration(config) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const { configPath } = args;
+  const { configPath, backupPath } = args;
   if (args.restore) {
-    if (!existsSync(BACKUP_PATH)) {
-      console.error(`[migrate-oauth-clients] backup not found: ${BACKUP_PATH}`);
+    if (!existsSync(backupPath)) {
+      console.error(`[migrate-oauth-clients] backup not found: ${backupPath}`);
       process.exit(2);
     }
-    await copyFile(BACKUP_PATH, configPath);
+    await copyFile(backupPath, configPath);
     if (process.platform !== 'win32') {
       try { await chmod(configPath, 0o600); } catch {}
     }
-    console.log(JSON.stringify({ ok: true, action: 'restore', from: BACKUP_PATH, to: configPath }, null, 2));
+    console.log(JSON.stringify({ ok: true, action: 'restore', from: backupPath, to: configPath }, null, 2));
     return;
   }
   if (!existsSync(configPath)) {
@@ -159,9 +166,9 @@ async function main() {
     return;
   }
   // --apply
-  await copyFile(configPath, BACKUP_PATH);
+  await copyFile(configPath, backupPath);
   if (process.platform !== 'win32') {
-    try { await chmod(BACKUP_PATH, 0o600); } catch {}
+    try { await chmod(backupPath, 0o600); } catch {}
   }
   const { disambiguated } = applyMigration(config);
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -171,7 +178,7 @@ async function main() {
   console.log(JSON.stringify({
     ok: true,
     action: 'apply',
-    backup: BACKUP_PATH,
+    backup: backupPath,
     backupMode: process.platform === 'win32' ? 'chmod-skipped' : '0o600',
     report: { ...report, disambiguated },
   }, null, 2));

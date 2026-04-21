@@ -14,7 +14,8 @@ import { MockOAuthServer } from './fixtures/mock-oauth-server.js';
 import { createAdminRoutes } from '../admin/routes.js';
 
 function makeWm(workspaces) {
-  return {
+  const providerRecreateLog = [];
+  const wm = {
     config: { workspaces, server: { port: 3100 }, tunnel: {} },
     _getRawWorkspace: id => workspaces.find(w => w.id === id) || null,
     getRawWorkspace: id => workspaces.find(w => w.id === id) || null,
@@ -43,7 +44,12 @@ function makeWm(workspaces) {
       if (ws.oauth.clientId) return { clientId: ws.oauth.clientId, clientSecret: ws.oauth.clientSecret ? '***' : null, authMethod: ws.oauth.authMethod, source: 'legacy-flat', registeredAt: null };
       return null;
     },
+    // Phase 10a Codex R2 blocker 1 — provider recreate on rotation
+    _createProvider: (ws) => { providerRecreateLog.push(ws.id); },
+    getProvider: () => null,
+    providerRecreateLog,
   };
+  return wm;
 }
 
 async function startAdminServer(wm, oauth) {
@@ -102,6 +108,8 @@ test('§4.10a-5: POST /oauth/register (DCR forceNew) issues new client + invalid
       assert.equal(ws.oauth.tokens.accessToken, null);
       assert.equal(ws.oauthActionNeededBy.default, true);
       assert.equal(ws.oauthActionNeeded, true);
+      // Codex R2 blocker 1: provider must be recreated so new client takes effect
+      assert.ok(wm.providerRecreateLog.includes('w1'), 'provider must be recreated after client rotation');
     } finally {
       await new Promise(r => server.close(r));
     }
@@ -202,6 +210,43 @@ test('§4.10a-5: PUT /oauth/client sets static client + returns 400 on invalid c
       assert.equal(ws.oauth.client.clientId, 'MY_CID');
       assert.equal(ws.oauth.clientId, 'MY_CID', 'flat mirror (§3.4) written');
       assert.equal(ws.oauth.client.source, 'manual');
+      // Codex R2 blocker 1
+      assert.ok(wm.providerRecreateLog.includes('w1'), 'provider must be recreated');
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-5 (Codex R2 cleanup): POST /oauth/register manual also whitelists authMethod', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
+  const mock = new MockOAuthServer({ dcrEnabled: true });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: {
+        enabled: true,
+        issuer: base,
+        metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+      },
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/oauth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manual: { clientId: 'CID', authMethod: 'private_key_jwt' } }),
+      });
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.code, 'UNSUPPORTED_AUTH_METHOD');
     } finally {
       await new Promise(r => server.close(r));
     }

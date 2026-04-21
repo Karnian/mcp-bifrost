@@ -164,6 +164,33 @@ test('§4.10a-6: --restore replaces config with backup byte-for-byte', async () 
   });
 });
 
+test('§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not repo-global', async () => {
+  // Sandboxed — operates entirely in a temp dir.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-'));
+  try {
+    const cfgPath = join(dir, 'my-config.json');
+    await writeFile(cfgPath, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--apply']);
+    assert.equal(r.code, 0, `stderr=${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    // Backup must sit next to the custom config, NOT at repo-global path.
+    const expectedBak = `${cfgPath}.pre-10a.bak`;
+    assert.equal(out.backup, expectedBak);
+    const bakStat = await stat(expectedBak);
+    assert.ok(bakStat);
+    // Repo-global backup must NOT be created
+    const repoBakExists = await stat(REPO_BACKUP_PATH).then(() => true).catch(() => false);
+    assert.equal(repoBakExists, false, 'must not create repo-global backup when --config is overridden');
+    // --restore should also work with the same override
+    const rr = await runScript([`--config=${cfgPath}`, '--restore']);
+    assert.equal(rr.code, 0);
+    const restored = await readFile(cfgPath, 'utf-8');
+    assert.equal(restored, JSON.stringify(fixtureSharedClient(), null, 2));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-6: no-op workspace (already migrated or non-OAuth) is safely handled', async () => {
   await protectRealConfig(async () => {
     const fixture = {

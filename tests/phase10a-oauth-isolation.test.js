@@ -716,6 +716,57 @@ test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => 
   );
 });
 
+test('§4.10a-4 (Codex R2 blocker 1): resetAuthState recovers from stopped:auth_failed', async () => {
+  const ws = { id: 'ws-1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp', headers: {} };
+  const originalFetch = globalThis.fetch;
+  // First phase: 401 thrice → stopped:auth_failed
+  globalThis.fetch = async () => ({ ok: false, status: 401, headers: { get: () => null }, text: async () => '', body: null });
+  let authFailedCalls = 0;
+  const provider = new McpClientProvider(ws, {
+    tokenProvider: async () => 'T',
+    onUnauthorized: async () => {},
+    onAuthFailed: async () => { authFailedCalls++; },
+    authFailThreshold: 3,
+  });
+  try {
+    for (let i = 0; i < 3; i++) {
+      try { await provider._rpcHttp('tools/list', {}); } catch {}
+    }
+    assert.equal(provider.getStreamStatus(), 'stopped:auth_failed');
+    assert.equal(authFailedCalls, 1);
+    // resetAuthState recovers — state returns to idle and counters clear.
+    provider.resetAuthState();
+    assert.notEqual(provider.getStreamStatus(), 'stopped:auth_failed', 'state must recover');
+    // With identity=null, counter Map is cleared (no entry for default)
+    assert.ok(!provider._consecutive401Count.has('default'), 'counter cleared');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('§4.10a-5 (Codex R2 blocker 2): purgePendingForWorkspace removes pending entries scoped to a workspace', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const wm = mockWm();
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '', headers: { get: () => null } }) });
+    // Seed two pending entries: wsA + wsB
+    const pending = await mgr._loadPending();
+    pending['state-A'] = { workspaceId: 'wsA', identity: 'default', issuer: 'https://x', clientId: 'CID_A', expiresAt: Date.now() + 60_000, authMethod: 'none', verifier: 'v', tokenEndpoint: 'https://x/t', resource: null };
+    pending['state-B'] = { workspaceId: 'wsB', identity: 'default', issuer: 'https://x', clientId: 'CID_B', expiresAt: Date.now() + 60_000, authMethod: 'none', verifier: 'v', tokenEndpoint: 'https://x/t', resource: null };
+    await mgr._savePending();
+    // Purge wsA
+    const removed = await mgr.purgePendingForWorkspace('wsA');
+    assert.equal(removed, 1);
+    const after = await mgr._loadPending();
+    assert.equal(after['state-A'], undefined);
+    assert.ok(after['state-B'], 'wsB pending must be preserved');
+    // Audit fired
+    assert.ok(wm.audits.some(a => a.action === 'oauth.pending_purged' && a.ws === 'wsA'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-4: getOAuthClient returns masked clientSecret (never raw)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

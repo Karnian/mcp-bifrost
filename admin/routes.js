@@ -346,12 +346,19 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           }
           let reg;
           if (body?.manual && body.manual.clientId) {
+            // Phase 10a (Codex R2 cleanup): whitelist authMethod on manual path
+            // too — previously only PUT /oauth/client validated, which persisted
+            // unusable methods if operator used POST /oauth/register with a bad method.
+            const manualAuth = body.manual.authMethod || 'none';
+            if (!['none', 'client_secret_basic', 'client_secret_post'].includes(manualAuth)) {
+              return sendJson(res, 400, { ok: false, error: { code: 'UNSUPPORTED_AUTH_METHOD', message: `authMethod '${manualAuth}' not supported; use none/client_secret_basic/client_secret_post` } });
+            }
             reg = await oauth.registerManual({
               workspaceId: id,
               issuer,
               clientId: body.manual.clientId,
               clientSecret: body.manual.clientSecret ?? null,
-              authMethod: body.manual.authMethod || 'none',
+              authMethod: manualAuth,
             });
             reg.source = 'manual';
           } else {
@@ -387,7 +394,15 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             ws.oauthActionNeededBy[identity] = true;
           }
           ws.oauthActionNeeded = true;
+          // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
+          // for this workspace so a stale browser tab/callback cannot resurrect
+          // the pre-rotation client.
+          if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
           await wm._save();
+          // Phase 10a §4.10a-5 (Codex R2 blocker 1) — recreate the provider so
+          // the new client is effective immediately (especially if the old
+          // provider was in stopped:auth_failed).
+          if (wm._createProvider) wm._createProvider(ws);
           sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
         } catch (err) {
           const code = err.code || 'OAUTH_ERROR';
@@ -463,7 +478,11 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             ws.oauthActionNeededBy[identity] = true;
           }
           ws.oauthActionNeeded = true;
+          // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
+          if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
           await wm._save();
+          // Phase 10a §4.10a-5 (Codex R2 blocker 1) — recreate provider
+          if (wm._createProvider) wm._createProvider(ws);
           sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
         } catch (err) {
           sendJson(res, 500, { ok: false, error: { code: err.code || 'OAUTH_ERROR', message: err.message } });

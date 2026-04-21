@@ -115,6 +115,58 @@ Contents:
 
 ---
 
+## Codex review — Round 2 (2026-04-21)
+
+**Verdict**: REVISE (2 blockers + 2 Phase-11 cleanup)
+
+### Blocker 1 — `stopped:auth_failed` has no recovery path
+After fail-fast trips, `_rpcHttp` permanently short-circuits. But the OAuth
+callback only persists tokens + broadcasts tools_changed; it never recreates
+the provider. Similarly `/oauth/register` and `/oauth/client` mutate config
+without `_createProvider`. Result: workspace stays dead until restart.
+
+**Fix**:
+- Added `McpClientProvider.resetAuthState({ identity? })` — clears 401 counter,
+  resets `_streamState` from `stopped:auth_failed` to `idle`, kicks a fresh
+  `_startNotificationStream` if applicable.
+- `server/index.js` OAuth callback: after `completeAuthorization`, looks up
+  the workspace by `result.workspaceId` (now returned by `completeAuthorization`)
+  and calls `provider.resetAuthState({ identity })` + clears action_needed.
+- `admin/routes.js`: both `/oauth/register` and `/oauth/client` call
+  `wm._createProvider(ws)` after persisting the new client.
+
+Verified: new test `§4.10a-4 (Codex R2 blocker 1): resetAuthState recovers from stopped:auth_failed`.
+Admin API tests now assert `wm.providerRecreateLog.includes(wsId)`.
+
+### Blocker 2 — Pending auth states not purged on client rotation
+`initializeAuthorization` stores `clientId` inside pending state. Rotating the
+client (via /oauth/register or /oauth/client) leaves old pending entries in place.
+Within the 10-min pending TTL, a stale browser callback could `completeAuthorization`
+with the pre-rotation client, undoing the rotation.
+
+**Fix**:
+- Added `OAuthManager.purgePendingForWorkspace(workspaceId)` — removes all
+  pending entries scoped to the workspace + emits `oauth.pending_purged` audit.
+- `admin/routes.js` calls it in both `/oauth/register` and `/oauth/client` handlers.
+
+Verified: new test `§4.10a-5 (Codex R2 blocker 2): purgePendingForWorkspace removes pending entries scoped to a workspace`.
+
+### Cleanup 1 — POST /oauth/register manual authMethod whitelist
+`PUT /oauth/client` validated `authMethod ∈ {none, client_secret_basic, client_secret_post}`
+but `POST /oauth/register` with manual body.manual accepted any string.
+
+**Fix**: Added the same whitelist to the manual branch of `/oauth/register`
+(`admin/routes.js`). New test `§4.10a-5 (Codex R2 cleanup): POST /oauth/register manual also whitelists authMethod`.
+
+### Cleanup 2 — `migrate-oauth-clients.mjs --config=` backup path
+`--config=...` was respected for reading and writing, but the backup path was
+hard-coded to the repo-global `config/workspaces.json.pre-10a.bak`.
+
+**Fix**: `backupPathFor(configPath) = ${configPath}.pre-10a.bak`. New test
+`§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not repo-global`.
+
+---
+
 ## Codex review — Round 1 (2026-04-21)
 
 **Verdict**: REVISE (2 items)

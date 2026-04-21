@@ -350,6 +350,40 @@ export class McpClientProvider extends BaseProvider {
     return this._streamState;
   }
 
+  /**
+   * Phase 10a §4.10a-4 (Codex R2 blocker 1) — recovery hook.
+   * Reset the 401 counter + stream state so callers (WorkspaceManager on
+   * re-auth success, Admin API after re-register) can restart the provider
+   * without a full restart.
+   *
+   * Called by:
+   *   - server/index.js OAuth callback success (after tokens persisted)
+   *   - admin/routes.js /oauth/register + /oauth/client (after client rotation)
+   *
+   * Safe no-op if the provider was not in a stopped state. Also resets the
+   * reconnect backoff so a retry is prompt.
+   */
+  resetAuthState({ identity = null } = {}) {
+    // Reset 401 counters (scoped to identity if provided, otherwise all)
+    if (identity) {
+      this._consecutive401Count.set(identity, 0);
+    } else {
+      this._consecutive401Count.clear();
+    }
+    // Recover from permanent auth_failed
+    if (this._streamState === 'stopped:auth_failed') {
+      this._streamState = (this.transport === 'http' || this.transport === 'sse') ? 'idle' : 'not_applicable';
+      this._streamBackoffMs = 30_000; // reset backoff for prompt retry
+      // Kick off a fresh stream connection if HTTP/SSE. _startNotificationStream
+      // is idempotent — it checks _streamAbort + _streamStopping.
+      if ((this.transport === 'http' || this.transport === 'sse') && !this._streamStopping) {
+        this._startNotificationStream();
+      }
+    }
+    // Invalidate caches that might hold stale Authorization headers.
+    this._toolsCache = null;
+  }
+
   async _buildHeaders(identity) {
     const headers = {
       'Content-Type': 'application/json',

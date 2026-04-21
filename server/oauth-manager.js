@@ -540,6 +540,33 @@ export class OAuthManager {
     return removed;
   }
 
+  /**
+   * Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states bound
+   * to a workspace. Called when the workspace's OAuth client is rotated
+   * (POST /oauth/register, PUT /oauth/client) so stale browser callbacks can
+   * no longer resurrect the pre-rotation client.
+   */
+  async purgePendingForWorkspace(workspaceId) {
+    const pending = await this._loadPending();
+    let removed = 0;
+    for (const [state, entry] of Object.entries(pending)) {
+      if (entry?.workspaceId === workspaceId) {
+        delete pending[state];
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      await this._savePending();
+      if (this.wm?.logAudit) {
+        this.wm.logAudit('oauth.pending_purged', workspaceId, JSON.stringify({
+          cause: 'client_rotated',
+          entriesRemoved: removed,
+        }));
+      }
+    }
+    return removed;
+  }
+
   async initializeAuthorization(workspaceId, { issuer, clientId, clientSecret, authMethod, authServerMetadata, resource, scope, identity = 'default' }) {
     if (!authServerMetadata?.authorization_endpoint) {
       throw new Error('initializeAuthorization: missing authorization_endpoint');
@@ -626,7 +653,9 @@ export class OAuthManager {
       tokens,
       identity: entry.identity || 'default',
     });
-    return stored;
+    // Phase 10a §4.10a-4 (Codex R2 blocker 1): expose workspaceId + identity
+    // to callers so they can recover providers from stopped:auth_failed.
+    return Object.assign({}, stored, { workspaceId: entry.workspaceId, identity: entry.identity || 'default' });
   }
 
   async _exchangeCode(entry, code) {
