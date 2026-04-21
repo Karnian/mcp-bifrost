@@ -358,7 +358,11 @@ export class OAuthManager {
     };
 
     // Phase 10a §4.10a-3: retry-and-classify loop.
-    const maxAttempts = 3;
+    // 1 initial attempt + up to 3 retries on 5xx/network = 4 total with backoffs 1s / 2s / 4s (cap 5s).
+    // Rationale (Codex Round 1 REVISE): plan specifies "3 retries with exponential backoff",
+    // which means retry attempts #2/#3/#4 sleep 1s/2s/4s before firing.
+    const maxRetries = 3;
+    const maxAttempts = maxRetries + 1;
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let res;

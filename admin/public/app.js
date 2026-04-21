@@ -255,6 +255,19 @@ function renderOAuthPanel(ws) {
       <td><button type="button" class="btn btn-sm btn-outline" data-reauth-identity="${esc(name)}">Re-authorize</button></td>
     </tr>`).join('');
 
+  // Phase 10a §4.10a-5 — OAuth client block (workspace-scoped client metadata)
+  const client = o.client || {};
+  const clientId = client.clientId || o.clientId || null;
+  const authMethod = client.authMethod || o.authMethod || 'none';
+  const source = client.source || (clientId ? 'legacy-flat' : null);
+  const sourceBadge = source === 'manual'
+    ? '<span class="badge" style="background:#eab308;color:#422006;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">MANUAL</span>'
+    : source === 'dcr'
+      ? '<span class="badge" style="background:#22c55e;color:#052e16;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">DCR</span>'
+      : source === 'legacy-flat'
+        ? '<span class="badge" style="background:#94a3b8;color:#0f172a;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">LEGACY</span>'
+        : '';
+
   return `
     <div class="oauth-panel" style="margin-top:16px;padding:14px;border:1px solid var(--border);border-radius:8px;background:rgba(59,130,246,0.06)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -263,7 +276,13 @@ function renderOAuthPanel(ws) {
       </div>
       <div style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:13px;line-height:1.6;margin-bottom:12px">
         <span style="color:var(--text-secondary)">Issuer</span><span><code>${esc(o.issuer || '—')}</code></span>
-        <span style="color:var(--text-secondary)">Client ID</span><span><code>${esc(o.clientId || '—')}</code> <em style="color:var(--text-secondary)">(${esc(o.authMethod || 'none')})</em></span>
+        <span style="color:var(--text-secondary)">Client ID</span><span><code>${esc(clientId || '—')}</code> <em style="color:var(--text-secondary)">(${esc(authMethod)})</em> ${sourceBadge}</span>
+      </div>
+      <!-- Phase 10a §4.10a-5: OAuth client management actions -->
+      <div style="margin-bottom:12px;padding:10px;background:rgba(15,23,42,0.04);border-radius:6px;display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" id="btn-oauth-reregister" class="btn btn-sm btn-outline" title="Force a fresh DCR registration (new client_id — requires re-authorize)">Re-register (DCR)</button>
+        <button type="button" id="btn-oauth-manual-client" class="btn btn-sm btn-outline" title="Set a static/manual client_id (pre-registered on provider)">Use Manual Client</button>
+        <span style="font-size:11px;color:var(--text-secondary);align-self:center;margin-left:auto">Re-register invalidates all tokens; identities must re-authorize.</span>
       </div>
       <table class="tools-table" style="width:100%">
         <thead><tr><th>Identity</th><th>Access token</th><th>Expires</th><th>Last refresh</th><th></th></tr></thead>
@@ -359,6 +378,44 @@ async function openDetail(id) {
     reauth.addEventListener('click', async () => {
       const ok = await runOAuthFlow(ws.id);
       if (ok) await refreshDetailAfterOAuth(ws.id);
+    });
+  }
+  // Phase 10a §4.10a-5 — OAuth client actions
+  const reRegBtn = $('#btn-oauth-reregister');
+  if (reRegBtn) {
+    reRegBtn.addEventListener('click', async () => {
+      if (!confirm('Force a new DCR registration? This invalidates all existing tokens — every identity will need to re-authorize.')) return;
+      const res = await api('POST', `/api/workspaces/${encodeURIComponent(ws.id)}/oauth/register`, {});
+      if (res.ok) {
+        alert(`New client registered (source=${res.data?.source || 'dcr'}). Please re-authorize each identity.`);
+        await refreshDetailAfterOAuth(ws.id);
+      } else {
+        alert(`Re-register failed: ${res.error?.message || 'unknown'}`);
+      }
+    });
+  }
+  const manualBtn = $('#btn-oauth-manual-client');
+  if (manualBtn) {
+    manualBtn.addEventListener('click', async () => {
+      const result = await bifrostModal({
+        title: 'Manual OAuth Client',
+        fields: [
+          { label: 'Client ID', placeholder: 'pre-registered client_id from provider', required: true },
+          { label: 'Client Secret (optional)', placeholder: 'leave empty for public client', required: false, type: 'password' },
+          { label: 'Auth method', placeholder: 'none | client_secret_basic | client_secret_post', required: false },
+        ],
+      });
+      if (!result) return;
+      const [clientId, clientSecret, authMethod] = result;
+      if (!clientId) return;
+      const payload = { clientId, clientSecret: clientSecret || null, authMethod: authMethod || 'none' };
+      const res = await api('PUT', `/api/workspaces/${encodeURIComponent(ws.id)}/oauth/client`, payload);
+      if (res.ok) {
+        alert('Manual client configured. All identities must re-authorize.');
+        await refreshDetailAfterOAuth(ws.id);
+      } else {
+        alert(`Manual client failed: ${res.error?.message || 'unknown'}`);
+      }
     });
   }
 }

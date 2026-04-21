@@ -130,6 +130,8 @@ export class WorkspaceManager {
     // Legacy entries without `kind` → assume native (Notion/Slack REST wrapper)
     let migrated = 0;
     let oauthMirrored = 0;
+    let clientBlockMigrated = 0;
+    let clientMismatchWarned = 0;
     for (const ws of this.config.workspaces) {
       if (!ws.kind) {
         ws.kind = 'native';
@@ -144,6 +146,23 @@ export class WorkspaceManager {
         };
         oauthMirrored++;
       }
+      // Phase 10a §3.4: migrate flat ws.oauth.{clientId,clientSecret,authMethod}
+      // into nested ws.oauth.client. Keep the flat mirror for one release.
+      if (ws.oauth && ws.oauth.clientId && !ws.oauth.client) {
+        ws.oauth.client = {
+          clientId: ws.oauth.clientId,
+          clientSecret: ws.oauth.clientSecret ?? null,
+          authMethod: ws.oauth.authMethod || 'none',
+          source: ws.oauth.clientSource || 'legacy-flat',
+          registeredAt: ws.oauth.clientRegisteredAt || new Date().toISOString(),
+        };
+        clientBlockMigrated++;
+      }
+      // Phase 10a §3.4 — startup validation: warn when nested ↔ flat diverge.
+      if (ws.oauth?.client && ws.oauth.clientId && ws.oauth.client.clientId !== ws.oauth.clientId) {
+        logger.warn(`[WorkspaceManager] Phase 10a: ws.oauth.client.clientId diverges from legacy ws.oauth.clientId for workspace '${ws.id}'. Preferring nested client.*`);
+        clientMismatchWarned++;
+      }
     }
     if (migrated > 0) {
       logger.info(`[WorkspaceManager] Migrated ${migrated} legacy workspace(s) to kind=native`);
@@ -151,6 +170,45 @@ export class WorkspaceManager {
     if (oauthMirrored > 0) {
       logger.info(`[WorkspaceManager] Phase 7c-pre: mirrored ${oauthMirrored} OAuth tokens to byIdentity.default`);
     }
+    if (clientBlockMigrated > 0) {
+      logger.info(`[WorkspaceManager] Phase 10a: migrated ${clientBlockMigrated} flat OAuth client field(s) to ws.oauth.client`);
+    }
+    if (clientMismatchWarned > 0) {
+      logger.warn(`[WorkspaceManager] Phase 10a: ${clientMismatchWarned} workspace(s) have conflicting nested vs flat OAuth client fields`);
+    }
+  }
+
+  /**
+   * Phase 10a §4.10a-4 — public diagnostic API. Returns the nested OAuth client
+   * block or `null` if the workspace has no persisted client. Used by §9
+   * assertions (cache purge tests) and the Admin UI.
+   */
+  getOAuthClient(workspaceId) {
+    const ws = this.config.workspaces.find(w => w.id === workspaceId);
+    if (!ws?.oauth) return null;
+    if (ws.oauth.client) {
+      const c = ws.oauth.client;
+      // Return masked view (clientSecret redacted). Keep clientId raw so
+      // diagnostic consumers can compare/verify — it is not a bearer token.
+      return {
+        clientId: c.clientId || null,
+        clientSecret: c.clientSecret ? '***' : null,
+        authMethod: c.authMethod || null,
+        source: c.source || null,
+        registeredAt: c.registeredAt || null,
+      };
+    }
+    // Legacy flat path (pre-10a workspaces that haven't been re-authorized yet)
+    if (ws.oauth.clientId) {
+      return {
+        clientId: ws.oauth.clientId,
+        clientSecret: ws.oauth.clientSecret ? '***' : null,
+        authMethod: ws.oauth.authMethod || null,
+        source: 'legacy-flat',
+        registeredAt: null,
+      };
+    }
+    return null;
   }
 
   async _initProviders() {
@@ -183,6 +241,13 @@ export class WorkspaceManager {
         opts.onUnauthorized = async (identity) => {
           try { await this._oauth.forceRefresh(ws.id, identity || 'default'); }
           catch (err) { this.logError('oauth.refresh', ws.id, err.message); throw err; }
+        };
+        // Phase 10a §4.10a-4 — threshold trip handler: mark workspace as needing
+        // re-auth and stop the notification stream.
+        opts.onAuthFailed = async (identity) => {
+          try { await this._oauth.markAuthFailed(ws.id, identity || 'default'); }
+          catch (err) { this.logError('oauth.mark_auth_failed', ws.id, err.message); }
+          this._notifyChange();
         };
       }
       const provider = new McpClientProvider(ws, opts);
@@ -275,6 +340,9 @@ export class WorkspaceManager {
     const provider = data.provider || (kind === 'mcp-client' ? (data.transport || 'mcp') : 'unknown');
 
     let alias = data.alias || aliasFromDisplayName(data.displayName || '');
+    // Phase 10a §4.10a-1 (Codex R1): reserve `__global__` so it cannot collide
+    // with the legacy DCR cache bucket used for 2-arg back-compat callers.
+    if (alias === '__global__') throw new Error(`alias "__global__" is reserved`);
     const existing = this.config.workspaces.map(w => w.alias);
     let candidate = alias;
     let counter = 1;
@@ -286,6 +354,12 @@ export class WorkspaceManager {
     const namespace = alias;
     const id = data.id || generateId(provider, namespace);
 
+    // Phase 10a §4.10a-1 (Codex R1): reserve `__global__` for the legacy DCR
+    // cache bucket. A workspace with id="__global__" would otherwise collide
+    // with `_cacheKey()`'s reserved sentinel and break isolation.
+    if (id === '__global__') {
+      throw new Error(`Workspace ID "__global__" is reserved`);
+    }
     if (this.config.workspaces.some(w => w.id === id)) {
       throw new Error(`Workspace ID '${id}' already exists`);
     }
@@ -399,6 +473,12 @@ export class WorkspaceManager {
 
     if (hard) {
       this.config.workspaces.splice(idx, 1);
+      // Phase 10a §4.10a-1 — hard delete purges DCR cache immediately.
+      // Soft delete keeps the cache (Option Y) so restore within 30 days
+      // doesn't require re-authorization.
+      if (this._oauth?.removeClient) {
+        try { await this._oauth.removeClient(id); } catch { /* best-effort */ }
+      }
     } else {
       // Soft delete — mark as deleted, keep for 30 days
       ws.deletedAt = new Date().toISOString();
@@ -432,14 +512,19 @@ export class WorkspaceManager {
       .map(ws => ({ ...ws, credentials: maskCredentials(ws.credentials || {}) }));
   }
 
-  async purgeExpiredWorkspaces() {
-    const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  async purgeExpiredWorkspaces({ now = Date.now() } = {}) {
+    const thirtyDaysAgoMs = now - 30 * 24 * 60 * 60 * 1000;
     const expired = this.config.workspaces.filter(w => w.deletedAt && new Date(w.deletedAt).getTime() < thirtyDaysAgoMs);
     for (const ws of expired) {
       const idx = this.config.workspaces.indexOf(ws);
       if (idx !== -1) {
         this.config.workspaces.splice(idx, 1);
         this.logAudit('purge', ws.id, `Purged expired workspace "${ws.displayName}"`);
+        // Phase 10a §4.10a-1 Option Y — cache purge happens at actual deletion
+        // (expire), not at soft-delete time, so restore within 30 days is seamless.
+        if (this._oauth?.removeClient) {
+          try { await this._oauth.removeClient(ws.id); } catch { /* best-effort */ }
+        }
       }
     }
     if (expired.length > 0) await this._save();

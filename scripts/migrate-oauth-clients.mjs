@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+/**
+ * Phase 10a §4.10a-6 — OAuth client isolation migration
+ *
+ * Migrates pre-Phase-10a `workspaces.json` to the Phase 10a schema:
+ *   1. Flat `ws.oauth.{clientId,clientSecret,authMethod}` → nested `ws.oauth.client`
+ *      (keeps flat fields mirrored for 1 release per §3.4).
+ *   2. Detects workspaces that share the same OAuth clientId (the original
+ *      Phase 10a bug: refresh-token supersede between workspaces). The first
+ *      workspace per `${issuer}::${clientId}` group keeps the client; the rest
+ *      are flagged with `oauthActionNeeded = true` so operators re-authorize
+ *      (each workspace will get its own fresh client_id via the updated
+ *      Phase 10a registerClient flow).
+ *
+ * Usage:
+ *   node scripts/migrate-oauth-clients.mjs --dry-run  (default; prints report)
+ *   node scripts/migrate-oauth-clients.mjs --apply    (writes + creates .pre-10a.bak)
+ *   node scripts/migrate-oauth-clients.mjs --restore  (restores from .pre-10a.bak)
+ *
+ * Safety:
+ *   - `--apply` creates `config/workspaces.json.pre-10a.bak` (chmod 0o600) first.
+ *   - `--restore` copies .pre-10a.bak back over workspaces.json then exits.
+ *   - Dry-run never writes anywhere.
+ */
+
+import { readFile, writeFile, copyFile, chmod, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONFIG_PATH = join(__dirname, '..', 'config', 'workspaces.json');
+const BACKUP_PATH = join(__dirname, '..', 'config', 'workspaces.json.pre-10a.bak');
+
+function parseArgs(argv) {
+  const args = { dryRun: true, apply: false, restore: false, configPath: CONFIG_PATH };
+  for (const a of argv.slice(2)) {
+    if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--apply') { args.apply = true; args.dryRun = false; }
+    else if (a === '--restore') { args.restore = true; args.dryRun = false; }
+    else if (a.startsWith('--config=')) args.configPath = a.slice('--config='.length);
+    else if (a === '--help' || a === '-h') {
+      console.log('Usage: node scripts/migrate-oauth-clients.mjs [--dry-run|--apply|--restore] [--config=path]');
+      process.exit(0);
+    }
+  }
+  return args;
+}
+
+function inspect(config) {
+  const report = {
+    workspacesScanned: 0,
+    flatToNested: [],       // [{id, issuer, clientId}]
+    sharedClients: [],      // [{groupKey, workspaces:[...]}]
+    alreadyMigrated: [],    // [{id}]
+    nonOAuth: [],           // [{id}]
+    conflicts: [],          // [{id, nestedClientId, flatClientId}]
+  };
+  const byGroup = new Map(); // `${issuer}::${clientId}` → [wsId,...]
+  for (const ws of config.workspaces || []) {
+    report.workspacesScanned++;
+    if (!ws.oauth || !ws.oauth.enabled) { report.nonOAuth.push({ id: ws.id }); continue; }
+    const nested = ws.oauth.client;
+    const flatCid = ws.oauth.clientId;
+    if (nested?.clientId && flatCid && nested.clientId !== flatCid) {
+      report.conflicts.push({ id: ws.id, nestedClientId: nested.clientId, flatClientId: flatCid });
+    }
+    const cid = nested?.clientId || flatCid || null;
+    if (!nested && flatCid) {
+      report.flatToNested.push({ id: ws.id, issuer: ws.oauth.issuer, clientId: flatCid });
+    } else if (nested) {
+      report.alreadyMigrated.push({ id: ws.id });
+    }
+    if (cid && ws.oauth.issuer) {
+      const key = `${ws.oauth.issuer}::${cid}`;
+      if (!byGroup.has(key)) byGroup.set(key, []);
+      byGroup.get(key).push(ws.id);
+    }
+  }
+  for (const [key, ids] of byGroup) {
+    if (ids.length > 1) report.sharedClients.push({ groupKey: key, workspaces: ids });
+  }
+  return report;
+}
+
+function applyMigration(config) {
+  // 1. Flat → nested per workspace.
+  for (const ws of config.workspaces || []) {
+    if (!ws.oauth) continue;
+    if (!ws.oauth.client && ws.oauth.clientId) {
+      ws.oauth.client = {
+        clientId: ws.oauth.clientId,
+        clientSecret: ws.oauth.clientSecret ?? null,
+        authMethod: ws.oauth.authMethod || 'none',
+        source: 'legacy-flat',
+        registeredAt: ws.oauth.clientRegisteredAt || new Date().toISOString(),
+      };
+    }
+  }
+  // 2. Shared clientId disambiguation. For each group of workspaces with the
+  //    same (issuer, clientId), keep the first one and flag the rest for re-auth.
+  const groups = new Map();
+  for (const ws of config.workspaces || []) {
+    const cid = ws.oauth?.client?.clientId || ws.oauth?.clientId;
+    const issuer = ws.oauth?.issuer;
+    if (!cid || !issuer) continue;
+    const key = `${issuer}::${cid}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ws);
+  }
+  const disambiguated = [];
+  for (const [key, wss] of groups) {
+    if (wss.length <= 1) continue;
+    // Keep wss[0], strip client from wss[1..] and set action_needed.
+    for (let i = 1; i < wss.length; i++) {
+      const ws = wss[i];
+      ws.oauth.client = null;
+      ws.oauth.clientId = null;
+      ws.oauth.clientSecret = null;
+      // Mark all existing identities as requiring re-authorization.
+      const byId = ws.oauth.byIdentity || { default: { tokens: null } };
+      ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+      for (const identity of Object.keys(byId)) {
+        ws.oauthActionNeededBy[identity] = true;
+        if (byId[identity]?.tokens) byId[identity].tokens.accessToken = null;
+      }
+      ws.oauthActionNeeded = true;
+      if (ws.oauth.tokens) ws.oauth.tokens.accessToken = null;
+      disambiguated.push({ id: ws.id, groupKey: key });
+    }
+  }
+  return { disambiguated };
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  const { configPath } = args;
+  if (args.restore) {
+    if (!existsSync(BACKUP_PATH)) {
+      console.error(`[migrate-oauth-clients] backup not found: ${BACKUP_PATH}`);
+      process.exit(2);
+    }
+    await copyFile(BACKUP_PATH, configPath);
+    if (process.platform !== 'win32') {
+      try { await chmod(configPath, 0o600); } catch {}
+    }
+    console.log(JSON.stringify({ ok: true, action: 'restore', from: BACKUP_PATH, to: configPath }, null, 2));
+    return;
+  }
+  if (!existsSync(configPath)) {
+    console.error(`[migrate-oauth-clients] config not found: ${configPath}`);
+    process.exit(2);
+  }
+  const raw = await readFile(configPath, 'utf-8');
+  const config = JSON.parse(raw);
+  const report = inspect(config);
+  if (args.dryRun) {
+    console.log(JSON.stringify({ action: 'dry-run', report }, null, 2));
+    return;
+  }
+  // --apply
+  await copyFile(configPath, BACKUP_PATH);
+  if (process.platform !== 'win32') {
+    try { await chmod(BACKUP_PATH, 0o600); } catch {}
+  }
+  const { disambiguated } = applyMigration(config);
+  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  if (process.platform !== 'win32') {
+    try { await chmod(configPath, 0o600); } catch {}
+  }
+  console.log(JSON.stringify({
+    ok: true,
+    action: 'apply',
+    backup: BACKUP_PATH,
+    backupMode: process.platform === 'win32' ? 'chmod-skipped' : '0o600',
+    report: { ...report, disambiguated },
+  }, null, 2));
+}
+
+main().catch(err => {
+  console.error('[migrate-oauth-clients] error:', err.message);
+  process.exit(1);
+});

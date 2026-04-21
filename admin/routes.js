@@ -218,20 +218,51 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             resource = disc.resource;
             ws.oauth = { ...(ws.oauth || {}), enabled: true, issuer, resource, metadataCache: asMetadata };
           }
-          // Register
-          let authMethod = ws.oauth?.authMethod;
-          let clientId = ws.oauth?.clientId;
-          let clientSecret = ws.oauth?.clientSecret || null;
+          // Phase 10a §4.10a-2 — client resolution priority:
+          //   1. Manual body.manual (wizard path): honor immediately, persist to ws.oauth.client
+          //   2. ws.oauth.client.clientId (static/stored): reuse, no DCR
+          //   3. Legacy flat ws.oauth.clientId (pre-10a workspaces): treat as stored
+          //   4. Otherwise: call registerClient({ workspaceId }) for DCR with workspace-scoped cache
+          // body.forceRegister bypasses (2)/(3) to force a fresh DCR.
+          let authMethod = ws.oauth?.client?.authMethod ?? ws.oauth?.authMethod;
+          let clientId = ws.oauth?.client?.clientId ?? ws.oauth?.clientId;
+          let clientSecret = ws.oauth?.client?.clientSecret ?? ws.oauth?.clientSecret ?? null;
+          let clientSource = ws.oauth?.client?.source || (clientId ? 'legacy-flat' : null);
           if (!clientId || body?.forceRegister) {
             if (body?.manual && body.manual.clientId) {
-              const reg = await oauth.registerManual(issuer, body.manual);
+              const reg = await oauth.registerManual({
+                workspaceId: id,
+                issuer,
+                clientId: body.manual.clientId,
+                clientSecret: body.manual.clientSecret ?? null,
+                authMethod: body.manual.authMethod || 'none',
+              });
               clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
+              clientSource = 'manual';
             } else {
-              const reg = await oauth.registerClient(issuer, asMetadata, { reuse: body?.reuse !== false });
+              const reg = await oauth.registerClient(issuer, asMetadata, {
+                workspaceId: id,
+                reuse: body?.reuse !== false,
+                forceNew: body?.forceRegister === true,
+              });
               clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
+              clientSource = 'dcr';
             }
-            ws.oauth = { ...ws.oauth, clientId, clientSecret, authMethod };
           }
+          // Phase 10a §3.4 — persist into ws.oauth.client AND mirror flat fields (1 release)
+          ws.oauth = {
+            ...ws.oauth,
+            client: {
+              clientId,
+              clientSecret: clientSecret ?? null,
+              authMethod,
+              source: clientSource || ws.oauth?.client?.source || 'dcr',
+              registeredAt: ws.oauth?.client?.registeredAt || new Date().toISOString(),
+            },
+            clientId,
+            clientSecret: clientSecret ?? null,
+            authMethod,
+          };
           await wm._save();
 
           const init = await oauth.initializeAuthorization(id, {
@@ -247,20 +278,30 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           sendJson(res, 200, { ok: true, data: { authorizationUrl: init.authorizationUrl, issuer, clientId, authMethod, identity, fileSecurityWarning: oauth.getFileSecurityWarning() } });
         } catch (err) {
           const code = err.code || 'OAUTH_ERROR';
-          const status = code === 'DCR_UNSUPPORTED' ? 422 : code === 'DCR_FAILED' ? 502 : 500;
-          sendJson(res, status, { ok: false, error: { code, message: err.message } });
+          // Phase 10a §4.10a-3 — map DCR classification to HTTP status.
+          let status = 500;
+          if (code === 'DCR_UNSUPPORTED') status = 422;
+          else if (code === 'DCR_RATE_LIMITED') status = 429;
+          else if (code === 'DCR_REJECTED') status = 502;
+          else if (code === 'DCR_TRANSIENT') status = 503;
+          else if (code === 'DCR_FAILED') status = 502; // legacy
+          const payload = { ok: false, error: { code, message: err.message } };
+          if (err.retryAfterMs) payload.error.retryAfterMs = err.retryAfterMs;
+          sendJson(res, status, payload);
         }
         return;
       }
 
       // POST /api/oauth/discover — standalone discovery for Wizard preview
+      // Phase 10a §4.10a-1b: `cachedClient` field removed. DCR cache is now
+      // workspace-scoped (§4.10a-1) and this endpoint has no workspaceId context
+      // (preview happens before workspace creation), so cache lookup is meaningless.
       if (path === '/api/oauth/discover' && method === 'POST') {
         if (!oauth) return sendJson(res, 500, { ok: false, error: { code: 'OAUTH_NOT_CONFIGURED' } });
         const body = await readBody(req);
         if (!body?.url) return sendJson(res, 400, { ok: false, error: { code: 'MISSING_URL' } });
         try {
           const disc = await oauth.discover(body.url, { wwwAuthenticate: body.wwwAuthenticate });
-          const cached = await oauth.getCachedClient(disc.issuer, oauth.pickAuthMethod(disc.authServerMetadata));
           sendJson(res, 200, { ok: true, data: {
             issuer: disc.issuer,
             resource: disc.resource,
@@ -268,11 +309,164 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             methodsSupported: disc.authServerMetadata.token_endpoint_auth_methods_supported || [],
             authorizationEndpoint: disc.authServerMetadata.authorization_endpoint,
             tokenEndpoint: disc.authServerMetadata.token_endpoint,
-            cachedClient: cached ? { clientId: cached.clientId, authMethod: cached.authMethod, source: cached.source } : null,
             metadataCache: disc.authServerMetadata,
           } });
         } catch (err) {
           sendJson(res, 400, { ok: false, error: { code: 'DISCOVERY_FAILED', message: err.message } });
+        }
+        return;
+      }
+
+      // Phase 10a §4.10a-5 — POST /api/workspaces/:id/oauth/register
+      // Force a fresh DCR re-registration (or manual override). Discards the old
+      // cached client for this workspace, issues a new one, and returns the new
+      // client info. Does NOT trigger authorization — operator must call
+      // /authorize afterward to re-grant. Frontend shows this as "Re-register".
+      const registerMatch = path.match(/^\/api\/workspaces\/([^/]+)\/oauth\/register$/);
+      if (registerMatch && method === 'POST') {
+        if (!oauth) return sendJson(res, 500, { ok: false, error: { code: 'OAUTH_NOT_CONFIGURED' } });
+        const id = decodeURIComponent(registerMatch[1]);
+        const ws = wm._getRawWorkspace(id);
+        if (!ws) return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND' } });
+        if (ws.kind !== 'mcp-client' || (ws.transport !== 'http' && ws.transport !== 'sse')) {
+          return sendJson(res, 400, { ok: false, error: { code: 'OAUTH_UNAVAILABLE' } });
+        }
+        const body = await readBody(req).catch(() => ({}));
+        try {
+          // Purge existing cache entries for this workspace (§4.10a-1)
+          if (oauth.removeClient) await oauth.removeClient(id);
+          // Need discovery metadata
+          let md = ws.oauth?.metadataCache;
+          let issuer = ws.oauth?.issuer;
+          if (!md) {
+            const disc = await oauth.discover(ws.url, { wwwAuthenticate: body?.wwwAuthenticate });
+            md = disc.authServerMetadata;
+            issuer = disc.issuer;
+            ws.oauth = { ...(ws.oauth || {}), enabled: true, issuer, resource: disc.resource, metadataCache: md };
+          }
+          let reg;
+          if (body?.manual && body.manual.clientId) {
+            reg = await oauth.registerManual({
+              workspaceId: id,
+              issuer,
+              clientId: body.manual.clientId,
+              clientSecret: body.manual.clientSecret ?? null,
+              authMethod: body.manual.authMethod || 'none',
+            });
+            reg.source = 'manual';
+          } else {
+            reg = await oauth.registerClient(issuer, md, { workspaceId: id, forceNew: true, reuse: false });
+            reg.source = 'dcr';
+          }
+          ws.oauth = {
+            ...ws.oauth,
+            client: {
+              clientId: reg.clientId,
+              clientSecret: reg.clientSecret ?? null,
+              authMethod: reg.authMethod,
+              source: reg.source,
+              registeredAt: new Date().toISOString(),
+            },
+            // mirror flat fields (§3.4, one release)
+            clientId: reg.clientId,
+            clientSecret: reg.clientSecret ?? null,
+            authMethod: reg.authMethod,
+          };
+          // Mark all identities as requiring re-authorization — old tokens
+          // are bound to the old client_id and invalid.
+          if (ws.oauth.byIdentity) {
+            for (const identity of Object.keys(ws.oauth.byIdentity)) {
+              if (ws.oauth.byIdentity[identity]?.tokens) {
+                ws.oauth.byIdentity[identity].tokens.accessToken = null;
+              }
+            }
+          }
+          if (ws.oauth.tokens) ws.oauth.tokens.accessToken = null;
+          ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+          for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+            ws.oauthActionNeededBy[identity] = true;
+          }
+          ws.oauthActionNeeded = true;
+          await wm._save();
+          sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
+        } catch (err) {
+          const code = err.code || 'OAUTH_ERROR';
+          let status = 500;
+          if (code === 'DCR_UNSUPPORTED') status = 422;
+          else if (code === 'DCR_RATE_LIMITED') status = 429;
+          else if (code === 'DCR_REJECTED') status = 502;
+          else if (code === 'DCR_TRANSIENT') status = 503;
+          const payload = { ok: false, error: { code, message: err.message } };
+          if (err.retryAfterMs) payload.error.retryAfterMs = err.retryAfterMs;
+          sendJson(res, status, payload);
+        }
+        return;
+      }
+
+      // Phase 10a §4.10a-5 — PUT /api/workspaces/:id/oauth/client
+      // Set static / manual OAuth client (without running discovery). Operator
+      // provides clientId + optional clientSecret + authMethod. Marks the
+      // workspace as needing re-authorization. Use case: Notion integration
+      // pre-registered on the provider side.
+      const clientMatch = path.match(/^\/api\/workspaces\/([^/]+)\/oauth\/client$/);
+      if (clientMatch && method === 'PUT') {
+        if (!oauth) return sendJson(res, 500, { ok: false, error: { code: 'OAUTH_NOT_CONFIGURED' } });
+        const id = decodeURIComponent(clientMatch[1]);
+        const ws = wm._getRawWorkspace(id);
+        if (!ws) return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND' } });
+        const body = await readBody(req).catch(() => ({}));
+        if (!body?.clientId || typeof body.clientId !== 'string') {
+          return sendJson(res, 400, { ok: false, error: { code: 'INVALID_CLIENT_ID' } });
+        }
+        const authMethod = body.authMethod || 'none';
+        if (!['none', 'client_secret_basic', 'client_secret_post'].includes(authMethod)) {
+          return sendJson(res, 400, { ok: false, error: { code: 'UNSUPPORTED_AUTH_METHOD' } });
+        }
+        const issuer = ws.oauth?.issuer;
+        if (!issuer) {
+          return sendJson(res, 400, { ok: false, error: { code: 'ISSUER_MISSING', message: 'Run discovery first (/authorize)' } });
+        }
+        try {
+          // Purge cache to avoid stale lookup returning the old client
+          if (oauth.removeClient) await oauth.removeClient(id);
+          const reg = await oauth.registerManual({
+            workspaceId: id,
+            issuer,
+            clientId: body.clientId,
+            clientSecret: body.clientSecret ?? null,
+            authMethod,
+          });
+          ws.oauth = {
+            ...ws.oauth,
+            client: {
+              clientId: reg.clientId,
+              clientSecret: reg.clientSecret ?? null,
+              authMethod: reg.authMethod,
+              source: 'manual',
+              registeredAt: new Date().toISOString(),
+            },
+            clientId: reg.clientId,
+            clientSecret: reg.clientSecret ?? null,
+            authMethod: reg.authMethod,
+          };
+          // Invalidate any existing tokens + flag action_needed
+          if (ws.oauth.byIdentity) {
+            for (const identity of Object.keys(ws.oauth.byIdentity)) {
+              if (ws.oauth.byIdentity[identity]?.tokens) {
+                ws.oauth.byIdentity[identity].tokens.accessToken = null;
+              }
+            }
+          }
+          if (ws.oauth.tokens) ws.oauth.tokens.accessToken = null;
+          ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+          for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+            ws.oauthActionNeededBy[identity] = true;
+          }
+          ws.oauthActionNeeded = true;
+          await wm._save();
+          sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: { code: err.code || 'OAUTH_ERROR', message: err.message } });
         }
         return;
       }

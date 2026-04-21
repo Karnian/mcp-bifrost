@@ -12,7 +12,7 @@ import { logger } from '../server/logger.js';
  * - sse:   SSE-based transport (same as http, with notification stream)
  */
 export class McpClientProvider extends BaseProvider {
-  constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null, identity = 'default' } = {}) {
+  constructor(workspaceConfig, { tokenProvider = null, onUnauthorized = null, onAuthFailed = null, identity = 'default', authFailThreshold } = {}) {
     super(workspaceConfig);
     this.transport = workspaceConfig.transport; // "stdio" | "http" | "sse"
     this.stdioConfig = {
@@ -28,7 +28,8 @@ export class McpClientProvider extends BaseProvider {
     // argument. Provider-level identity default is supplied at construction;
     // call-site overrides (7c) will pass an explicit identity.
     this._tokenProvider = tokenProvider; // async (identity?) => string
-    this._onUnauthorized = onUnauthorized; // async (identity?) => void
+    this._onUnauthorized = onUnauthorized; // async (identity?) => void — called on 1st 401
+    this._onAuthFailed = onAuthFailed;   // async (identity?) => void — called after threshold tripped (Phase 10a §4.10a-4)
     this._identity = identity;
 
     // Runtime state
@@ -53,6 +54,19 @@ export class McpClientProvider extends BaseProvider {
     this._streamBackoffMaxMs = 5 * 60_000; // cap at 5 min
     this._streamConnected = false;
     this._streamStopping = false;
+
+    // Phase 10a §4.10a-4: 401 fail-fast
+    // Per-identity consecutive 401 counters. Shared across stream + RPC paths
+    // so repeated RPC 401s also trip the threshold. Reset on any successful
+    // response for the same identity.
+    this._consecutive401Count = new Map(); // identity → count
+    this._authFailThreshold = Number.isFinite(authFailThreshold) ? authFailThreshold
+      : (parseInt(process.env.BIFROST_AUTH_FAIL_THRESHOLD || '', 10) || 3);
+    // Stream state machine for getStreamStatus() public diagnostic API:
+    //   idle | connecting | connected | reconnecting
+    //   stopped:auth_failed | stopped:unsupported | stopped:shutdown
+    //   not_applicable (stdio)
+    this._streamState = (this.transport === 'http' || this.transport === 'sse') ? 'idle' : 'not_applicable';
   }
 
   onToolsChanged(cb) { this._onToolsChanged = cb; }
@@ -139,12 +153,21 @@ export class McpClientProvider extends BaseProvider {
    * Parse `data:` lines and dispatch JSON-RPC responses/notifications.
    * On disconnect, reconnect with exponential backoff (30s → 5min).
    * 401 → call onUnauthorized then reconnect (fresh token).
+   *
+   * Phase 10a §4.10a-4: 401 fail-fast — consecutive 401 count per identity.
+   * After threshold (default 3) trips, calls onAuthFailed() and permanently
+   * stops the stream (`_streamState = 'stopped:auth_failed'`).
    */
   _startNotificationStream() {
     if (this._streamStopping) return;
     if (this._streamAbort) return; // already running
+    if (this._streamState === 'stopped:auth_failed' || this._streamState === 'stopped:unsupported' || this._streamState === 'stopped:shutdown') {
+      return; // permanently stopped
+    }
     const url = this.httpConfig.url;
     const tag = `[McpClient:${this.id}]`;
+    this._streamState = 'connecting';
+    const identity = this._identity || 'default';
     (async () => {
       try {
         const controller = new AbortController();
@@ -157,11 +180,26 @@ export class McpClientProvider extends BaseProvider {
         if (sid) this._sessionId = sid;
 
         if (res.status === 401) {
-          logger.warn(`${tag} stream: 401 unauthorized, attempting refresh + reconnect`);
-          // Try refresh once, then reconnect
-          if (this._onUnauthorized) {
-            try { await this._onUnauthorized(this._identity || 'default'); } catch {}
+          // Phase 10a §4.10a-4: track consecutive 401 per identity.
+          const count = (this._consecutive401Count.get(identity) || 0) + 1;
+          this._consecutive401Count.set(identity, count);
+          logger.warn(`${tag} stream: 401 unauthorized (consecutive=${count}/${this._authFailThreshold})`);
+          if (count >= this._authFailThreshold) {
+            logger.warn(`${tag} stream: 401 threshold tripped, entering stopped:auth_failed`);
+            this._streamState = 'stopped:auth_failed';
+            if (this._onAuthFailed) {
+              try { await this._onAuthFailed(identity); } catch (err) {
+                logger.warn(`${tag} onAuthFailed handler threw: ${err.message}`);
+              }
+            }
+            // Do NOT reconnect — permanent stop
+            return;
           }
+          // Below threshold: try refresh, then reconnect
+          if (this._onUnauthorized) {
+            try { await this._onUnauthorized(identity); } catch { /* refresh failed — next attempt will 401 again */ }
+          }
+          this._streamState = 'reconnecting';
           this._scheduleStreamReconnect();
           return;
         }
@@ -169,19 +207,25 @@ export class McpClientProvider extends BaseProvider {
           // Server doesn't support GET stream — give up silently (not all MCP
           // 2025-03-26 servers implement the optional GET endpoint).
           logger.debug(`${tag} stream: server does not support GET stream (${res.status}), disabling`);
+          this._streamState = 'stopped:unsupported';
           return;
         }
         if (!res.ok || !res.body) {
           logger.warn(`${tag} stream: unexpected status ${res.status}, reconnecting`);
+          this._streamState = 'reconnecting';
           this._scheduleStreamReconnect();
           return;
         }
+        // Successful connect → reset 401 counter for this identity
+        this._consecutive401Count.set(identity, 0);
         this._streamConnected = true;
+        this._streamState = 'connected';
         this._streamBackoffMs = 30_000; // reset on successful connect
         logger.debug(`${tag} stream: connected (session=${sid || 'none'})`);
         await this._readSseStream(res.body);
         // Normal end → reconnect
         this._streamConnected = false;
+        this._streamState = 'reconnecting';
         logger.debug(`${tag} stream: closed, scheduling reconnect`);
         this._scheduleStreamReconnect();
       } catch (err) {
@@ -189,6 +233,7 @@ export class McpClientProvider extends BaseProvider {
         this._streamConnected = false;
         if (err.name !== 'AbortError' && !this._streamStopping) {
           logger.warn(`${tag} stream: error ${err.message}, reconnecting`);
+          this._streamState = 'reconnecting';
           this._scheduleStreamReconnect();
         }
       } finally {
@@ -266,6 +311,7 @@ export class McpClientProvider extends BaseProvider {
 
   _scheduleStreamReconnect() {
     if (this._streamStopping) return;
+    if (this._streamState === 'stopped:auth_failed' || this._streamState === 'stopped:unsupported' || this._streamState === 'stopped:shutdown') return;
     if (this._streamReconnectTimer) return;
     const delay = this._streamBackoffMs;
     this._streamBackoffMs = Math.min(this._streamBackoffMs * 2, this._streamBackoffMaxMs);
@@ -279,6 +325,7 @@ export class McpClientProvider extends BaseProvider {
 
   _stopNotificationStream() {
     this._streamStopping = true;
+    this._streamState = 'stopped:shutdown';
     if (this._streamReconnectTimer) {
       clearTimeout(this._streamReconnectTimer);
       this._streamReconnectTimer = null;
@@ -291,6 +338,17 @@ export class McpClientProvider extends BaseProvider {
   }
 
   isStreamConnected() { return this._streamConnected; }
+
+  /**
+   * Phase 10a §4.10a-4 — public diagnostic API for stream state.
+   * Returns one of:
+   *   'idle' | 'connecting' | 'connected' | 'reconnecting'
+   *   'stopped:auth_failed' | 'stopped:unsupported' | 'stopped:shutdown'
+   *   'not_applicable' (stdio)
+   */
+  getStreamStatus() {
+    return this._streamState;
+  }
 
   async _buildHeaders(identity) {
     const headers = {
@@ -309,6 +367,15 @@ export class McpClientProvider extends BaseProvider {
   }
 
   async _rpcHttp(method, params, { timeoutMs = 30000, notification = false, _retry = false, identity } = {}) {
+    // Phase 10a §4.10a-4: short-circuit if threshold already tripped. Prevents
+    // additional 401 attempts after auth_failed and avoids double-trip of
+    // onAuthFailed handler.
+    if (this._streamState === 'stopped:auth_failed') {
+      const err = new Error('AUTH_FAILED: stream stopped due to repeated 401');
+      err.status = 401;
+      err.code = 'AUTH_FAILED';
+      throw err;
+    }
     const id = this._nextRpcId++;
     const body = notification
       ? { jsonrpc: '2.0', method, params: params || {} }
@@ -344,10 +411,45 @@ export class McpClientProvider extends BaseProvider {
         this._sessionId = sid;
       }
 
-      if (res.status === 401 && this._onUnauthorized && !_retry) {
-        if (!notification) this._pending.delete(id);
-        try { await this._onUnauthorized(identity || this._identity || 'default'); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
-        return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true, identity });
+      if (res.status === 401) {
+        // Phase 10a §4.10a-4: one external call (regardless of _retry) counts
+        // as a single "consecutive 401". Counter is incremented only on the
+        // initial (non-_retry) 401 so refresh+retry doesn't double-increment.
+        const effIdentity = identity || this._identity || 'default';
+        let count;
+        if (_retry) {
+          // Still 401 after refresh — count the pair as one trip.
+          count = this._consecutive401Count.get(effIdentity) || 1;
+        } else {
+          count = (this._consecutive401Count.get(effIdentity) || 0) + 1;
+          this._consecutive401Count.set(effIdentity, count);
+        }
+        if (count >= this._authFailThreshold) {
+          // Threshold tripped — stop retrying, trigger auth-failed path.
+          if (!notification) this._pending.delete(id);
+          this._streamState = 'stopped:auth_failed';
+          if (this._streamAbort) {
+            try { this._streamAbort.abort(); } catch {}
+            this._streamAbort = null;
+          }
+          if (this._onAuthFailed) {
+            try { await this._onAuthFailed(effIdentity); } catch { /* ignore */ }
+          }
+          const err = new Error(`HTTP 401 threshold tripped (consecutive=${count}/${this._authFailThreshold})`);
+          err.status = 401;
+          err.code = 'AUTH_FAILED';
+          throw err;
+        }
+        if (this._onUnauthorized && !_retry) {
+          if (!notification) this._pending.delete(id);
+          try { await this._onUnauthorized(effIdentity); } catch (err) { throw new Error(`HTTP 401 and refresh failed: ${err.message}`); }
+          return this._rpcHttp(method, params, { timeoutMs, notification, _retry: true, identity });
+        }
+      }
+
+      // Phase 10a §4.10a-4: any 2xx result → reset 401 counter for this identity.
+      if (res.status >= 200 && res.status < 300) {
+        this._consecutive401Count.set(identity || this._identity || 'default', 0);
       }
 
       if (notification) return null;
