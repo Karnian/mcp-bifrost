@@ -871,6 +871,53 @@ test('§4.10a-5 (Codex R7 blocker 2): rotateClientUnderMutex locks pending-only 
   }
 });
 
+test('§4.10a-6 (Codex R8 blocker): completeAuthorization rejects stale callback for migrated/disambiguated workspace (currentCid === null)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const { WorkspaceManager } = await import('../server/workspace-manager.js');
+    const wm = new WorkspaceManager();
+    wm.config = {
+      workspaces: [
+        {
+          // Migration disambiguated this workspace: client === null, action_needed === true
+          id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+          oauth: {
+            enabled: true,
+            issuer: 'https://auth.example',
+            client: null,
+            clientId: null,
+            clientSecret: null,
+            metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+          },
+          oauthActionNeeded: true,
+          oauthActionNeededBy: { default: true },
+        },
+      ],
+      server: { port: 3100 },
+    };
+    wm._loaded = true;
+    wm._save = async () => {};
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'NEVER' }), headers: { get: () => null } }) });
+    wm.setOAuthManager(mgr);
+
+    // Simulate a pre-migration pending state
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'PRE_MIGRATION_SHARED_CID',
+      clientSecret: null,
+      authMethod: 'none',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+    // Post-migration, ws.oauth.client is null. Callback must be rejected.
+    const err = await mgr.completeAuthorization(init.state, 'some-code').catch(e => e);
+    assert.equal(err.code, 'STATE_CLIENT_ROTATED', 'null current client + non-null pending clientId must be treated as rotation');
+    // ws.oauth.client stays null (not resurrected)
+    assert.equal(wm.getOAuthClient('w1'), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

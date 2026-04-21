@@ -686,23 +686,34 @@ export class OAuthManager {
     // via _persistTokens after a rotation has already happened.
     return this._withIdentityMutex(entry.workspaceId, identity, async () => {
       // Re-check that the stored client on the workspace still matches the
-      // pending entry. If the operator rotated the client after the browser
-      // began /authorize but before the callback landed, the pending entry
-      // carries the pre-rotation client fields. Reject the callback rather
-      // than overwrite the new client.
+      // pending entry. If the operator rotated the client (or migration
+      // stripped it to null) after the browser began /authorize but before
+      // the callback landed, the pending entry carries the pre-rotation
+      // client fields. Reject the callback rather than overwrite the current
+      // (possibly null/disambiguated) client.
       //
-      // Codex R7 blocker 1: compare ALL client fields, not just clientId.
-      // Same clientId with different authMethod/clientSecret is still a rotation.
+      // Codex R7: compare ALL client fields, not just clientId.
+      // Codex R8: distinguish "first-time authorization" (ws.oauth absent or
+      // not enabled) from "migrated/disambiguated" (ws.oauth.enabled === true
+      // AND ws.oauth.issuer present AND ws.oauth.client === null).
+      //   - First-time: ws.oauth.client may be null because the admin
+      //     route/test hasn't set it yet; accept the callback.
+      //   - Migrated/rotated: ws.oauth was fully configured, then client was
+      //     stripped or replaced — callback must be rejected.
       const ws = this.wm?._getRawWorkspace?.(entry.workspaceId);
       const currentCid = ws?.oauth?.client?.clientId ?? ws?.oauth?.clientId ?? null;
       const currentAuth = ws?.oauth?.client?.authMethod ?? ws?.oauth?.authMethod ?? null;
       const currentSecret = ws?.oauth?.client?.clientSecret ?? ws?.oauth?.clientSecret ?? null;
-      if (currentCid && entry.clientId) {
-        const mismatch = (currentCid !== entry.clientId)
+      const wsHasEstablishedOAuth = !!(ws?.oauth?.enabled && ws?.oauth?.issuer);
+      if (entry.clientId) {
+        const fieldMismatch = (currentCid && currentCid !== entry.clientId)
           || (currentAuth && entry.authMethod && currentAuth !== entry.authMethod)
-          || (currentSecret !== (entry.clientSecret ?? null));
-        if (mismatch) {
-          const err = new Error(`state_client_rotated: workspace client fields diverged since /authorize`);
+          || (currentCid && currentSecret !== (entry.clientSecret ?? null));
+        // Migration-stripped case: client explicitly set to null on an
+        // otherwise-configured workspace.
+        const migrationStripped = wsHasEstablishedOAuth && currentCid === null;
+        if (fieldMismatch || migrationStripped) {
+          const err = new Error(`state_client_rotated: workspace client fields diverged since /authorize (current=${currentCid}, pending=${entry.clientId})`);
           err.code = 'STATE_CLIENT_ROTATED';
           throw err;
         }

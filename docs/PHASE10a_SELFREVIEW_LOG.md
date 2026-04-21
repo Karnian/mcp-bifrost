@@ -115,6 +115,37 @@ Contents:
 
 ---
 
+## Codex review — Round 8 (2026-04-21)
+
+**Verdict**: REVISE (1 High — migration + stale pending callback)
+
+### Finding — Migration-disambiguated workspace can be resurrected by stale callback
+Migration strips a disambiguated workspace's client to `null` but does not
+purge pending auth states for that workspace. `completeAuthorization`'s
+rotation check (post R7) only triggered if `currentCid` was truthy — with
+`currentCid === null` (post-migration), a stale pre-migration callback
+would pass the check and `_persistTokens` would resurrect the old shared
+client, with `_storeTokens` clearing `oauthActionNeeded*`.
+
+**Fix**:
+- `completeAuthorization` rotation check now distinguishes "first-time auth"
+  (`ws.oauth` not enabled or no issuer) from "migration-stripped" (oauth
+  enabled + issuer present + client === null). Migration-stripped case
+  rejects the callback with `STATE_CLIENT_ROTATED`.
+- `scripts/migrate-oauth-clients.mjs --apply` now purges pending auth states
+  for disambiguated workspaces (defense-in-depth against the runtime check).
+  Reports `pendingPurged` count in output.
+
+Also fixed a flaky test by switching `no-op` test to use `--config=` with
+a temp dir instead of REPO_CONFIG_PATH (other tests touch the same path
+and can race during parallel execution).
+
+Verified:
+- `§4.10a-6 (Codex R8 blocker): completeAuthorization rejects stale callback for migrated/disambiguated workspace (currentCid === null)`
+- `§4.10a-6 (Codex R8): --apply purges pending auth states for disambiguated workspaces`
+
+---
+
 ## Codex review — Round 7 (2026-04-21)
 
 **Verdict**: REVISE (2 deeper race blockers)
@@ -361,16 +392,16 @@ Verified: new assertion `§4.10a-1: workspace id "__global__" is reserved`.
 
 ```
 $ npm test
-# tests 322
+# tests 324
 # suites 69
-# pass 320
+# pass 322
 # fail 0
 # cancelled 0
 # skipped 2
 # todo 0
 ```
 
-Phase 10a new tests: 30 (isolation) + 7 (admin-api) + 5 (migration) = 42.
+Phase 10a new tests: 31 (isolation) + 7 (admin-api) + 6 (migration) = 44.
 Plus 3 Phase 6/7 regression-fix tests (aligned with plan-intended breaking changes).
 All existing regression tests pass.
 
@@ -383,8 +414,9 @@ All existing regression tests pass.
 - R5 — REVISE: rotation-vs-refresh race + refreshToken drift → CLOSED
 - R6 — REVISE: /authorize atomic invalidation + completeAuthorization under mutex → CLOSED
 - R7 — REVISE: completeAuthorization full-field rotation check + rotateClientUnderMutex pending-identity lock → CLOSED
+- R8 — REVISE: migration + stale callback resurrection (null-inclusive rotation check + pending purge on migration) → CLOSED
 
-Total Codex round findings: 13 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
+Total Codex round findings: 14 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
 
 ---
 

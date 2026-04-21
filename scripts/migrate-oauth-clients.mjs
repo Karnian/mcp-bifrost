@@ -23,13 +23,14 @@
  *   - Dry-run never writes anywhere.
  */
 
-import { readFile, writeFile, copyFile, chmod, stat } from 'node:fs/promises';
+import { readFile, writeFile, copyFile, chmod, stat, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, '..', 'config', 'workspaces.json');
+const PENDING_PATH = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
 
 function backupPathFor(configPath) {
   // Phase 10a (Codex R2 cleanup): backup file must be a sibling of the actual
@@ -175,11 +176,37 @@ async function main() {
   if (process.platform !== 'win32') {
     try { await chmod(configPath, 0o600); } catch {}
   }
+  // Phase 10a §4.10a-6 (Codex R8): purge pending auth states for disambiguated
+  // workspaces. A stale callback for a workspace whose client was just nulled
+  // could resurrect the pre-migration shared client via completeAuthorization.
+  // The OAuthManager rotation check also protects against this at runtime
+  // (null-inclusive), but purging here is defense-in-depth.
+  let pendingPurged = 0;
+  if (disambiguated.length > 0 && existsSync(PENDING_PATH)) {
+    try {
+      const pendingRaw = await readFile(PENDING_PATH, 'utf-8');
+      const pending = JSON.parse(pendingRaw);
+      const disambiguatedIds = new Set(disambiguated.map(d => d.id));
+      for (const [state, entry] of Object.entries(pending)) {
+        if (entry?.workspaceId && disambiguatedIds.has(entry.workspaceId)) {
+          delete pending[state];
+          pendingPurged++;
+        }
+      }
+      if (pendingPurged > 0) {
+        await writeFile(PENDING_PATH, JSON.stringify(pending, null, 2), 'utf-8');
+        if (process.platform !== 'win32') {
+          try { await chmod(PENDING_PATH, 0o600); } catch {}
+        }
+      }
+    } catch { /* best-effort — the rotation check at runtime still guards */ }
+  }
   console.log(JSON.stringify({
     ok: true,
     action: 'apply',
     backup: backupPath,
     backupMode: process.platform === 'win32' ? 'chmod-skipped' : '0o600',
+    pendingPurged,
     report: { ...report, disambiguated },
   }, null, 2));
 }

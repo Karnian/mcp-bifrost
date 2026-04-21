@@ -113,6 +113,36 @@ test('§4.10a-6: --dry-run reports shared clients + flat-to-nested without writi
   });
 });
 
+test('§4.10a-6 (Codex R8): --apply purges pending auth states for disambiguated workspaces', async () => {
+  await protectRealConfig(async () => {
+    // Also protect the pending state file
+    const pendingPath = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
+    let savedPending = null;
+    const hadPending = await stat(pendingPath).then(() => true).catch(() => false);
+    if (hadPending) savedPending = await readFile(pendingPath, 'utf-8');
+    try {
+      // Seed workspaces.json + pending state
+      await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
+      const seedPending = {
+        'state-stale-B': { workspaceId: 'http-notion-B', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
+        'state-keep-A': { workspaceId: 'http-notion-A', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
+      };
+      await writeFile(pendingPath, JSON.stringify(seedPending, null, 2), 'utf-8');
+      const r = await runScript(['--apply']);
+      assert.equal(r.code, 0, `stderr=${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.pendingPurged, 1, 'must purge the disambiguated workspace pending entry only');
+      const afterPending = JSON.parse(await readFile(pendingPath, 'utf-8'));
+      assert.equal(afterPending['state-stale-B'], undefined, 'pending for disambiguated workspace must be purged');
+      assert.ok(afterPending['state-keep-A'], 'pending for retained workspace must be preserved');
+    } finally {
+      // Restore pending state
+      if (savedPending !== null) await writeFile(pendingPath, savedPending, 'utf-8');
+      else await rm(pendingPath, { force: true });
+    }
+  });
+});
+
 test('§4.10a-6: --apply creates .pre-10a.bak (0o600) + disambiguates shared + migrates flat', async () => {
   await protectRealConfig(async () => {
     await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
@@ -192,7 +222,11 @@ test('§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not rep
 });
 
 test('§4.10a-6: no-op workspace (already migrated or non-OAuth) is safely handled', async () => {
-  await protectRealConfig(async () => {
+  // Use temp --config to avoid races with other migration tests that touch
+  // REPO_CONFIG_PATH.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-'));
+  try {
+    const cfgPath = join(dir, 'my-config.json');
     const fixture = {
       server: { port: 3100 },
       workspaces: [
@@ -209,13 +243,15 @@ test('§4.10a-6: no-op workspace (already migrated or non-OAuth) is safely handl
         },
       ],
     };
-    await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixture, null, 2), 'utf-8');
-    const r = await runScript(['--apply']);
-    assert.equal(r.code, 0);
+    await writeFile(cfgPath, JSON.stringify(fixture, null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--apply']);
+    assert.equal(r.code, 0, `stderr=${r.stderr}`);
     const out = JSON.parse(r.stdout);
     assert.equal(out.report.disambiguated.length, 0, 'no disambiguation needed');
     assert.equal(out.report.flatToNested.length, 0, 'no flat-to-nested needed');
     assert.equal(out.report.alreadyMigrated.length, 1);
     assert.equal(out.report.nonOAuth.length, 1);
-  });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
