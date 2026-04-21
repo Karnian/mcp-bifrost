@@ -414,6 +414,14 @@ Phase 10a 에서는 deferred 됐고 Phase 11-4 (Codex R2 APPROVE) 에서 본격 
 
 Metric 은 여전히 **process-memory only**. 영구 저장 / Prometheus export / cardinality cap 은 deferred (Codex R2 non-blocking — workspace 삭제 시 metric 정리 hook 후속 후보).
 
+### 6-OBS.2b Refresh timeout + AbortController  ✅ **완료 — Phase 11-5 (2026-04-22, Codex R1 APPROVE)**
+
+Phase 11-4 는 metrics 의 `ok` 이중 카운트만 봉쇄. 이후 background refresh fetch 가 timeout 뒤에도 살아 state/audit 를 뒤집는 잔여 race 는 Phase 11-5 에서 해소:
+- `_tokenRequest(entry, params, kind, { signal })` — optional AbortSignal forward
+- `_runRefresh` 에 `AbortController` — timeout `setTimeout` 에서 `controller.abort()` 를 `reject` 전에 호출
+- post-fetch guard — `if (controller.signal.aborted) throw REFRESH_ABORTED` 로 signal-ignoring stub/polyfill 에서도 `_storeTokens` + `oauth.refresh_success` audit 차단
+- 효과: (a) 늦게 도착한 late token 이 byIdentity tokens 덮어쓰기 안 함, (b) `oauth.refresh_success` audit 이 `oauth.refresh_fail` 과 모순되지 않음, (c) rare race 에서 `markAuthFailed` 이후 late resolve 가 quiesced state 를 되살리지 못함 (scenario 6b 테스트로 고정)
+
 ### 6-OBS.3 로그 표준화
 - 동일 workspace + identity 의 401 시퀀스에는 같은 `correlationId` (randomUUID) 부여.
   → audit.jsonl 과 logger 두 경로에서 동일 id 로 상관 가능.

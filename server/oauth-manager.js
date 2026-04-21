@@ -827,7 +827,7 @@ export class OAuthManager {
     return this._tokenRequest(entry, params, 'authorize');
   }
 
-  async _tokenRequest(entry, params, kind) {
+  async _tokenRequest(entry, params, kind, { signal } = {}) {
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' };
     if (entry.authMethod === 'client_secret_basic' && entry.clientSecret) {
       headers['Authorization'] = 'Basic ' + Buffer.from(`${entry.clientId}:${entry.clientSecret}`).toString('base64');
@@ -839,7 +839,14 @@ export class OAuthManager {
       params.set('client_id', entry.clientId);
     }
 
-    const res = await this.fetch(entry.tokenEndpoint, { method: 'POST', headers, body: params.toString() });
+    // Phase 11-5 §8 — optional AbortSignal so refresh-timeout can cancel the
+    // background fetch instead of letting it continue past the caller-observed
+    // failure. Global fetch polyfills / test stubs that ignore `signal` are
+    // still compatible; the caller's abort path just waits for the late
+    // resolve as before.
+    const fetchInit = { method: 'POST', headers, body: params.toString() };
+    if (signal) fetchInit.signal = signal;
+    const res = await this.fetch(entry.tokenEndpoint, fetchInit);
     const body = await res.text();
     if (!res.ok) {
       const err = new Error(`token_endpoint_${kind}_failed: ${res.status} ${sanitize(body).slice(0, 200)}`);
@@ -1067,6 +1074,19 @@ export class OAuthManager {
       return { skipped: true, reason: 'action_needed' };
     }
 
+    // Phase 11-5 §8 — AbortController lets the timeout path cancel the
+    // background fetch + block any post-abort side effects (store tokens,
+    // emit refresh_success audit). Before this change, a timed-out refresh
+    // whose background HTTP later resolved would:
+    //   (a) overwrite ws.oauth.byIdentity[identity].tokens with the late
+    //       response even though the caller observed refresh_timeout,
+    //   (b) emit an `oauth.refresh_success` audit event that contradicts
+    //       the earlier `oauth.refresh_fail` emitted by the outer catch,
+    //   (c) in rare races, revive a client/identity that markAuthFailed
+    //       or rotateClientUnderMutex already quiesced.
+    // Metrics were already fixed in Phase 11-4 (Codex R1 blocker). This
+    // closes the remaining state/audit convergence gap (Codex R2 non-blocker).
+    const controller = new AbortController();
     const task = (async () => {
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
       const prev = this._tokensFor(ws, identity);
@@ -1099,7 +1119,17 @@ export class OAuthManager {
       params.set('refresh_token', prev.refreshToken);
       if (entry.resource) params.set('resource', entry.resource);
 
-      const tokens = await this._tokenRequest(entry, params, 'refresh');
+      const tokens = await this._tokenRequest(entry, params, 'refresh', { signal: controller.signal });
+
+      // Post-fetch abort guard: if the outer timeout already fired while this
+      // fetch was in flight (or the stub ignored `signal` and resolved late),
+      // treat the response as discarded. The caller has already observed
+      // refresh_timeout; we must not overwrite tokens / emit refresh_success.
+      if (controller.signal.aborted) {
+        const err = new Error('refresh_aborted');
+        err.code = 'REFRESH_ABORTED';
+        throw err;
+      }
 
       const updated = {
         accessToken: tokens.access_token,
@@ -1123,7 +1153,13 @@ export class OAuthManager {
 
     let timeoutHandle;
     const timeout = new Promise((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(new Error('refresh_timeout')), this._refreshTimeoutMs);
+      timeoutHandle = setTimeout(() => {
+        // Signal fetch cancellation BEFORE rejecting so the background fetch
+        // promise unwinds promptly instead of waiting for the underlying
+        // socket to respond.
+        controller.abort();
+        reject(new Error('refresh_timeout'));
+      }, this._refreshTimeoutMs);
       timeoutHandle.unref?.();
     });
     task.catch(() => {});

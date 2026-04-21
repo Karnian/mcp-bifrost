@@ -1,8 +1,9 @@
 # 다음 세션 핸드오프
 
-**마지막 세션 완료일**: 2026-04-22 (Phase 11-4 완료)
-**마지막 완료 Phase**: 11-4 — OAuthMetrics 본격 구현 (§6-OBS.2 Codex R2 APPROVE)
-**이전 완료 Phase**: 11-1/2/3 — R10 regression test + Rotate-client helper + Flat-field mirror removal
+**마지막 세션 완료일**: 2026-04-22 (Phase 11-5 완료)
+**마지막 완료 Phase**: 11-5 — Refresh timeout + AbortController (Codex R1 APPROVE)
+**이전 완료 Phase**: 11-4 — OAuthMetrics 본격 구현 (§6-OBS.2 Codex R2 APPROVE)
+**추가 완료 Phase**: 11-1/2/3 — R10 regression test + Rotate-client helper + Flat-field mirror removal
 **Phase 10a 완료**: OAuth Client Isolation (Codex R11 APPROVE)
 
 ---
@@ -103,10 +104,13 @@ node scripts/migrate-oauth-clients.mjs --restore
 **개선**: `rename` 이벤트도 처리하거나 `chokidar` 같은 watcher 로 전환. Phase 11 에서는 scope out — Phase 11-3 의 Migration가 hot-reload에 plug-in되긴 했지만 watcher 자체의 event-type coverage는 별개 이슈.
 **규모**: 소 (2~3시간)
 
-### 8. Refresh timeout + AbortController (Phase 11-4 Codex R2 non-blocking)
-**현상**: `_runRefresh` 가 `refreshTimeoutMs` 초과 시 outer `Promise.race` 는 `refresh_timeout` 으로 reject 하지만 background task 는 계속 살아 token endpoint 응답을 받아 `_storeTokens` + `oauth.refresh_success` audit 까지 남긴다. metrics 는 Phase 11-4 에서 `ok` 이중 카운트를 봉쇄했지만 state/audit convergence 는 여전히 어긋남.
-**개선**: `_tokenRequest()` 에 `AbortSignal` 파라미터 추가, `refreshTimeoutMs` 시 `controller.abort()` 로 background fetch 조기 종료. 기존 `tests/phase6c-refresh.test.js:194` `refresh mutex timeout releases lock` 테스트 호환 유지.
-**규모**: 소 (2~3시간)
+### ~~8. Refresh timeout + AbortController~~ ✅ **완료 2026-04-22 (Phase 11-5)**
+**커밋**: `<HEAD>` — `_tokenRequest(…, { signal })` optional arg + `_runRefresh` 에 `AbortController` 통합 + post-fetch guard + 7 신규 tests
+**Codex**: R1 APPROVE (1 round, blocker 없음). 반영 권장 2건 모두 수용 — (a) scenario 1 deterministic refactor (`setImmediate` → abort-observed promise), (b) quiesced state revive 방지 테스트 (timeout → markAuthFailed → late resolve) 명시적 추가.
+**산출물**:
+- `server/oauth-manager.js._tokenRequest` — 4번째 `{ signal }` optional arg, `fetchInit.signal` forward. authorize 경로 호환.
+- `server/oauth-manager.js._runRefresh` — `AbortController` 생성 → `_tokenRequest({ signal })` + timeout `setTimeout` 에서 `controller.abort()` 를 `reject` 전에 호출 + post-fetch `if (controller.signal.aborted) throw REFRESH_ABORTED` guard (signal-ignoring stub 커버).
+- `tests/phase11-5-refresh-abort.test.js` — 7 tests (standards fetch / stub fetch / signal passthrough / backwards compat / happy path ok 유지 / phase6c 호환 / quiesced state revive 방지).
 
 ### 9. OAuthMetrics cardinality cap / workspace-delete cleanup (Phase 11-4 Codex R2 non-blocking)
 **현상**: in-memory Map 이 삭제된 workspace/identity 튜플에 대한 entry 도 수명 종료 시까지 보유. production 에서 workspace churn 이 크면 메모리 monotonic 증가.
