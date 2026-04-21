@@ -123,8 +123,17 @@ export class WorkspaceManager {
     // Phase 11 §3 — persist migration results so on-disk config converges
     // to nested-only (Phase 10a §3.4 deprecation window is closed). Without
     // this, the scrub only exists in memory until the next unrelated write.
+    // Codex Phase 11-3 R2 follow-up: do NOT silently swallow startup save
+    // failure — log loudly so operators notice a degraded state. We still
+    // allow boot to continue (runtime behaves correctly on the in-memory
+    // migrated config) but surface the persistence failure in errorLog.
     if (mutated) {
-      await this._save().catch(() => {});
+      try {
+        await this._save();
+      } catch (err) {
+        logger.error(`[WorkspaceManager] Phase 11 §3: startup migration could not persist scrubbed config: ${err.message}. Runtime is using in-memory migration; flat fields remain on disk until the next successful save.`);
+        this.logError('config', null, `Phase 11 migration persistence failed: ${err.message}`);
+      }
     }
     await this._initProviders();
     this._startFileWatcher();
@@ -677,7 +686,10 @@ export class WorkspaceManager {
               await this._initProviders();
               if (mutated) {
                 // Persist the scrubbed form so disk converges on single source.
-                this._save().catch(() => {});
+                // Codex Phase 11-3 R2: log failures so operators notice.
+                this._save().catch((err) => {
+                  logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
+                });
               }
               this._notifyChange();
               logger.info('[WorkspaceManager] Config hot-reloaded');

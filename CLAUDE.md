@@ -53,12 +53,13 @@ config/
 ### Retry & Backoff
 `mcp-handler.js`의 `_toolsCall`은 transient 에러(connectivity, rate_limit, provider_outage) 시 최대 2회 재시도 + 지수 백오프(1s → 2s, cap 5s). 429 응답의 `Retry-After` 헤더가 있으면 해당 값을 우선 사용. 최악의 경우 단일 tool call이 ~11초 점유할 수 있음. 비동기 큐 분리는 Phase 9 후보.
 
-### OAuth Client Isolation (Phase 10a — 완료 2026-04-22)
+### OAuth Client Isolation (Phase 10a — 완료 2026-04-22, Phase 11 후속 완료)
 같은 OAuth issuer 에 여러 workspace 연결 시 발생하던 refresh-token supersede 401 루프 해소:
 - `OAuthManager._clientCache` 키가 `${workspaceId}::${issuer}::${authMethod}` — workspace 단위 DCR 격리
 - `_workspaceMutex` (rotation ↔ completeAuthorization 직렬화) + `_identityMutex` (refresh ↔ markAuthFailed 직렬화) FIFO chain — **acquisition order: workspace → identity**
-- `workspaces.json` 의 `ws.oauth.client.*` nested 구조 + 평면필드 1릴리즈 mirror (Phase 11 에서 제거 예정)
-- 마이그레이션: `node scripts/migrate-oauth-clients.mjs --dry-run | --apply | --restore` (`.pre-10a.bak` 자동 생성, `0o600`)
+- `workspaces.json` 의 `ws.oauth.client.*` nested 구조 (Phase 11 에서 평면필드 mirror 제거됨)
+- 마이그레이션: `node scripts/migrate-oauth-clients.mjs --dry-run | --apply | --restore` (`.pre-10a.bak` 자동 생성, `0o600`). Phase 11 부터 `report.flatScrubbed` 항목도 출력.
+- Phase 11 `admin/routes.js._rotateClientAndInvalidate` 헬퍼로 3개 rotation 경로 통합 — pending purge 를 `_workspaceMutex` critical section 안에서 처리해 same-client manual rotation stale-callback window 닫음
 - 상세: `docs/OAUTH_CLIENT_ISOLATION_PLAN.md`, `docs/PHASE10a_SELFREVIEW_LOG.md`
 
 ## Security
@@ -85,5 +86,6 @@ config/
 - Phase 8 — Admin UI 확장 + usage/audit 집계
 - Phase 9 — 관측성 + (상세 `docs/PHASE9_PLAN.md`)
 - **Phase 10a** — OAuth Client Isolation (2026-04-22 완료, Codex R11 APPROVE)
+- **Phase 11** — Follow-ups (2026-04-22 완료): R10 regression test instrumentation, rotate-client helper consolidation (`_rotateClientAndInvalidate`), flat-field mirror 완전 제거 (Phase 10a §3.4 deprecation window close)
 
 다음 세션 시작 시 `docs/NEXT_SESSION.md` 참고.

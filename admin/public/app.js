@@ -255,11 +255,13 @@ function renderOAuthPanel(ws) {
       <td><button type="button" class="btn btn-sm btn-outline" data-reauth-identity="${esc(name)}">Re-authorize</button></td>
     </tr>`).join('');
 
-  // Phase 10a §4.10a-5 — OAuth client block (workspace-scoped client metadata)
+  // Phase 11 §3 — nested-only reads. The Phase 10a §3.4 flat-field mirror
+  // (o.clientId / o.authMethod) is removed on disk and via maskOAuth, so
+  // the UI consults only the nested `client` block.
   const client = o.client || {};
-  const clientId = client.clientId || o.clientId || null;
-  const authMethod = client.authMethod || o.authMethod || 'none';
-  const source = client.source || (clientId ? 'legacy-flat' : null);
+  const clientId = client.clientId || null;
+  const authMethod = client.authMethod || 'none';
+  const source = client.source || null;
   const sourceBadge = source === 'manual'
     ? '<span class="badge" style="background:#eab308;color:#422006;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">MANUAL</span>'
     : source === 'dcr'

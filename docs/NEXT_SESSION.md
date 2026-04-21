@@ -1,7 +1,8 @@
 # 다음 세션 핸드오프
 
-**마지막 세션 완료일**: 2026-04-22
-**마지막 완료 Phase**: 10a — OAuth Client Isolation (Codex R11 APPROVE)
+**마지막 세션 완료일**: 2026-04-22 (Phase 11 완료)
+**마지막 완료 Phase**: 11 — 3 candidates (R10 regression test + Rotate-client helper consolidation + Flat-field mirror removal)
+**이전 완료 Phase**: 10a — OAuth Client Isolation (Codex R11 APPROVE)
 
 ---
 
@@ -54,27 +55,26 @@ node scripts/migrate-oauth-clients.mjs --restore
 
 ## Phase 11 후보 (우선순위 순)
 
-### 1. R10 regression test 강화 (Codex R11 non-blocking 권고)
-**파일**: `tests/phase10a-oauth-isolation.test.js:1037` (§4.10a-5 Codex R10 blocker 1 regression)
-**현재**: rotation 이 `_workspaceMutex` 에 의해 gate 됨만 검증
-**개선**: 실제 acquisition 순서 instrumentation 으로 `workspace → identity` 확정. 예: `_withIdentityMutex` wrapper 를 일시 instrumentation 해서 순서 기록 후 assertion.
-**규모**: 소 (30분)
+### ~~1. R10 regression test 강화 (Codex R11 non-blocking 권고)~~ ✅ **완료 2026-04-22**
+**커밋**: `34a9c81` — 2 새 테스트 (rotateClientUnderMutex / completeAuthorization 모두 instrumented acquisition order 검증)
+**Codex**: R1 APPROVE (1 round). non-blocking 권고 2 건 (shared helper 추출, specific identity assertion) 모두 반영.
 
-### 2. Rotate-client helper 통합 (Codex R4 제안)
-**위치**: `admin/routes.js` 의 3개 rotation path (`POST /api/workspaces/:id/oauth/register`, `PUT /api/workspaces/:id/oauth/client`, `POST /api/workspaces/:id/oauth/authorize`)
-**현재**: 각 path 가 거의 동일한 rotation 로직 반복 (cache purge + pending purge + token invalidation + action_needed + provider recreate)
-**개선**: 단일 `_rotateClientAndInvalidate(wsId, newClient, reason)` helper 로 추출. Drift 방지.
-**규모**: 중 (2~3시간). 테스트 추가 + Codex 리뷰 1~2 rounds 예상
+### ~~2. Rotate-client helper 통합 (Codex R4 제안)~~ ✅ **완료 2026-04-22**
+**커밋**: `85dd3a7` (초안) + `f326be3` (Codex R1 blocker fix — pending purge inside _workspaceMutex)
+**Codex**: R1 CONDITIONAL (same-client manual rotation stale-callback window) → R2 APPROVE (pending purge moved inside mutex). 2 rounds.
+**산출물**: `admin/routes.js._rotateClientAndInvalidate` 헬퍼 — 3개 경로 전부 consolidated. 2 새 consistency 테스트 + 1 R1 regression 테스트.
 
-### 3. Flat-field mirror 제거 (Phase 10a 의 deprecation 완료)
-**위치**: `server/oauth-manager.js` 의 `_persistTokens` (line ~840) — 현재 `ws.oauth.client.*` + `ws.oauth.{clientId,clientSecret,authMethod}` 평면필드 이중 기록
-**현재**: `§3.4 Phase 10a 플랜` — 최소 1 릴리즈 호환 유지 후 제거 예정
-**필요 작업**:
-- 모든 read 경로가 nested `client.*` 만 참조하는지 확인
-- `workspaces.example.json` 에서 평면필드 제거
-- 마이그레이션: nested only 로 저장 + Phase 11 버전 경고 추가
-- 테스트: phase6/7c 의 legacy 평면필드 기대 테스트 삭제/갱신
-**규모**: 중 (반일)
+### ~~3. Flat-field mirror 제거 (Phase 10a 의 deprecation 완료)~~ ✅ **완료 2026-04-22**
+**커밋**: `1664049` (초안) + `278fceb` (Codex R1 NEEDS_WORK fixes) + `<HEAD>` (Codex R2 CONDITIONAL fixes)
+**Codex**: R1 NEEDS_WORK (hot-reload bypass + in-memory-only startup migration + client===null+flat-null 누락) → R2 CONDITIONAL (silent _save failure + admin UI flat fallback + watcher atomic-replace gap) → R3 expected APPROVE. 3 rounds.
+**산출물**:
+- `server/oauth-manager.js._persistTokens`, `admin/routes.js._rotateClientAndInvalidate` — nested-only write + 평면필드 적극 scrub
+- `server/workspace-manager.js._migrateLegacy` — boolean `mutated` 반환, 3가지 케이스(flat-only, nested+flat drift, client===null+flat-null) 모두 scrub
+- `server/workspace-manager.js.load` — startup 시 migration 결과 persist (failure 로깅)
+- `server/workspace-manager.js._startFileWatcher` — hot-reload 경로에도 _migrateLegacy 적용
+- `scripts/migrate-oauth-clients.mjs` — `report.flatScrubbed: [{id}]` 추가
+- `admin/public/app.js` — flat-field fallback 제거
+- 5 새 테스트 (flat scrub, mutated flag, null case)
 
 ### 4. `server/oauth-metrics.js` 본격 구현 (§6-OBS.2 플랜 deferred)
 **현재**: audit event 는 기록되지만 counter 집계 없음
@@ -90,6 +90,11 @@ node scripts/migrate-oauth-clients.mjs --restore
 ### 6. `__global__` namespace 강화 (Codex R1 non-blocking)
 **위치**: `server/oauth-manager.js:_cacheKey` — 현재 `__global__::${issuer}::${authMethod}` legacy 호환
 **개선**: `ws::` / `global::` prefix 로 더 엄격한 schema 분리. 테스트/legacy 경계 명확화.
+**규모**: 소 (2~3시간)
+
+### 7. Watcher atomic-replace gap (Phase 11-3 Codex R2 low)
+**위치**: `server/workspace-manager.js._startFileWatcher` — 현재 `eventType === 'change'` 만 처리. `rename`-style atomic save (에디터의 temp-file+rename)는 hot-reload 를 바이패스함.
+**개선**: `rename` 이벤트도 처리하거나 `chokidar` 같은 watcher 로 전환. Phase 11 에서는 scope out — Phase 11-3 의 Migration가 hot-reload에 plug-in되긴 했지만 watcher 자체의 event-type coverage는 별개 이슈.
 **규모**: 소 (2~3시간)
 
 ---
