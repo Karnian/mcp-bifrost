@@ -115,6 +115,84 @@ Contents:
 
 ---
 
+## Codex review — Round 10 (2026-04-22)
+
+**Verdict**: REVISE (2 High — introduced by R9 fix itself)
+
+### Finding 1 — Chain build order inverted acquisition order
+
+The R9 fix prepended `WORKSPACE_LOCK` to the identity `idents` array assuming
+the chain loop made the first element outermost. Actually:
+
+```js
+let chained = run;
+for (const identity of idents) {          // WORKSPACE_LOCK, default, bot_ci
+  const prev = chained;
+  chained = () => this._withIdentityMutex(wsId, identity, prev);
+}
+// After loop: chained = mutex(bot_ci, mutex(default, mutex(WORKSPACE_LOCK, run)))
+// Runtime acquisition order: bot_ci → default → WORKSPACE_LOCK
+```
+
+So `WORKSPACE_LOCK` was actually innermost. Meanwhile
+`completeAuthorization` acquired `WORKSPACE_LOCK` first. Opposite ordering
+→ real deadlock on the common path (`default` is always in lockSet).
+
+### Finding 2 — Sentinel string collides with valid user identity
+
+`admin/routes.js:203` validates identity with `/^[a-zA-Z0-9_\-.]{1,64}$/`,
+which accepts `__workspace__`. If a user picked that identity name,
+`completeAuthorization` acquired the SAME key twice (outer
+`_withIdentityMutex(wsId, WORKSPACE_LOCK, ...)` + inner
+`_withIdentityMutex(wsId, '__workspace__', ...)` ) → self-deadlock.
+
+### Fix — Separate `_workspaceMutex` Map
+
+Root-cause fix: workspace-level locking is conceptually distinct from
+per-identity locking, so give it its own Map + helper:
+
+- New `this._workspaceMutex = new Map()` in constructor
+- New `_withWorkspaceMutex(workspaceId, fn)` helper — same FIFO chain
+  pattern but keyed by `workspaceId` alone
+- `rotateClientUnderMutex()` wraps its inner chain in
+  `_withWorkspaceMutex(workspaceId, async () => { ...existing identity chain... })`.
+  Identity chain no longer contains `WORKSPACE_LOCK`.
+- `completeAuthorization()` wraps its body in `_withWorkspaceMutex(workspaceId, ...)`
+  (outer) + the existing `_withIdentityMutex(workspaceId, identity, ...)` (inner).
+- `WORKSPACE_LOCK` constant removed — no longer needed.
+
+Benefits:
+- **Unambiguous lock ordering**: workspace lock is a completely separate
+  mechanism, always acquired outermost by convention. No chain reversal
+  trap.
+- **No namespace collision**: identity name `__workspace__` now coexists
+  peacefully with workspace locks because they use different Maps.
+
+Acquisition order (both paths, identical):
+1. `_withWorkspaceMutex(wsId)` outer
+2. `_withIdentityMutex(wsId, identity)` inner (completeAuthorization) OR
+   chain of per-identity mutexes (rotation)
+3. `fn()` body
+
+No refresh/markAuthFailed coupling change — they still acquire only
+identity mutex. That's correct: they don't mutate workspace client so
+don't need workspace coordination.
+
+### Verification
+
+- Existing R9 test (`§4.10a-5 (Codex R9 blocker)`) still passes after
+  refactor — confirms the stale-callback resurrection is still closed.
+- New test `§4.10a-5 (Codex R10 blocker 1 regression): separate
+  _workspaceMutex — rotation acquires workspace lock as outermost` —
+  asserts rotation strictly waits for workspace lock release.
+- New test `§4.10a-5 (Codex R10 blocker 2 regression): identity named
+  "__workspace__" does not self-deadlock` — calls
+  `initializeAuthorization` + `completeAuthorization` with the
+  adversarial identity name, asserts normal completion (no hang).
+- Full suite: 327 / 325 pass / 0 fail / 2 skipped (+2 R10 regression tests).
+
+---
+
 ## Codex review — Round 9 (2026-04-22)
 
 **Verdict**: REVISE (1 High — stale callback resurrection interleaving)
@@ -463,14 +541,14 @@ Verified: new assertion `§4.10a-1: workspace id "__global__" is reserved`.
 $ npm test
 # tests 324
 # suites 69
-# pass 323
+# pass 325
 # fail 0
 # cancelled 0
 # skipped 2
 # todo 0
 ```
 
-Phase 10a new tests: 32 (isolation, +1 R9) + 7 (admin-api) + 6 (migration) = 45.
+Phase 10a new tests: 34 (isolation, +1 R9 +2 R10) + 7 (admin-api) + 6 (migration) = 47.
 Plus 3 Phase 6/7 regression-fix tests (aligned with plan-intended breaking changes).
 All existing regression tests pass.
 
@@ -484,9 +562,10 @@ All existing regression tests pass.
 - R6 — REVISE: /authorize atomic invalidation + completeAuthorization under mutex → CLOSED
 - R7 — REVISE: completeAuthorization full-field rotation check + rotateClientUnderMutex pending-identity lock → CLOSED
 - R8 — REVISE: migration + stale callback resurrection (null-inclusive rotation check + pending purge on migration) → CLOSED
-- R9 — REVISE: rotation during callback's _exchangeCode can resurrect OLD_CLIENT (first-time identity) → CLOSED via WORKSPACE_LOCK workspace-level guard in `_identityMutex`
+- R9 — REVISE: rotation during callback's _exchangeCode can resurrect OLD_CLIENT (first-time identity) → CLOSED via WORKSPACE_LOCK workspace-level guard (initially shared-Map design)
+- R10 — REVISE: R9 fix had chain ordering inversion + sentinel identity collision → CLOSED by moving workspace locking to a dedicated `_workspaceMutex` Map with its own helper (`_withWorkspaceMutex`)
 
-Total Codex round findings: 15 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
+Total Codex round findings: 17 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
 
 ---
 

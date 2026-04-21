@@ -1034,6 +1034,95 @@ test('§4.10a-5 (Codex R9 blocker): WORKSPACE_LOCK — rotation must wait for in
   }
 });
 
+test('§4.10a-5 (Codex R10 blocker 1 regression): separate _workspaceMutex — rotation acquires workspace lock as outermost (no order inversion)', async () => {
+  // Codex R10 proved the prior sentinel-identity design built the chain in
+  // reverse: `idents = [SENTINEL, default, bot_ci]` actually acquired
+  // `bot_ci -> default -> SENTINEL` at runtime. The fix uses a separate
+  // `_workspaceMutex` Map that is always outermost by construction.
+  //
+  // This test drives a rotation while a callback holds the workspace lock,
+  // and asserts the rotation's per-identity work is GATED on the workspace
+  // lock (not the other way around).
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'OLD', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'OLD', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT', expiresAt: new Date(Date.now() + 3600_000).toISOString() } } },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{}', headers: { get: () => null } }) });
+    const order = [];
+    // Hold the workspace mutex busy.
+    let releaseWs;
+    const wsHeld = new Promise(r => { releaseWs = r; });
+    const wsBusy = mgr._withWorkspaceMutex('w1', async () => {
+      order.push('ws_busy_start');
+      await wsHeld;
+      order.push('ws_busy_end');
+    });
+    // Start rotation — it should wait for the workspace lock, then proceed
+    // regardless of identity-mutex state.
+    const rotation = mgr.rotateClientUnderMutex('w1', null, async () => { order.push('rot_fn'); });
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(!order.includes('rot_fn'), 'rotation must not proceed while workspace lock is held');
+    releaseWs();
+    await Promise.all([wsBusy, rotation]);
+    assert.deepEqual(order, ['ws_busy_start', 'ws_busy_end', 'rot_fn'],
+      'rotation must proceed strictly AFTER the workspace lock is released');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-5 (Codex R10 blocker 2 regression): identity named "__workspace__" does not self-deadlock (separate Map)', async () => {
+  // Codex R10 found that the admin identity regex `[a-zA-Z0-9_\\-.]{1,64}`
+  // allowed `__workspace__` as a valid user identity. If workspace locks
+  // and identity locks shared the same Map, completeAuthorization for
+  // identity='__workspace__' would try to acquire the same key twice
+  // (outer workspace + inner identity) → self-deadlock. The R10 fix uses
+  // a separate _workspaceMutex Map so the two never collide regardless
+  // of identity name.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'OLD', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'OLD', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT', expiresAt: new Date(Date.now() + 3600_000).toISOString() } } },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({
+      ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'AT_ws', refresh_token: 'RT_ws', token_type: 'Bearer', expires_in: 3600 }), headers: { get: () => null },
+    }) });
+
+    // Kick off authorize for the adversarial identity name.
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'OLD', clientSecret: null, authMethod: 'none',
+      identity: '__workspace__',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+
+    // Must complete without hang (test runner has a default timeout and
+    // would fail if it deadlocked).
+    const result = await mgr.completeAuthorization(init.state, 'some-code');
+    assert.ok(result, 'completeAuthorization must return (no self-deadlock)');
+    assert.ok(ws.oauth.byIdentity['__workspace__'], 'identity named "__workspace__" must be persisted normally');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

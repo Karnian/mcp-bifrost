@@ -98,14 +98,6 @@ async function writeJsonSecure(path, data, opts) {
   return chmod0600(path, opts);
 }
 
-// Phase 10a Codex R9 blocker — reserved sentinel identity used as workspace-wide
-// guard in `_identityMutex`. rotateClientUnderMutex and completeAuthorization
-// both acquire it first so a slow callback (inside _exchangeCode) cannot be
-// overtaken by a rotation, and rotation cannot overtake a mid-flight callback.
-// Chosen name is prefixed/suffixed with `__` to avoid collision with any real
-// identity label (validated by identity regex in admin/routes.js).
-const WORKSPACE_LOCK = '__workspace__';
-
 export class OAuthManager {
   constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort, refreshTimeoutMs = REFRESH_TIMEOUT_MS } = {}) {
     this.wm = wm;
@@ -124,6 +116,13 @@ export class OAuthManager {
     // Same Map so that markAuthFailed ↔ refresh are mutually exclusive. Key is
     // `${workspaceId}::${identity}` — identity-level parallelism preserved.
     this._identityMutex = new Map();
+    // Phase 10a Codex R10 blocker — workspace-wide mutex (separate from
+    // _identityMutex to avoid sentinel-identity collision + make lock
+    // ordering unambiguous). Used by rotateClientUnderMutex and
+    // completeAuthorization as the OUTERMOST layer — per-identity mutex
+    // remains inside for R6 refresh/markAuthFailed coordination.
+    // Key: workspaceId. FIFO chain pattern, same as _identityMutex.
+    this._workspaceMutex = new Map();
     // Phase 10a §4.10a-4: auth-fail threshold (401 count at which fail-fast trips).
     this._authFailThreshold = parseInt(process.env.BIFROST_AUTH_FAIL_THRESHOLD || '', 10) || 3;
     this._fileSecurityWarning = isWindows(platform); // true if any file couldn't be chmod'd
@@ -578,25 +577,25 @@ export class OAuthManager {
     const explicit = (identities && identities.length) ? identities : [];
     const fromByIdentity = Object.keys(ws?.oauth?.byIdentity || { default: true });
     const lockSet = new Set([...explicit, ...fromByIdentity, ...pendingIdentities]);
-    // Phase 10a Codex R9 blocker — always acquire WORKSPACE_LOCK FIRST so any
-    // completeAuthorization that has already consumed its pending row (and so
-    // isn't visible via pendingIdentities) still forces rotation to wait. Lock
-    // ordering: WORKSPACE_LOCK always precedes per-identity chains — prevents
-    // deadlock because completeAuthorization also acquires WORKSPACE_LOCK before
-    // the per-identity mutex.
-    const idents = [WORKSPACE_LOCK, ...Array.from(lockSet)];
-    // Chain through each identity's mutex sequentially so every in-flight
-    // refresh/markAuthFailed/completeAuthorization on this workspace quiesces
-    // before we mutate.
-    let result;
-    const run = async () => { result = await fn(); };
-    let chained = run;
-    for (const identity of idents) {
-      const prev = chained;
-      chained = () => this._withIdentityMutex(workspaceId, identity, prev);
-    }
-    await chained();
-    return result;
+    const idents = Array.from(lockSet);
+    // Phase 10a Codex R9/R10 — acquire workspace-wide lock FIRST (outermost)
+    // so any in-flight completeAuthorization quiesces before rotation mutates.
+    // Separate Map from _identityMutex: no sentinel collision, unambiguous
+    // ordering (no deadlock vs _withIdentityMutex).
+    return this._withWorkspaceMutex(workspaceId, async () => {
+      // Chain through each identity's mutex sequentially so every in-flight
+      // refresh/markAuthFailed on this workspace quiesces before we mutate.
+      // (completeAuthorization already quiesced via the outer workspace lock.)
+      let result;
+      const run = async () => { result = await fn(); };
+      let chained = run;
+      for (const identity of idents) {
+        const prev = chained;
+        chained = () => this._withIdentityMutex(workspaceId, identity, prev);
+      }
+      await chained();
+      return result;
+    });
   }
 
   /**
@@ -689,12 +688,14 @@ export class OAuthManager {
     const workspaceId = entryPeek.workspaceId;
     const identity = entryPeek.identity || 'default';
 
-    // Phase 10a Codex R9 blocker — workspace-level guard. Prevents rotation
+    // Phase 10a Codex R9/R10 — workspace-wide guard (separate Map from
+    // _identityMutex so no sentinel/identity-name collision, and lock
+    // ordering is unambiguous vs rotateClientUnderMutex). Prevents rotation
     // from slipping in between our pending-consumption and _persistTokens(),
-    // including during the slow _exchangeCode() HTTP round-trip. Applied as
-    // an outer layer; the per-identity mutex inside preserves the R6 contract
-    // against refresh/markAuthFailed for the same identity.
-    return this._withIdentityMutex(workspaceId, WORKSPACE_LOCK, async () => {
+    // including during the slow _exchangeCode() HTTP round-trip. The inner
+    // per-identity mutex below preserves the R6 contract against
+    // refresh/markAuthFailed for the same identity.
+    return this._withWorkspaceMutex(workspaceId, async () => {
       // Re-load pending under the guard — atomic consumption. If another
       // callback (very unlikely, same state only valid once) or a TTL reaper
       // raced to delete it, fail fast rather than proceed with stale entry.
@@ -945,6 +946,32 @@ export class OAuthManager {
     // the Map entry for never-refreshed identities.
     next.finally(() => {
       if (this._identityMutex.get(key) === next) this._identityMutex.delete(key);
+    }).catch(() => {});
+    return next;
+  }
+
+  /**
+   * Phase 10a Codex R10 — workspace-wide FIFO chain mutex. Separate from
+   * `_identityMutex` on purpose:
+   *   (1) Unambiguous lock ordering — this is always the OUTERMOST lock
+   *       (both rotation and callback acquire it before any identity
+   *       mutex), so no deadlock vs `_withIdentityMutex`.
+   *   (2) No collision with user-chosen identity labels (admin allows
+   *       `__workspace__` as a valid identity name per its regex, which
+   *       would self-deadlock if the same Map were used).
+   *
+   * Serializes `rotateClientUnderMutex` against `completeAuthorization`
+   * for the same workspace. `refresh`/`markAuthFailed` intentionally do
+   * NOT take this — they don't mutate the workspace client so don't need
+   * workspace-level coordination.
+   */
+  _withWorkspaceMutex(workspaceId, fn) {
+    const key = workspaceId;
+    const prev = this._workspaceMutex.get(key) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => fn());
+    this._workspaceMutex.set(key, next);
+    next.finally(() => {
+      if (this._workspaceMutex.get(key) === next) this._workspaceMutex.delete(key);
     }).catch(() => {});
     return next;
   }
