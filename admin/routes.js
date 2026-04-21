@@ -33,17 +33,24 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
   // so all three share one source of truth and drift is eliminated.
   //
   // Contract (matches what the three routes did individually):
-  //   1. Commit the new client under _workspaceMutex via
-  //      oauth.rotateClientUnderMutex(wsId, null, commitFn) — so every
-  //      in-flight refresh/markAuthFailed quiesces before ws.oauth mutates
-  //      and a late callback cannot resurrect the pre-rotation client.
+  //   1. Commit the new client + purge pending auth states under
+  //      _workspaceMutex via oauth.rotateClientUnderMutex(wsId, null, fn)
+  //      — so every in-flight refresh/markAuthFailed quiesces before
+  //      ws.oauth mutates AND no stale completeAuthorization callback can
+  //      slip in between client-commit and pending-purge (a narrow race
+  //      when the "rotated" client tuple happens to equal the old one,
+  //      e.g. operator re-enters the same manual clientId). Pending purge
+  //      MUST happen inside the same workspace lock as the commit —
+  //      moving it outside the lock reopens that stale-callback window
+  //      (Codex Phase 11 R1 blocker).
   //   2. Inside the mutex: replace ws.oauth.client (nested), mirror flat
   //      fields (§3.4 deprecation window), null ALL tokens under
-  //      ws.oauth.byIdentity and legacy ws.oauth.tokens, and set
+  //      ws.oauth.byIdentity and legacy ws.oauth.tokens, set
   //      oauthActionNeededBy[identity]=true for every known identity
-  //      (+ ws.oauthActionNeeded for 'default' compat).
-  //   3. Outside the mutex: purge pending auth states (§4.10a-5 Codex R2b2)
-  //      and persist (wm._save).
+  //      (+ ws.oauthActionNeeded for 'default' compat), THEN purge
+  //      pending auth states.
+  //   3. Outside the mutex: wm._save() (can be re-invoked safely) and
+  //      optional provider recreate.
   //   4. If recreateProvider is true (default): call wm._createProvider(ws)
   //      so the new client is effective immediately (POST/PUT paths).
   //      /authorize does NOT recreate (it expects the browser to follow up
@@ -99,12 +106,20 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         }
         ws.oauthActionNeeded = true;
       }
+      // Phase 11 §2 (Codex R1 blocker): purge pending auth states INSIDE the
+      // workspace-locked critical section. If a caller re-enters the same
+      // client tuple (e.g. manual rotation with unchanged clientId), the
+      // client-field discriminator in completeAuthorization cannot detect
+      // rotation — the pending entry looks fresh. Only the one-shot pending
+      // consumption is a reliable guard, and we must ensure no completeAuth
+      // callback can grab the pending entry between our client-commit above
+      // and the purge below. Keeping both under _workspaceMutex closes that
+      // window: completeAuthorization also acquires _workspaceMutex, so it
+      // FIFO-chains behind this rotation and sees an already-purged pending.
+      if (oauth.purgePendingForWorkspace) {
+        await oauth.purgePendingForWorkspace(wsId);
+      }
     });
-    // Pending purge + save — outside the mutex (they don't mutate the client
-    // and pending lives in a separate file anyway).
-    if (oauth.purgePendingForWorkspace) {
-      await oauth.purgePendingForWorkspace(wsId);
-    }
     await wm._save();
     if (recreateProvider && wm._createProvider) {
       wm._createProvider(ws);
@@ -356,14 +371,11 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           // it neither rotates client fields semantically nor invalidates
           // tokens — and must preserve the existing registeredAt.
           if (isRotation) {
-            // Note: helper purges pending INSIDE its sequence. The prior
-            // behavior purged BEFORE the rotation mutex; helper runs it after.
-            // Functionally equivalent — pending purge only affects browser
-            // callbacks, and we're about to create a brand-new pending entry
-            // via initializeAuthorization below, so stale entries can't
-            // survive this request either way. Any rogue callback racing
-            // this window would already be gated by _workspaceMutex via
-            // completeAuthorization.
+            // Helper purges pending auth states INSIDE the workspace-locked
+            // critical section (Codex Phase 11 R1 fix — prevents stale
+            // callback from consuming the pending row during same-client
+            // manual rotation where the field discriminator can't detect
+            // the rotation).
             await _rotateClientAndInvalidate(id, {
               clientId,
               clientSecret: clientSecret ?? null,

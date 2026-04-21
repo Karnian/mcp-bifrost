@@ -547,6 +547,88 @@ test('§Phase11-2: POST /oauth/register and PUT /oauth/client BOTH recreate prov
   }
 });
 
+test('§Phase11-2 (Codex R1 regression): same-client manual rotation purges pending states (stale callback can\'t resurrect)', async () => {
+  // Codex Phase 11 R1 found that if the helper purged pending states
+  // OUTSIDE the workspace mutex, a stale completeAuthorization callback
+  // could race with the purge when the "rotated" client tuple equals the
+  // pre-rotation tuple (e.g. operator re-enters the same manual clientId).
+  // In that case completeAuthorization's client-field discriminator sees
+  // matching fields and accepts the stale pending entry → token persist
+  // against the wrong state.
+  //
+  // The fix: purge pending INSIDE the workspace-locked critical section,
+  // so completeAuthorization (which FIFO-chains behind on the same
+  // _workspaceMutex) always sees an already-purged pending.
+  //
+  // This test drives exactly that scenario: existing pending state + PUT
+  // /oauth/client with the SAME clientId, then verifies the pending entry
+  // is gone.
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase11-r1-'));
+  const mock = new MockOAuthServer({ dcrEnabled: true });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: {
+        enabled: true, issuer: base,
+        client: { clientId: 'SAME_CLIENT', authMethod: 'none', source: 'manual', registeredAt: '2020-01-01' },
+        clientId: 'SAME_CLIENT', authMethod: 'none',
+        metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+        byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT' } } },
+        tokens: { accessToken: 'AT', refreshToken: 'RT' },
+      },
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+
+    // Seed a pending auth state for this workspace (simulates a browser
+    // that started /authorize but never hit /callback yet).
+    const init = await oauth.initializeAuthorization('w1', {
+      issuer: base,
+      clientId: 'SAME_CLIENT',
+      clientSecret: null,
+      authMethod: 'none',
+      identity: 'default',
+      authServerMetadata: { authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token` },
+    });
+    // Sanity: pending exists.
+    const pendingBefore = await oauth._loadPending();
+    assert.ok(pendingBefore[init.state], 'pending must exist before rotation');
+
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      // PUT /oauth/client with the SAME clientId (operator re-enters same
+      // value). isRotation=true from the route's perspective, but the
+      // client-field discriminator in completeAuthorization cannot
+      // distinguish this from the prior client.
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/oauth/client`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: 'SAME_CLIENT', clientSecret: null, authMethod: 'none' }),
+      });
+      assert.equal(r.status, 200, 'same-client PUT must succeed');
+
+      // Critical assertion: the stale pending entry must be GONE.
+      const pendingAfter = await oauth._loadPending();
+      assert.equal(pendingAfter[init.state], undefined,
+        'pending auth state must be purged after client rotation (stale callback cannot resurrect)');
+
+      // And a stale completeAuthorization attempt must fail.
+      await assert.rejects(
+        () => oauth.completeAuthorization(init.state, 'some-code'),
+        /state_not_found_or_already_used|STATE_NOT_FOUND/,
+        'stale completeAuthorization must be rejected after rotation',
+      );
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1b: /api/oauth/discover response does NOT include cachedClient field', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
   const mock = new MockOAuthServer({ dcrEnabled: true });
