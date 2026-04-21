@@ -115,6 +115,49 @@ Contents:
 
 ---
 
+## Codex review — Round 11 (2026-04-22)
+
+**Verdict**: **APPROVE — production-ready**
+
+Final confirmation from Codex after the R10 `_workspaceMutex` refactor:
+
+- R10 blocker 1 closed: `_workspaceMutex` is a separate map at
+  `oauth-manager.js:119`, taken in `rotateClientUnderMutex:564` and
+  `completeAuthorization:670`. In both paths it is acquired before any
+  identity mutex.
+- R10 blocker 2 closed: workspace and identity locks are fully disjoint
+  (`_withWorkspaceMutex:968` vs `_withIdentityMutex:940` — different
+  maps). An identity named `__workspace__` no longer aliases the
+  workspace lock.
+- R6/R7/R8/R9 behavior preserved:
+  - Inner identity mutex retained in `completeAuthorization:724`
+  - Pending-only identities still folded into rotation at `:570`
+  - Field/null rotation checks unchanged at `:740`
+  - R9 window stays closed (workspace mutex spans pending-consumption
+    through token-persist at `:698`)
+- Lock ordering clean: production paths are `workspace → identity` for
+  rotation/callback, and `identity` only for refresh/markAuthFailed. No
+  `identity → workspace` acquisition path exists.
+- `_workspaceMutex` cleanup uses the same tail-delete pattern as
+  `_identityMutex` at `:968` — correct.
+
+### Non-blocking residual (Phase 11 suggestion)
+
+`tests/phase10a-oauth-isolation.test.js:1037` (R10 blocker 1 regression)
+proves rotation is gated by the workspace lock, but does not strictly
+distinguish "workspace outermost" from a hypothetical future
+`identity → workspace` inversion. The production code is correct; this
+is a test-strength gap, not a blocker. Consider strengthening the test
+in Phase 11 to also instrument the acquisition order.
+
+### Verification (Codex local)
+- `phase10a-oauth-isolation`: 34/34 pass
+- `phase6c-refresh`: 9/9 pass
+- `phase7c-byidentity`: not runnable in Codex sandbox (localhost bind
+  EPERM) — verified locally here at 327/325/0/2
+
+---
+
 ## Codex review — Round 10 (2026-04-22)
 
 **Verdict**: REVISE (2 High — introduced by R9 fix itself)
@@ -564,8 +607,9 @@ All existing regression tests pass.
 - R8 — REVISE: migration + stale callback resurrection (null-inclusive rotation check + pending purge on migration) → CLOSED
 - R9 — REVISE: rotation during callback's _exchangeCode can resurrect OLD_CLIENT (first-time identity) → CLOSED via WORKSPACE_LOCK workspace-level guard (initially shared-Map design)
 - R10 — REVISE: R9 fix had chain ordering inversion + sentinel identity collision → CLOSED by moving workspace locking to a dedicated `_workspaceMutex` Map with its own helper (`_withWorkspaceMutex`)
+- **R11 — APPROVE: production-ready**. Non-blocking residual: strengthen R10 regression test in Phase 11.
 
-Total Codex round findings: 17 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
+Total Codex round findings: 17 blockers + 2 Phase-11 cleanup suggestions + 1 Phase-11 test-strength improvement. All blockers closed with code + test evidence. **Phase 10a approved.**
 
 ---
 
