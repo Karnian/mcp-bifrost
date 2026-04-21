@@ -5,13 +5,18 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 // --- Phase 8e: Modal dialog (replaces window.prompt) ---
-function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '취소' }) {
+// Phase 11-9 §12-2: accepts an optional `bodyHtml` block rendered above
+// the form so callers can inline provider-specific guidance (Notion
+// integration link, copyable redirect URI, etc.) without spawning a
+// second modal layer.
+function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '취소', bodyHtml = '' }) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'bifrost-modal-overlay';
     overlay.innerHTML = `
       <div class="bifrost-modal">
         <h3>${title}</h3>
+        ${bodyHtml ? `<div class="bifrost-modal-body">${bodyHtml}</div>` : ''}
         <form class="bifrost-modal-form">
           ${fields.map((f, i) => `
             <label>${f.label}
@@ -25,6 +30,30 @@ function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '�
         </form>
       </div>`;
     document.body.appendChild(overlay);
+    // Phase 11-9: wire up any copy-to-clipboard buttons embedded in
+    // bodyHtml. Buttons must carry `data-copy-target="#selector"`. We
+    // flash a "Copied" label so operators get feedback without leaving
+    // the modal.
+    overlay.querySelectorAll('[data-copy-target]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const sel = btn.getAttribute('data-copy-target');
+        const target = overlay.querySelector(sel);
+        if (!target) return;
+        const text = target.textContent || target.value || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          const original = btn.textContent;
+          btn.textContent = '복사됨';
+          btn.disabled = true;
+          setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+        } catch {
+          // Clipboard API blocked (non-HTTPS / older browser) — highlight
+          // the text so the operator can Cmd+C manually.
+          if (target.select) target.select();
+        }
+      });
+    });
     const form = overlay.querySelector('form');
     const firstInput = form.querySelector('input');
     if (firstInput) firstInput.focus();
@@ -42,6 +71,64 @@ function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '�
       if (e.target === overlay) { overlay.remove(); resolve(null); }
     });
   });
+}
+
+// Phase 11-9 §12-2 — provider-specific setup guidance for the static
+// client wizard. Keys are substrings matched case-insensitively against
+// the workspace URL. If nothing matches, the `generic` block is used.
+// Each entry returns HTML with an integration-console link + concise
+// steps; the caller appends a copyable redirect-URI row.
+const STATIC_CLIENT_GUIDES = {
+  'notion.com': {
+    label: 'Notion',
+    docsUrl: 'https://www.notion.so/my-integrations',
+    steps: [
+      'Notion Integrations 페이지에서 <b>New integration</b> 클릭',
+      'Associated workspace, name 설정 후 <b>Save</b>',
+      '<b>Configure integration settings</b> 에서 <b>Public integration</b> 선택',
+      '아래 Redirect URI 를 <b>Redirect URIs</b> 필드에 붙여넣기',
+      '<b>OAuth client ID</b> 와 <b>OAuth client secret</b> 을 복사해 아래 폼에 입력',
+    ],
+  },
+  'github.com': {
+    label: 'GitHub',
+    docsUrl: 'https://github.com/settings/applications/new',
+    steps: [
+      'GitHub > Developer settings > OAuth Apps 에서 <b>New OAuth App</b> 클릭',
+      'Homepage / Application name 설정',
+      '아래 Redirect URI 를 <b>Authorization callback URL</b> 에 붙여넣기',
+      'Register application 클릭 후 Client ID / Generate a new client secret',
+    ],
+  },
+};
+
+function guideFor(workspaceUrl) {
+  if (!workspaceUrl) return null;
+  const u = String(workspaceUrl).toLowerCase();
+  for (const needle of Object.keys(STATIC_CLIENT_GUIDES)) {
+    if (u.includes(needle)) return STATIC_CLIENT_GUIDES[needle];
+  }
+  return null;
+}
+
+function renderStaticClientBody({ redirectUri, guide }) {
+  const heading = guide
+    ? `<p><b>${esc(guide.label)}</b> 은 Dynamic Client Registration 을 지원하지 않아 Public integration 으로 직접 등록해야 합니다.</p>`
+    : `<p>이 MCP 서버는 Dynamic Client Registration 을 지원하지 않습니다. Provider 콘솔에서 OAuth client 를 직접 발급하세요.</p>`;
+  const stepsHtml = guide
+    ? `<ol class="bifrost-modal-steps">${guide.steps.map(s => `<li>${s}</li>`).join('')}</ol>
+       <p><a href="${esc(guide.docsUrl)}" target="_blank" rel="noopener noreferrer">→ ${esc(guide.label)} integration 페이지 열기</a></p>`
+    : '';
+  const redirectRow = redirectUri
+    ? `<div class="bifrost-modal-copyrow">
+         <label>Redirect URI (provider 에 등록)</label>
+         <div class="bifrost-modal-copybox">
+           <code id="bifrost-redirect-uri">${esc(redirectUri)}</code>
+           <button type="button" class="btn-copy" data-copy-target="#bifrost-redirect-uri">복사</button>
+         </div>
+       </div>`
+    : '';
+  return `${heading}${stepsHtml}${redirectRow}`;
 }
 
 const state = {
@@ -725,8 +812,17 @@ async function runOAuthFlow(wsId, { identity = 'default' } = {}) {
   try {
     let res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { identity });
     // Phase 7d: if DCR is unsupported, prompt for a manual client_id and retry.
+    // Phase 11-9 §12-2: enrich the prompt with a provider-specific guide
+    // + copyable redirect URI so operators don't have to dig through docs.
     if (!res.ok && res.error?.code === 'DCR_UNSUPPORTED') {
-      const manual = await promptManualClientCreds();
+      const [wsRes, redirectRes] = await Promise.all([
+        api('GET', `/api/workspaces/${encodeURIComponent(wsId)}`),
+        api('GET', '/api/oauth/redirect-uri'),
+      ]);
+      const manual = await promptManualClientCreds({
+        workspaceUrl: wsRes?.data?.url || null,
+        redirectUri: redirectRes?.data?.redirectUri || null,
+      });
       if (!manual) return false;
       res = await api('POST', `/api/workspaces/${encodeURIComponent(wsId)}/authorize`, { identity, manual });
     }
@@ -768,11 +864,31 @@ async function runOAuthFlow(wsId, { identity = 'default' } = {}) {
 /**
  * Phase 7d — Prompt the user for a manually-issued OAuth client when the
  * MCP server does not support Dynamic Client Registration (RFC 7591).
- * Returns `{ clientId, clientSecret, authMethod }` or null if cancelled.
+ *
+ * Phase 11-9 §12-2 — accepts an optional context so the modal can show
+ * provider-specific setup guidance (Notion / GitHub integration consoles)
+ * alongside a copyable redirect URI. The static wizard copy reduces
+ * round-trips between Bifrost and the provider's docs.
+ *
+ * @param {object} [ctx]
+ * @param {string} [ctx.workspaceUrl] — MCP server URL, used to pick the
+ *   right provider guide (notion.com → Notion, github.com → GitHub).
+ * @param {string} [ctx.redirectUri] — redirect URI to register in the
+ *   provider console. Rendered with a copy-to-clipboard button.
+ * @returns {Promise<{clientId,clientSecret,authMethod}|null>}
  */
-async function promptManualClientCreds() {
+async function promptManualClientCreds(ctx = {}) {
+  const guide = guideFor(ctx.workspaceUrl);
+  const bodyHtml = renderStaticClientBody({
+    redirectUri: ctx.redirectUri || null,
+    guide,
+  });
+  const title = guide
+    ? `${guide.label} OAuth Client 직접 등록`
+    : 'DCR 미지원 — 수동 OAuth Client 입력';
   const result = await bifrostModal({
-    title: 'DCR 미지원 — 수동 OAuth Client 입력',
+    title,
+    bodyHtml,
     fields: [
       { label: 'Client ID (필수)', placeholder: 'client_id', required: true },
       { label: 'Client Secret (public client 는 빈값)', placeholder: '' },

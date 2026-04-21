@@ -393,6 +393,27 @@ body {
 .bifrost-modal-actions .btn-cancel { background: var(--bg); color: var(--text-muted); }
 .bifrost-modal-actions .btn-submit { background: var(--accent); color: #fff; }
 
+/* Phase 11-9 §12-2: static-client wizard guidance block */
+.bifrost-modal-body { margin-bottom: 1rem; font-size: .85rem; color: var(--text-muted); line-height: 1.5; }
+.bifrost-modal-body a { color: var(--accent); text-decoration: none; }
+.bifrost-modal-body a:hover { text-decoration: underline; }
+.bifrost-modal-steps { padding-left: 1.25rem; margin: .5rem 0; }
+.bifrost-modal-steps li { margin-bottom: .35rem; }
+.bifrost-modal-steps b { color: var(--text); }
+.bifrost-modal-copyrow { margin-top: .75rem; }
+.bifrost-modal-copyrow label { display: block; margin-bottom: .35rem; color: var(--text); font-weight: 600; font-size: .8rem; }
+.bifrost-modal-copybox { display: flex; align-items: center; gap: .5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .45rem .65rem; }
+.bifrost-modal-copybox code {
+  flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem;
+  color: var(--text); overflow-wrap: anywhere;
+}
+.bifrost-modal-copybox .btn-copy {
+  padding: .3rem .6rem; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--panel); color: var(--text); cursor: pointer; font-size: .75rem;
+}
+.bifrost-modal-copybox .btn-copy:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+.bifrost-modal-copybox .btn-copy:disabled { opacity: .7; cursor: default; }
+
 /* Responsive */
 @media (max-width: 640px) {
   .drawer { width: 100vw; }

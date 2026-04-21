@@ -35,8 +35,18 @@ function stableStringify(labels) {
 }
 
 export class OAuthMetrics {
-  constructor() {
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.maxEntries=10000] — soft cap on the counter Map.
+   *   When exceeded, oldest-insertion entries are evicted one at a time
+   *   (Map preserves insertion order). A running Bifrost with churn on
+   *   workspace/identity/issuer labels can otherwise grow unbounded since
+   *   the recorder is process-memory only. Set to 0 to disable the cap
+   *   (tests).
+   */
+  constructor({ maxEntries = 10_000 } = {}) {
     this._counters = new Map();
+    this._maxEntries = Math.max(0, maxEntries | 0);
   }
 
   inc(name, labels = {}, delta = 1) {
@@ -55,6 +65,17 @@ export class OAuthMetrics {
       normalized[k] = String(v);
     }
     this._counters.set(key, { name, labels: normalized, value: delta });
+    // Phase 11-6 §9 — soft cap. Evict the oldest insertion-order entries
+    // until size fits. The cap is only hit by pathological high-cardinality
+    // churn (workspace/identity/issuer tuples never stabilize); the
+    // expected steady-state label space is tiny.
+    if (this._maxEntries > 0) {
+      while (this._counters.size > this._maxEntries) {
+        const firstKey = this._counters.keys().next().value;
+        if (firstKey === undefined) break;
+        this._counters.delete(firstKey);
+      }
+    }
   }
 
   snapshot() {
@@ -67,6 +88,34 @@ export class OAuthMetrics {
 
   reset() {
     this._counters.clear();
+  }
+
+  /**
+   * Phase 11-6 §9 — drop every counter whose `workspace` label matches the
+   * supplied id. Called from OAuthManager.removeClient() so hard-delete
+   * and TTL-expire paths of WorkspaceManager also purge stale metrics
+   * entries. Returns the number of entries removed so callers (or tests)
+   * can surface the effect.
+   */
+  pruneWorkspace(workspaceId) {
+    if (!workspaceId) return 0;
+    const target = String(workspaceId);
+    let removed = 0;
+    for (const [key, entry] of this._counters) {
+      if (entry.labels?.workspace === target) {
+        this._counters.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Observability: how many counter entries are currently resident. Admin
+   * UI + tests can use this to sanity-check the soft cap + prune paths.
+   */
+  size() {
+    return this._counters.size;
   }
 }
 

@@ -581,6 +581,16 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // GET /api/oauth/redirect-uri — expose the exact redirect URI the
+      // server expects. Phase 11-9 §12-2: the static-client wizard needs
+      // this to tell the operator what to register in the provider's
+      // integration console (Notion, GitHub, etc.).
+      if (path === '/api/oauth/redirect-uri' && method === 'GET') {
+        const uri = oauth?.getRedirectUri?.() || null;
+        sendJson(res, 200, { ok: true, data: { redirectUri: uri } });
+        return;
+      }
+
       // GET /api/oauth/metrics — in-memory OAuth counter snapshot (Phase 11-4 §6-OBS.2).
       // Prefer the recorder wired into extras (server/index.js injects it) but
       // fall back to `oauth.metrics` so the admin UI keeps working even if the

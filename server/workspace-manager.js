@@ -83,7 +83,15 @@ function maskCredentials(credentials) {
 }
 
 export class WorkspaceManager {
-  constructor() {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.configDir] — override the config directory (tests
+   *   inject a tmpdir). Defaults to `<repo>/config`. The three files
+   *   (workspaces.json, workspaces.backup.json, workspaces.tmp.json) are
+   *   placed inside this directory, so tests can exercise the atomic
+   *   rename + hot-reload path without touching the real config.
+   */
+  constructor({ configDir = CONFIG_DIR } = {}) {
     this.config = { workspaces: [], server: { port: 3100 }, tunnel: { enabled: false, fixedDomain: '' } };
     this.providers = new Map();
     this.healthCache = new Map();
@@ -96,21 +104,28 @@ export class WorkspaceManager {
     this.auditLog = []; // last 10 config changes
     this.oauthAuditLog = []; // separate ring (50) for oauth.* events
     this.fileSecurityWarning = process.platform === 'win32';
+    // Phase 11-8 §7 — DI-able paths so watcher + atomic save can be
+    // exercised against a tmpdir in tests. Production callers pass no arg
+    // and land on the shared CONFIG_DIR constant.
+    this._configDir = configDir;
+    this._configPath = join(configDir, 'workspaces.json');
+    this._backupPath = join(configDir, 'workspaces.backup.json');
+    this._tmpPath = join(configDir, 'workspaces.tmp.json');
   }
 
   async load() {
-    if (!existsSync(CONFIG_PATH)) {
+    if (!existsSync(this._configPath)) {
       this._loaded = true;
       await this._save();
       this._startFileWatcher();
       return;
     }
     try {
-      const raw = await readFile(CONFIG_PATH, 'utf-8');
+      const raw = await readFile(this._configPath, 'utf-8');
       this.config = JSON.parse(raw);
     } catch {
-      if (existsSync(BACKUP_PATH)) {
-        const backup = await readFile(BACKUP_PATH, 'utf-8');
+      if (existsSync(this._backupPath)) {
+        const backup = await readFile(this._backupPath, 'utf-8');
         this.config = JSON.parse(backup);
         logger.error('[WorkspaceManager] Loaded from backup');
       } else {
@@ -307,14 +322,14 @@ export class WorkspaceManager {
     this._writeLock = this._writeLock.then(async () => {
       this._saving = true;
       try {
-        if (existsSync(CONFIG_PATH)) {
-          await copyFile(CONFIG_PATH, BACKUP_PATH);
-          await this._chmod0600(BACKUP_PATH);
+        if (existsSync(this._configPath)) {
+          await copyFile(this._configPath, this._backupPath);
+          await this._chmod0600(this._backupPath);
         }
-        await writeFile(TMP_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
-        await this._chmod0600(TMP_PATH);
-        await rename(TMP_PATH, CONFIG_PATH);
-        await this._chmod0600(CONFIG_PATH);
+        await writeFile(this._tmpPath, JSON.stringify(this.config, null, 2), 'utf-8');
+        await this._chmod0600(this._tmpPath);
+        await rename(this._tmpPath, this._configPath);
+        await this._chmod0600(this._configPath);
       } finally {
         this._saving = false;
       }
@@ -662,42 +677,79 @@ export class WorkspaceManager {
   }
 
   _startFileWatcher() {
-    if (!existsSync(CONFIG_PATH)) return;
+    if (!existsSync(this._configPath)) return;
+    let watcher;
     try {
-      const watcher = watch(CONFIG_PATH, { persistent: false });
-      (async () => {
-        for await (const event of watcher) {
-          if (event.eventType === 'change') {
-            // Skip reload if we triggered this write ourselves
-            if (this._saving) continue;
-            try {
-              const raw = await readFile(CONFIG_PATH, 'utf-8');
-              const newConfig = JSON.parse(raw);
-              this.config = newConfig;
-              if (!this.config.workspaces) this.config.workspaces = [];
-              // Phase 11 §3 — apply legacy→nested migration on hot-reload too.
-              // Without this, an externally-edited config carrying flat
-              // ws.oauth.{clientId,clientSecret,authMethod} would bypass the
-              // Phase 11 scrub and reach runtime unnormalized — causing
-              // mis-resolved client fields (reads are nested-only now) and
-              // leaking flat clientSecret through masked admin views (maskOAuth
-              // no longer masks flat fields).
-              const mutated = this._migrateLegacy();
-              await this._initProviders();
-              if (mutated) {
-                // Persist the scrubbed form so disk converges on single source.
-                // Codex Phase 11-3 R2: log failures so operators notice.
-                this._save().catch((err) => {
-                  logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
-                });
-              }
-              this._notifyChange();
-              logger.info('[WorkspaceManager] Config hot-reloaded');
-            } catch { /* ignore parse errors during write */ }
-          }
+      watcher = watch(this._configPath, { persistent: false });
+    } catch { /* fs.watch not supported or file gone */
+      return;
+    }
+    this._watcher = watcher;
+    (async () => {
+      for await (const event of watcher) {
+        // Phase 11-8 §7 — accept `rename` alongside `change`. Editors that
+        // save atomically (VSCode, vim, sed -i, our own _save()) publish
+        // `rename` because the written file is a temp + renamed over the
+        // path, so the inode flips. With only `change` we missed these
+        // hot-reloads entirely.
+        if (event.eventType !== 'change' && event.eventType !== 'rename') continue;
+        // Skip reload if we triggered this write ourselves
+        if (this._saving) continue;
+        // For rename-style atomic writes the file may briefly disappear
+        // between the unlink and the new file landing. Tolerate that by
+        // giving the rename a short grace period before concluding the
+        // file really went away.
+        let fileExists = existsSync(this._configPath);
+        if (!fileExists && event.eventType === 'rename') {
+          await new Promise(r => setTimeout(r, 50));
+          fileExists = existsSync(this._configPath);
         }
-      })().catch(() => {}); // watcher closed
-    } catch { /* fs.watch not supported or file gone */ }
+        if (!fileExists) {
+          // File gone for good (operator removed it). Stop watching;
+          // nothing to reload from.
+          break;
+        }
+        try {
+          const raw = await readFile(this._configPath, 'utf-8');
+          const newConfig = JSON.parse(raw);
+          this.config = newConfig;
+          if (!this.config.workspaces) this.config.workspaces = [];
+          // Phase 11 §3 — apply legacy→nested migration on hot-reload too.
+          // Without this, an externally-edited config carrying flat
+          // ws.oauth.{clientId,clientSecret,authMethod} would bypass the
+          // Phase 11 scrub and reach runtime unnormalized — causing
+          // mis-resolved client fields (reads are nested-only now) and
+          // leaking flat clientSecret through masked admin views (maskOAuth
+          // no longer masks flat fields).
+          const mutated = this._migrateLegacy();
+          await this._initProviders();
+          if (mutated) {
+            // Persist the scrubbed form so disk converges on single source.
+            // Codex Phase 11-3 R2: log failures so operators notice.
+            this._save().catch((err) => {
+              logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
+            });
+          }
+          this._notifyChange();
+          logger.info('[WorkspaceManager] Config hot-reloaded');
+        } catch { /* ignore parse errors during write */ }
+        // Phase 11-8 §7 — after a rename the underlying watcher is now
+        // bound to the OLD inode and will stop delivering events for the
+        // replacement file. Close the old watcher and re-arm on the new
+        // inode. `change` events keep the existing watcher valid so we
+        // don't rebind on every write.
+        if (event.eventType === 'rename') {
+          try { watcher.close(); } catch { /* already closed */ }
+          // schedule rebind on next tick so the current async-iter
+          // finishes cleanly.
+          setImmediate(() => {
+            if (this._watcher === watcher) this._watcher = null;
+            this._startFileWatcher();
+          });
+          break;
+        }
+      }
+    })().catch(() => {}); // watcher closed
   }
 
   onWorkspaceChange(callback) {

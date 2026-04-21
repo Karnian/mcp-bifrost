@@ -129,10 +129,11 @@ test('§4.10a-1: same issuer, two workspaces → different cache keys (no cross-
     const regA = await mgr.registerClient('https://auth.example', md, { workspaceId: 'ws-A', authMethod: 'none' });
     const regB = await mgr.registerClient('https://auth.example', md, { workspaceId: 'ws-B', authMethod: 'none' });
     assert.notEqual(regA.clientId, regB.clientId, 'each workspace must get a distinct clientId');
-    // Cache should have both entries under scoped keys
+    // Cache should have both entries under scoped keys.
+    // Phase 11-7 §6 — scoped keys are prefixed with `ws::` for schema clarity.
     const rawCache = JSON.parse(await readFile(join(dir, 'oauth-issuer-cache.json'), 'utf-8'));
-    const keyA = 'ws-A::https://auth.example::none';
-    const keyB = 'ws-B::https://auth.example::none';
+    const keyA = 'ws::ws-A::https://auth.example::none';
+    const keyB = 'ws::ws-B::https://auth.example::none';
     assert.ok(rawCache[keyA], `cache must have key ${keyA}`);
     assert.ok(rawCache[keyB], `cache must have key ${keyB}`);
   } finally {

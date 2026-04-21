@@ -250,17 +250,104 @@ export class OAuthManager {
   // ────────────────────────────────────────────────────────────────────────
   // Client cache (Phase 10a — workspace-scoped DCR / manual client reuse)
   //
-  // Key format: `${workspaceId}::${issuer}::${authMethod}`.
-  // Legacy tests / callers that don't pass workspaceId land in the reserved
-  // `__global__` bucket — equivalent to the Phase 6 issuer-level cache. The
-  // production code paths (initializeAuthorization / registerManual /
-  // admin/routes.js) all pass workspaceId so the production behavior is
-  // strictly workspace-isolated.
+  // Phase 11-7 §6 — explicit key schema:
+  //   `ws::${workspaceId}::${issuer}::${authMethod}`   (scoped, production)
+  //   `global::${issuer}::${authMethod}`               (legacy 2-arg callers)
+  //
+  // Legacy pre-11-7 keys (`__global__::…` and bare `${wsId}::…`) are
+  // migrated on first load via `_migrateLegacyCacheKeys`. Production code
+  // paths (initializeAuthorization / registerManual / admin/routes.js)
+  // always pass workspaceId so the runtime behavior is strictly
+  // workspace-isolated; the `global::` bucket remains only for legacy
+  // tests + 2-arg callers.
 
   async _loadIssuerCache() {
     if (this._clientCache) return this._clientCache;
-    this._clientCache = (await readJson(this._issuerCachePath)) || {};
+    const raw = (await readJson(this._issuerCachePath)) || {};
+    // Phase 11-7 §6 — upgrade any pre-existing cache file to the explicit
+    // prefix schema (ws::/global::). Runs once per process; the rewritten
+    // cache is persisted on the next save so later loads skip migration.
+    const { migrated, mutated } = this._migrateLegacyCacheKeys(raw);
+    this._clientCache = migrated;
+    if (mutated) {
+      // Phase 11-7 Codex R1 — surface persist failure so operators notice.
+      // Migration is idempotent so the next startup retries, but silent
+      // swallow on the write-on-read path hurts diagnosability.
+      await this._saveIssuerCache().catch((err) => {
+        try {
+          // logger is optional in this module — keep guarded to avoid
+          // cycling through a broken logger during cache warmup.
+          const msg = err?.message || String(err);
+          // eslint-disable-next-line no-console
+          console.warn(`[OAuthManager] Phase 11-7 migration persist failed: ${msg}`);
+        } catch { /* noop */ }
+      });
+    }
     return this._clientCache;
+  }
+
+  /**
+   * Phase 11-7 §6 — convert legacy cache keys into the `ws::` / `global::`
+   * prefix schema. The v1 heuristic (`split('::').length === 3`) failed on
+   * RFC 3986 issuers that contain `::` — notably IPv6 literals like
+   * `https://[2001:db8::1]` and path-segmented issuers per RFC 8414. v2
+   * recognises a bare-scoped legacy key by **first and last** `::`
+   * delimiter, and validates the trailing authMethod against the known
+   * enum so non-matching hand-edited keys still survive as pass-through.
+   *
+   *   `__global__::${issuer}::${authMethod}`                → `global::${issuer}::${authMethod}`
+   *   `${wsId}::${issuer}::${authMethod}` (any `::` in issuer) → `ws::${wsId}::${issuer}::${authMethod}`
+   *   `ws::...` / `global::...`                             → already new schema, pass-through
+   *   anything else                                         → pass-through (preserve hand edits)
+   *
+   * Returns `{ migrated, mutated }` so `_loadIssuerCache` can decide
+   * whether to persist the rewritten map.
+   */
+  _migrateLegacyCacheKeys(cache) {
+    // Known auth-method enum — matches pickAuthMethod + the supported set.
+    // Extending this requires touching the write path too, so the enum
+    // is small and stable.
+    const KNOWN_AUTH_METHODS = new Set(['none', 'client_secret_basic', 'client_secret_post']);
+    const migrated = {};
+    let mutated = false;
+    for (const [key, entry] of Object.entries(cache || {})) {
+      if (key.startsWith('ws::') || key.startsWith('global::')) {
+        migrated[key] = entry;
+        continue;
+      }
+      if (key.startsWith('__global__::')) {
+        const newKey = `global::${key.slice('__global__::'.length)}`;
+        migrated[newKey] = entry;
+        mutated = true;
+        continue;
+      }
+      // Legacy scoped key: `${wsId}::${issuer}::${authMethod}`.
+      // Parse by first-and-last delimiter so issuers that themselves
+      // contain `::` (IPv6 literals, RFC 8414 paths) survive. The
+      // workspaceId has a strict alphanumeric-hyphen regex (see
+      // workspace-schema.js `namespacePattern`), so it cannot contain
+      // `::` — that's why first-delim is safe to locate it.
+      const firstIdx = key.indexOf('::');
+      const lastIdx = key.lastIndexOf('::');
+      if (firstIdx > 0 && lastIdx > firstIdx) {
+        const wsId = key.slice(0, firstIdx);
+        const authMethod = key.slice(lastIdx + 2);
+        const issuer = key.slice(firstIdx + 2, lastIdx);
+        // Only migrate if authMethod is from the known enum. Otherwise
+        // preserve as-is — a hand-edited experimental key shouldn't get
+        // silently rewritten into the scoped schema.
+        if (KNOWN_AUTH_METHODS.has(authMethod) && wsId.length > 0 && issuer.length > 0) {
+          const newKey = `ws::${wsId}::${issuer}::${authMethod}`;
+          migrated[newKey] = entry;
+          mutated = true;
+          continue;
+        }
+      }
+      // Unrecognized — keep as-is rather than silently drop. If operators
+      // hand-edited the cache, this preserves their data.
+      migrated[key] = entry;
+    }
+    return { migrated, mutated };
   }
 
   async _saveIssuerCache() {
@@ -269,13 +356,20 @@ export class OAuthManager {
   }
 
   _cacheKey(arg1, arg2, arg3) {
-    // Supports two call forms for back-compat:
-    //   _cacheKey(issuer, authMethod)                   → legacy (global scope)
-    //   _cacheKey(workspaceId, issuer, authMethod)      → Phase 10a scoped
+    // Phase 11-7 §6 — explicit prefix schema so legacy/global and
+    // workspace-scoped keys are structurally distinguishable and can't
+    // collide even if a workspace id happens to match a former sentinel
+    // token.
+    //
+    //   _cacheKey(issuer, authMethod)                   → `global::${issuer}::${authMethod}`
+    //   _cacheKey(workspaceId, issuer, authMethod)      → `ws::${wsId}::${issuer}::${authMethod}`
+    //
+    // Legacy keys (pre-11-7) are rewritten at load time by
+    // `_loadIssuerCache` so production caches upgrade transparently.
     if (arg3 === undefined) {
-      return `__global__::${arg1}::${arg2}`;
+      return `global::${arg1}::${arg2}`;
     }
-    return `${arg1}::${arg2}::${arg3}`;
+    return `ws::${arg1}::${arg2}::${arg3}`;
   }
 
   async getCachedClient(issuerOrWsId, authMethodOrIssuer, maybeAuthMethod) {
@@ -326,7 +420,10 @@ export class OAuthManager {
    */
   async removeClient(workspaceId) {
     const cache = await this._loadIssuerCache();
-    const prefix = `${workspaceId}::`;
+    // Phase 11-7 §6 — new schema uses `ws::${workspaceId}::` prefix.
+    // _loadIssuerCache() has already migrated any legacy keys, so there
+    // is exactly one prefix to match here.
+    const prefix = `ws::${workspaceId}::`;
     let removed = 0;
     for (const key of Object.keys(cache)) {
       if (key.startsWith(prefix)) {
@@ -343,6 +440,11 @@ export class OAuthManager {
         }));
       }
     }
+    // Phase 11-6 §9 — drop metric counters bound to this workspace so the
+    // in-memory counter map doesn't monotonically grow as workspaces
+    // churn. Runs AFTER cache purge so it's observable even if the
+    // workspace had no cache entry (e.g. manual-only register path).
+    try { this.metrics?.pruneWorkspace?.(workspaceId); } catch { /* swallow */ }
     return removed;
   }
 
