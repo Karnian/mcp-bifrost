@@ -115,6 +115,32 @@ Contents:
 
 ---
 
+## Codex review — Round 3 (2026-04-21)
+
+**Verdict**: REVISE (1 high + 1 medium — both on the `/authorize` endpoint)
+
+### Finding 1 (High) — Stale-pending-state still open on `/authorize` rotation path
+R2 closed the pending-purge on `/oauth/register` and `/oauth/client`, but
+missed the inline rotation path on `POST /api/workspaces/:id/authorize`:
+`forceRegister === true` or `body.manual.clientId` also rotates the client,
+yet no purge happens. Old pending entries could resurrect the pre-rotation client.
+
+**Fix**: In `admin/routes.js /authorize` handler, compute `isRotation = forceRegister || (manual && manual.clientId)` and call `oauth.purgePendingForWorkspace(id)` before `_save()`.
+
+Verified: new test `§4.10a-2 (Codex R3): /authorize purges pending auth states when rotating client via forceRegister`.
+
+### Finding 2 (Medium) — authMethod whitelist missing on `/authorize` manual path
+R2 added the whitelist to `/oauth/register` and `/oauth/client`, but `/authorize`
+with `manual.authMethod` still passed any string through to `_tokenRequest()`,
+which silently falls back to public client for unrecognized methods.
+
+**Fix**: Same whitelist applied to `/authorize` manual branch → 400 on
+unsupported authMethod.
+
+Verified: new test `§4.10a-2 (Codex R3): /authorize rejects unsupported authMethod on manual path`.
+
+---
+
 ## Codex review — Round 2 (2026-04-21)
 
 **Verdict**: REVISE (2 blockers + 2 Phase-11 cleanup)

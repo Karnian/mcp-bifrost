@@ -256,6 +256,72 @@ test('§4.10a-5 (Codex R2 cleanup): POST /oauth/register manual also whitelists 
   }
 });
 
+test('§4.10a-2 (Codex R3): /authorize rejects unsupported authMethod on manual path', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
+  const mock = new MockOAuthServer({ dcrEnabled: false });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: null,
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manual: { clientId: 'CID', authMethod: 'private_key_jwt' } }),
+      });
+      assert.equal(r.status, 400);
+      const body = await r.json();
+      assert.equal(body.error.code, 'UNSUPPORTED_AUTH_METHOD');
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-2 (Codex R3): /authorize purges pending auth states when rotating client via forceRegister', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
+  const mock = new MockOAuthServer({ dcrEnabled: true });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: { enabled: true, issuer: base, client: { clientId: 'OLD', authMethod: 'none', source: 'dcr' }, clientId: 'OLD', authMethod: 'none', metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` } },
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+    // Seed pending state for w1 as if a previous /authorize had begun
+    const pending = await oauth._loadPending();
+    pending['state-old'] = { workspaceId: 'w1', identity: 'default', issuer: base, clientId: 'OLD', clientSecret: null, authMethod: 'none', verifier: 'v', tokenEndpoint: `${base}/token`, resource: null, expiresAt: Date.now() + 60_000 };
+    await oauth._savePending();
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forceRegister: true }),
+      });
+      assert.equal(r.status, 200);
+      const after = await oauth._loadPending();
+      assert.equal(after['state-old'], undefined, 'old pending entry must be purged on client rotation');
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1b: /api/oauth/discover response does NOT include cachedClient field', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
   const mock = new MockOAuthServer({ dcrEnabled: true });
