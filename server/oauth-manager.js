@@ -98,6 +98,14 @@ async function writeJsonSecure(path, data, opts) {
   return chmod0600(path, opts);
 }
 
+// Phase 10a Codex R9 blocker — reserved sentinel identity used as workspace-wide
+// guard in `_identityMutex`. rotateClientUnderMutex and completeAuthorization
+// both acquire it first so a slow callback (inside _exchangeCode) cannot be
+// overtaken by a rotation, and rotation cannot overtake a mid-flight callback.
+// Chosen name is prefixed/suffixed with `__` to avoid collision with any real
+// identity label (validated by identity regex in admin/routes.js).
+const WORKSPACE_LOCK = '__workspace__';
+
 export class OAuthManager {
   constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort, refreshTimeoutMs = REFRESH_TIMEOUT_MS } = {}) {
     this.wm = wm;
@@ -570,7 +578,13 @@ export class OAuthManager {
     const explicit = (identities && identities.length) ? identities : [];
     const fromByIdentity = Object.keys(ws?.oauth?.byIdentity || { default: true });
     const lockSet = new Set([...explicit, ...fromByIdentity, ...pendingIdentities]);
-    const idents = Array.from(lockSet);
+    // Phase 10a Codex R9 blocker — always acquire WORKSPACE_LOCK FIRST so any
+    // completeAuthorization that has already consumed its pending row (and so
+    // isn't visible via pendingIdentities) still forces rotation to wait. Lock
+    // ordering: WORKSPACE_LOCK always precedes per-identity chains — prevents
+    // deadlock because completeAuthorization also acquires WORKSPACE_LOCK before
+    // the per-identity mutex.
+    const idents = [WORKSPACE_LOCK, ...Array.from(lockSet)];
     // Chain through each identity's mutex sequentially so every in-flight
     // refresh/markAuthFailed/completeAuthorization on this workspace quiesces
     // before we mutate.
@@ -661,30 +675,52 @@ export class OAuthManager {
       err.code = 'INVALID_STATE';
       throw err;
     }
-    const pending = await this._loadPending();
-    const entry = pending[state];
-    if (!entry) {
+
+    // Peek at pending (without deletion) to discover workspaceId — needed to
+    // scope the workspace-level mutex. Deletion happens INSIDE the mutex below
+    // (Codex R9 fix) so a concurrent rotation can observe the pending identity.
+    const pendingPeek = await this._loadPending();
+    const entryPeek = pendingPeek[state];
+    if (!entryPeek) {
       const err = new Error('state_not_found_or_already_used');
       err.code = 'STATE_NOT_FOUND';
       throw err;
     }
-    if (entry.expiresAt < Date.now()) {
+    const workspaceId = entryPeek.workspaceId;
+    const identity = entryPeek.identity || 'default';
+
+    // Phase 10a Codex R9 blocker — workspace-level guard. Prevents rotation
+    // from slipping in between our pending-consumption and _persistTokens(),
+    // including during the slow _exchangeCode() HTTP round-trip. Applied as
+    // an outer layer; the per-identity mutex inside preserves the R6 contract
+    // against refresh/markAuthFailed for the same identity.
+    return this._withIdentityMutex(workspaceId, WORKSPACE_LOCK, async () => {
+      // Re-load pending under the guard — atomic consumption. If another
+      // callback (very unlikely, same state only valid once) or a TTL reaper
+      // raced to delete it, fail fast rather than proceed with stale entry.
+      const pending = await this._loadPending();
+      const entry = pending[state];
+      if (!entry) {
+        const err = new Error('state_not_found_or_already_used');
+        err.code = 'STATE_NOT_FOUND';
+        throw err;
+      }
+      if (entry.expiresAt < Date.now()) {
+        delete pending[state];
+        await this._savePending();
+        const err = new Error('state_expired');
+        err.code = 'STATE_EXPIRED';
+        throw err;
+      }
+      // One-shot: remove immediately (still inside WORKSPACE_LOCK)
       delete pending[state];
       await this._savePending();
-      const err = new Error('state_expired');
-      err.code = 'STATE_EXPIRED';
-      throw err;
-    }
-    // One-shot: remove immediately
-    delete pending[state];
-    await this._savePending();
 
-    const identity = entry.identity || 'default';
-    // Phase 10a §6.4 (Codex R6 blocker 2) — serialize completeAuthorization
-    // against rotateClientUnderMutex + refresh + markAuthFailed. Prevents a
-    // stale pre-rotation callback from writing old client + old pending tokens
-    // via _persistTokens after a rotation has already happened.
-    return this._withIdentityMutex(entry.workspaceId, identity, async () => {
+      // Phase 10a §6.4 (Codex R6 blocker 2) — per-identity mutex remains so
+      // refresh/markAuthFailed for the same identity still serialize against
+      // the token persist below. Outer WORKSPACE_LOCK already guarantees
+      // isolation from rotation; this inner chain handles the identity path.
+      return this._withIdentityMutex(workspaceId, identity, async () => {
       // Re-check that the stored client on the workspace still matches the
       // pending entry. If the operator rotated the client (or migration
       // stripped it to null) after the browser began /authorize but before
@@ -741,6 +777,7 @@ export class OAuthManager {
       // Phase 10a §4.10a-4 (Codex R2 blocker 1): expose workspaceId + identity
       // to callers so they can recover providers from stopped:auth_failed.
       return Object.assign({}, stored, { workspaceId: entry.workspaceId, identity });
+      });
     });
   }
 

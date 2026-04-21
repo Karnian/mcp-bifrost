@@ -918,6 +918,122 @@ test('§4.10a-6 (Codex R8 blocker): completeAuthorization rejects stale callback
   }
 });
 
+test('§4.10a-5 (Codex R9 blocker): WORKSPACE_LOCK — rotation must wait for in-flight completeAuthorization even after pending row consumed (first-time identity)', async () => {
+  // Race Codex reproduced locally:
+  //   1. Browser /authorize for bot_ci (first-time — not in byIdentity yet)
+  //   2. Callback arrives → completeAuthorization consumes pending[state]
+  //      (deletes it) before entering the identity mutex.
+  //   3. Between pending-delete and _persistTokens (during slow _exchangeCode),
+  //      rotateClientUnderMutex() starts. Pre-fix: lockSet has no bot_ci (not
+  //      in pending anymore, not in byIdentity) → rotation commits NEW_CLIENT.
+  //   4. Callback's _persistTokens overwrites ws.oauth.client with OLD_CLIENT
+  //      + fresh bot_ci tokens → resurrection of pre-rotation client.
+  //
+  // Fix: completeAuthorization wraps everything in WORKSPACE_LOCK; rotation
+  // also acquires WORKSPACE_LOCK as first hop → they serialize regardless of
+  // identity state. This test proves rotation WAITS for the callback to
+  // finish even though pending is consumed early and bot_ci is first-time.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'OLD_CLIENT', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'OLD_CLIENT', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        byIdentity: { default: { tokens: { accessToken: 'AT_default', refreshToken: 'RT_default', expiresAt: new Date(Date.now() + 3600_000).toISOString() } } },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+
+    // Gate that holds _exchangeCode until we release it — simulates slow HTTP.
+    let releaseExchange;
+    const exchangeHeld = new Promise(r => { releaseExchange = r; });
+    const order = [];
+    const fetchImpl = async (url) => {
+      if (String(url).includes('/token')) {
+        order.push('exchange_start');
+        await exchangeHeld;
+        order.push('exchange_end');
+        return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'AT_botci_new', refresh_token: 'RT_botci_new', token_type: 'Bearer', expires_in: 3600 }), headers: { get: () => null } };
+      }
+      return { ok: false, status: 404, text: async () => 'not found', headers: { get: () => null } };
+    };
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl });
+
+    // Seed a pending entry for bot_ci (first-time, not in byIdentity).
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'OLD_CLIENT', clientSecret: null, authMethod: 'none',
+      identity: 'bot_ci',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+
+    // Kick off completeAuthorization — it will enter WORKSPACE_LOCK,
+    // consume pending, enter identity mutex, then block in _exchangeCode.
+    const callback = (async () => {
+      order.push('cb_start');
+      const r = await mgr.completeAuthorization(init.state, 'some-code');
+      order.push('cb_end');
+      return r;
+    })();
+
+    // Wait until we know callback is inside _exchangeCode (pending already
+    // consumed at this point — pre-fix rotation would see empty pending).
+    await new Promise(r => {
+      const iv = setInterval(() => {
+        if (order.includes('exchange_start')) { clearInterval(iv); r(); }
+      }, 5);
+    });
+    // Sanity: pending is empty (callback consumed it)
+    const pendingNow = await mgr._loadPending();
+    assert.equal(Object.keys(pendingNow).length, 0, 'pending must be consumed before rotation starts');
+    // Sanity: bot_ci is STILL not in byIdentity (tokens not yet persisted)
+    assert.equal(ws.oauth.byIdentity.bot_ci, undefined, 'bot_ci must not be in byIdentity before _persistTokens');
+
+    // Start rotation — pre-fix this would NOT wait for bot_ci (lockSet empty
+    // for bot_ci). With WORKSPACE_LOCK fix, rotation must chain behind callback.
+    const rotation = (async () => {
+      order.push('rot_start');
+      await mgr.rotateClientUnderMutex('w1', null, async () => {
+        order.push('rot_commit');
+        // Emulate admin/routes rotation business logic: commit new client.
+        ws.oauth.client = { clientId: 'NEW_CLIENT', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() };
+        ws.oauth.clientId = 'NEW_CLIENT';
+      });
+      order.push('rot_end');
+    })();
+
+    // Give rotation time to reach the mutex call (it should block there).
+    await new Promise(r => setTimeout(r, 30));
+    // Rotation must NOT have committed yet — it's parked on WORKSPACE_LOCK.
+    assert.ok(!order.includes('rot_commit'), 'rotation must NOT commit while callback holds WORKSPACE_LOCK');
+    assert.equal(ws.oauth.client.clientId, 'OLD_CLIENT', 'ws.client must still be OLD_CLIENT while rotation waits');
+
+    // Release _exchangeCode → callback persists tokens for bot_ci against
+    // OLD_CLIENT (legitimate — matches the pending entry that was issued for
+    // OLD_CLIENT), exits WORKSPACE_LOCK → rotation proceeds.
+    releaseExchange();
+    await Promise.all([callback, rotation]);
+
+    // Expected serialized order — callback fully done before rotation commits.
+    const cbEnd = order.indexOf('cb_end');
+    const rotCommit = order.indexOf('rot_commit');
+    assert.ok(cbEnd !== -1 && rotCommit !== -1, 'both must complete');
+    assert.ok(cbEnd < rotCommit, `callback must finish before rotation commits (order=${order.join(',')})`);
+
+    // Final state: rotation wins (ran second) → NEW_CLIENT persisted.
+    assert.equal(ws.oauth.client.clientId, 'NEW_CLIENT', 'final client must be rotation result, not resurrection');
+    // bot_ci tokens were persisted (legitimate, against OLD_CLIENT at that moment).
+    // Admin rotation logic (if it invalidates tokens) would null these — but that
+    // is a separate concern; this test only proves SERIALIZATION.
+    assert.ok(ws.oauth.byIdentity?.bot_ci, 'bot_ci tokens persisted during its legitimate WORKSPACE_LOCK window');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

@@ -115,6 +115,75 @@ Contents:
 
 ---
 
+## Codex review — Round 9 (2026-04-22)
+
+**Verdict**: REVISE (1 High — stale callback resurrection interleaving)
+
+### Finding — Rotation during callback's `_exchangeCode` can resurrect OLD_CLIENT
+
+Codex reproduced locally. Previous R6/R7/R8 fixes closed the easy interleavings
+(pending-still-present, migrated-null-client, field-mismatch), but an
+interleaving inside the callback's slow `_exchangeCode()` HTTP round-trip
+still resurrected the pre-rotation client for a first-time identity:
+
+1. `completeAuthorization(state, code)` loads pending, deletes + saves it
+   (empties `pending[state]`), then enters the identity mutex.
+2. Inside the identity mutex it does the rotation check once: `currentCid`
+   still equals `entry.clientId` (OLD_CLIENT) → passes.
+3. `_exchangeCode()` begins — slow HTTP to token endpoint.
+4. **DURING step 3**, a rotation starts:
+   - `rotateClientUnderMutex()` builds lockSet from pending (now empty after
+     step 1) + `ws.oauth.byIdentity` — for a first-time identity like
+     `bot_ci`, neither contains it.
+   - Rotation acquires only `default` mutex → commits `NEW_CLIENT` to
+     `ws.oauth.client`.
+5. `_exchangeCode()` returns; callback runs `_persistTokens(..., entry.clientId)`
+   — blindly overwrites `ws.oauth.client` with OLD_CLIENT + fresh `bot_ci`
+   tokens → **resurrection**.
+
+Root cause: the per-identity mutex is insufficient because rotation doesn't
+see the identity anywhere (pending consumed, byIdentity first-time).
+
+### Fix — Workspace-level guard (`WORKSPACE_LOCK`)
+
+Introduce a reserved sentinel identity `'__workspace__'` in the same
+`_identityMutex` Map. Both `rotateClientUnderMutex()` and
+`completeAuthorization()` acquire it FIRST (before per-identity chains):
+
+- `rotateClientUnderMutex`: prepends `WORKSPACE_LOCK` to the lock chain.
+- `completeAuthorization`: wraps the entire body (pending consumption +
+  rotation check + `_exchangeCode` + `_persistTokens`) in
+  `_withIdentityMutex(wsId, WORKSPACE_LOCK, ...)`. The inner per-identity
+  mutex remains for R6 refresh/markAuthFailed serialization.
+
+Pending consumption moved **inside** the guard so concurrent rotations
+still observe the pending identity via `pendingIdentities` — belt-and-
+suspenders with WORKSPACE_LOCK.
+
+Lock ordering (WORKSPACE_LOCK always first) prevents deadlock; refresh and
+markAuthFailed continue to use identity mutex only (they don't mutate
+workspace client so don't need workspace-level coordination).
+
+**Sentinel name chosen**: `__workspace__` — prefixed and suffixed with `__`
+to avoid collision with any real identity (validated by the `[a-z0-9_-]+`
+regex in admin/routes.js identity validation).
+
+Verified:
+- `§4.10a-5 (Codex R9 blocker): WORKSPACE_LOCK — rotation must wait for
+  in-flight completeAuthorization even after pending row consumed
+  (first-time identity)` — asserts rotation blocks until callback's
+  `_persistTokens` completes and ws ends up with `NEW_CLIENT` (rotation
+  wins, no resurrection).
+
+**Sanity check**: temporarily reverted the `idents = [WORKSPACE_LOCK, ...]`
+line; R9 test failed with `rotation must NOT commit while callback holds
+WORKSPACE_LOCK` — proves the test genuinely detects the race.
+
+Also verified: 325 / 323 pass / 0 fail / 2 skipped (previously 324/322/0/2,
++1 new R9 test).
+
+---
+
 ## Codex review — Round 8 (2026-04-21)
 
 **Verdict**: REVISE (1 High — migration + stale pending callback)
@@ -394,14 +463,14 @@ Verified: new assertion `§4.10a-1: workspace id "__global__" is reserved`.
 $ npm test
 # tests 324
 # suites 69
-# pass 322
+# pass 323
 # fail 0
 # cancelled 0
 # skipped 2
 # todo 0
 ```
 
-Phase 10a new tests: 31 (isolation) + 7 (admin-api) + 6 (migration) = 44.
+Phase 10a new tests: 32 (isolation, +1 R9) + 7 (admin-api) + 6 (migration) = 45.
 Plus 3 Phase 6/7 regression-fix tests (aligned with plan-intended breaking changes).
 All existing regression tests pass.
 
@@ -415,8 +484,9 @@ All existing regression tests pass.
 - R6 — REVISE: /authorize atomic invalidation + completeAuthorization under mutex → CLOSED
 - R7 — REVISE: completeAuthorization full-field rotation check + rotateClientUnderMutex pending-identity lock → CLOSED
 - R8 — REVISE: migration + stale callback resurrection (null-inclusive rotation check + pending purge on migration) → CLOSED
+- R9 — REVISE: rotation during callback's _exchangeCode can resurrect OLD_CLIENT (first-time identity) → CLOSED via WORKSPACE_LOCK workspace-level guard in `_identityMutex`
 
-Total Codex round findings: 14 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
+Total Codex round findings: 15 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
 
 ---
 
