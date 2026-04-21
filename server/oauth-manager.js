@@ -39,6 +39,29 @@ function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+/**
+ * Phase 10a §6-OBS.1 — mask a client_id for audit log storage.
+ * Format: `${first4}***${last4}`. Never store raw clientId in audit.jsonl
+ * because the file may be backed up / exported. Preserves enough prefix to
+ * disambiguate workspace clients during incident response.
+ */
+export function maskClientId(clientId) {
+  if (!clientId || typeof clientId !== 'string') return null;
+  if (clientId.length <= 8) return '***';
+  return `${clientId.slice(0, 4)}***${clientId.slice(-4)}`;
+}
+
+function parseRetryAfterMs(header) {
+  if (!header) return null;
+  const s = String(header).trim();
+  // Numeric delta-seconds
+  if (/^\d+$/.test(s)) return Number(s) * 1000;
+  // HTTP-date — parse and diff vs now
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) return Math.max(0, t - Date.now());
+  return null;
+}
+
 function isWindows(platform = process.platform) {
   return platform === 'win32';
 }
@@ -86,10 +109,15 @@ export class OAuthManager {
     this._pendingPath = join(stateDir, 'oauth-pending.json');
     this._secretPath = join(stateDir, 'server-secret');
     this._stateDir = stateDir;
-    this._issuerCache = null; // lazy
+    this._clientCache = null; // lazy — workspace-scoped DCR / manual client cache
     this._pending = null; // lazy
     this._serverSecret = null; // lazy
-    this._refreshMutex = new Map(); // workspaceId -> Promise
+    // Phase 10a §6.4: FIFO chain mutex shared by markAuthFailed AND _refreshWithMutex.
+    // Same Map so that markAuthFailed ↔ refresh are mutually exclusive. Key is
+    // `${workspaceId}::${identity}` — identity-level parallelism preserved.
+    this._identityMutex = new Map();
+    // Phase 10a §4.10a-4: auth-fail threshold (401 count at which fail-fast trips).
+    this._authFailThreshold = parseInt(process.env.BIFROST_AUTH_FAIL_THRESHOLD || '', 10) || 3;
     this._fileSecurityWarning = isWindows(platform); // true if any file couldn't be chmod'd
   }
 
@@ -195,41 +223,94 @@ export class OAuthManager {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // Issuer cache (RFC 7591 client reuse)
+  // Client cache (Phase 10a — workspace-scoped DCR / manual client reuse)
+  //
+  // Key format: `${workspaceId}::${issuer}::${authMethod}`.
+  // Legacy tests / callers that don't pass workspaceId land in the reserved
+  // `__global__` bucket — equivalent to the Phase 6 issuer-level cache. The
+  // production code paths (initializeAuthorization / registerManual /
+  // admin/routes.js) all pass workspaceId so the production behavior is
+  // strictly workspace-isolated.
 
   async _loadIssuerCache() {
-    if (this._issuerCache) return this._issuerCache;
-    this._issuerCache = (await readJson(this._issuerCachePath)) || {};
-    return this._issuerCache;
+    if (this._clientCache) return this._clientCache;
+    this._clientCache = (await readJson(this._issuerCachePath)) || {};
+    return this._clientCache;
   }
 
   async _saveIssuerCache() {
-    const { applied } = await writeJsonSecure(this._issuerCachePath, this._issuerCache, { platform: this.platform });
+    const { applied } = await writeJsonSecure(this._issuerCachePath, this._clientCache, { platform: this.platform });
     if (!applied) this._fileSecurityWarning = true;
   }
 
-  _cacheKey(issuer, authMethod) {
-    return `${issuer}::${authMethod}`;
+  _cacheKey(arg1, arg2, arg3) {
+    // Supports two call forms for back-compat:
+    //   _cacheKey(issuer, authMethod)                   → legacy (global scope)
+    //   _cacheKey(workspaceId, issuer, authMethod)      → Phase 10a scoped
+    if (arg3 === undefined) {
+      return `__global__::${arg1}::${arg2}`;
+    }
+    return `${arg1}::${arg2}::${arg3}`;
   }
 
-  async getCachedClient(issuer, authMethod) {
+  async getCachedClient(issuerOrWsId, authMethodOrIssuer, maybeAuthMethod) {
+    const key = maybeAuthMethod === undefined
+      ? this._cacheKey(issuerOrWsId, authMethodOrIssuer)
+      : this._cacheKey(issuerOrWsId, authMethodOrIssuer, maybeAuthMethod);
     const cache = await this._loadIssuerCache();
-    const entry = cache[this._cacheKey(issuer, authMethod)];
+    const entry = cache[key];
     if (!entry) return null;
     // TTL: expire cached entries after 24 hours
     const ttlMs = parseInt(process.env.BIFROST_OAUTH_CACHE_TTL_MS || '', 10) || 24 * 60 * 60 * 1000;
     if (entry.registeredAt && Date.now() - new Date(entry.registeredAt).getTime() > ttlMs) {
-      delete cache[this._cacheKey(issuer, authMethod)];
+      delete cache[key];
       await this._saveIssuerCache();
       return null;
     }
     return entry;
   }
 
-  async _storeCachedClient(issuer, authMethod, entry) {
+  async _storeCachedClient(issuerOrWsId, authMethodOrIssuer, entryOrAuthMethod, maybeEntry) {
+    let key, entry;
+    if (maybeEntry === undefined) {
+      // Legacy 3-arg form: (issuer, authMethod, entry)
+      key = this._cacheKey(issuerOrWsId, authMethodOrIssuer);
+      entry = { ...entryOrAuthMethod, issuer: issuerOrWsId, authMethod: authMethodOrIssuer };
+    } else {
+      // Phase 10a 4-arg form: (workspaceId, issuer, authMethod, entry)
+      key = this._cacheKey(issuerOrWsId, authMethodOrIssuer, entryOrAuthMethod);
+      entry = { ...maybeEntry, workspaceId: issuerOrWsId, issuer: authMethodOrIssuer, authMethod: entryOrAuthMethod };
+    }
     const cache = await this._loadIssuerCache();
-    cache[this._cacheKey(issuer, authMethod)] = { ...entry, issuer, authMethod, registeredAt: new Date().toISOString() };
+    cache[key] = { ...entry, registeredAt: new Date().toISOString() };
     await this._saveIssuerCache();
+  }
+
+  /**
+   * Phase 10a §4.10a-1: remove all cache entries bound to a workspace.
+   * Called by WorkspaceManager.deleteWorkspace(hard=true) and
+   * purgeExpiredWorkspaces().
+   */
+  async removeClient(workspaceId) {
+    const cache = await this._loadIssuerCache();
+    const prefix = `${workspaceId}::`;
+    let removed = 0;
+    for (const key of Object.keys(cache)) {
+      if (key.startsWith(prefix)) {
+        delete cache[key];
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      await this._saveIssuerCache();
+      if (this.wm?.logAudit) {
+        this.wm.logAudit('oauth.cache_purge', workspaceId, JSON.stringify({
+          cause: 'delete',
+          entriesRemoved: removed,
+        }));
+      }
+    }
+    return removed;
   }
 
   pickAuthMethod(authServerMetadata, { prefer = 'none' } = {}) {
@@ -242,12 +323,22 @@ export class OAuthManager {
 
   // ────────────────────────────────────────────────────────────────────────
   // Dynamic Client Registration (RFC 7591)
+  //
+  // Phase 10a §4.10a-1: `workspaceId` is optional for back-compat with Phase 6
+  // tests but production callers (initializeAuthorization, admin/routes) MUST
+  // supply it to get workspace-scoped cache isolation.
+  // Phase 10a §4.10a-3: DCR errors are classified into three codes:
+  //   DCR_RATE_LIMITED (429)   — honor Retry-After
+  //   DCR_REJECTED     (4xx)   — do not retry, surface to admin
+  //   DCR_TRANSIENT    (5xx)   — 3x retry with exponential backoff
 
-  async registerClient(issuer, authServerMetadata, { authMethod, forceNew = false, reuse = true } = {}) {
+  async registerClient(issuer, authServerMetadata, { workspaceId, authMethod, forceNew = false, reuse = true } = {}) {
     const method = authMethod || this.pickAuthMethod(authServerMetadata);
 
     if (reuse && !forceNew) {
-      const cached = await this.getCachedClient(issuer, method);
+      const cached = workspaceId
+        ? await this.getCachedClient(workspaceId, issuer, method)
+        : await this.getCachedClient(issuer, method);
       if (cached) return { ...cached, cached: true };
     }
 
@@ -266,33 +357,129 @@ export class OAuthManager {
       token_endpoint_auth_method: method,
     };
 
-    const res = await this.fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
+    // Phase 10a §4.10a-3: retry-and-classify loop.
+    const maxAttempts = 3;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res;
+      try {
+        res = await this.fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (netErr) {
+        // Network failure → transient, retry with backoff
+        lastErr = Object.assign(new Error(`DCR_TRANSIENT: network error — ${netErr.message}`), {
+          code: 'DCR_TRANSIENT',
+          cause: netErr,
+        });
+        if (attempt < maxAttempts) {
+          await this._sleep(this._dcrBackoffMs(attempt));
+          continue;
+        }
+        break;
+      }
+      if (res.ok) {
+        const json = await res.json();
+        const entry = {
+          clientId: json.client_id,
+          clientSecret: json.client_secret || null,
+          authMethod: method,
+          source: 'dcr',
+        };
+        if (workspaceId) {
+          await this._storeCachedClient(workspaceId, issuer, method, entry);
+        } else {
+          await this._storeCachedClient(issuer, method, entry);
+        }
+        // Observability — oauth.client_registered audit event (§6-OBS.1)
+        if (this.wm?.logAudit) {
+          this.wm.logAudit('oauth.client_registered', workspaceId || null, JSON.stringify({
+            issuer,
+            source: 'dcr',
+            clientIdMasked: maskClientId(json.client_id),
+            authMethod: method,
+          }));
+        }
+        return { ...entry, cached: false };
+      }
+      // Non-2xx response — classify
       const text = await res.text().catch(() => '');
-      const err = new Error(`DCR_FAILED: ${res.status} ${sanitize(text).slice(0, 200)}`);
-      err.code = 'DCR_FAILED';
-      err.status = res.status;
-      throw err;
+      const sanitized = sanitize(text).slice(0, 200);
+      if (res.status === 429) {
+        // Rate-limited — honor Retry-After
+        const retryAfterMs = parseRetryAfterMs(res.headers?.get?.('retry-after') ?? res.headers?.['retry-after']);
+        const err = Object.assign(new Error(`DCR_RATE_LIMITED: ${sanitized}`), {
+          code: 'DCR_RATE_LIMITED',
+          status: 429,
+          retryAfterMs,
+        });
+        if (this.wm?.logAudit) {
+          this.wm.logAudit('oauth.dcr_rate_limited', workspaceId || null, JSON.stringify({ issuer, retryAfterMs }));
+        }
+        // 429 on first try → we could honor Retry-After and retry once more,
+        // but a tight retry window is almost certainly still rate-limited.
+        // Surface immediately so the admin UI can prompt the operator.
+        throw err;
+      }
+      if (res.status >= 400 && res.status < 500) {
+        // Client-side reject — no retry, require manual intervention
+        const err = Object.assign(new Error(`DCR_REJECTED: ${res.status} ${sanitized}`), {
+          code: 'DCR_REJECTED',
+          status: res.status,
+        });
+        throw err;
+      }
+      // 5xx → transient, retry with backoff
+      lastErr = Object.assign(new Error(`DCR_TRANSIENT: ${res.status} ${sanitized}`), {
+        code: 'DCR_TRANSIENT',
+        status: res.status,
+      });
+      if (attempt < maxAttempts) {
+        await this._sleep(this._dcrBackoffMs(attempt));
+        continue;
+      }
     }
-    const json = await res.json();
-
-    const entry = {
-      clientId: json.client_id,
-      clientSecret: json.client_secret || null,
-      authMethod: method,
-      source: 'dcr',
-    };
-    await this._storeCachedClient(issuer, method, entry);
-    return { ...entry, cached: false };
+    throw lastErr ?? Object.assign(new Error('DCR_TRANSIENT: unknown'), { code: 'DCR_TRANSIENT' });
   }
 
-  async registerManual(issuer, { clientId, clientSecret = null, authMethod = 'none' }) {
+  _dcrBackoffMs(attempt) {
+    // 1s, 2s, 4s (cap 5s)
+    return Math.min(1000 * 2 ** (attempt - 1), 5000);
+  }
+
+  _sleep(ms) {
+    return new Promise(resolve => {
+      const t = setTimeout(resolve, ms);
+      t.unref?.();
+    });
+  }
+
+  async registerManual(issuerOrOpts, optsOrUndefined) {
+    // Back-compat: 2-arg form (issuer, { clientId, clientSecret, authMethod })
+    // New form: ({ workspaceId, issuer, clientId, ... })
+    let workspaceId, issuer, clientId, clientSecret, authMethod;
+    if (typeof issuerOrOpts === 'string') {
+      issuer = issuerOrOpts;
+      ({ clientId, clientSecret = null, authMethod = 'none' } = optsOrUndefined || {});
+    } else {
+      ({ workspaceId, issuer, clientId, clientSecret = null, authMethod = 'none' } = issuerOrOpts || {});
+    }
     const entry = { clientId, clientSecret, authMethod, source: 'manual' };
-    await this._storeCachedClient(issuer, authMethod, entry);
+    if (workspaceId) {
+      await this._storeCachedClient(workspaceId, issuer, authMethod, entry);
+    } else {
+      await this._storeCachedClient(issuer, authMethod, entry);
+    }
+    if (this.wm?.logAudit) {
+      this.wm.logAudit('oauth.client_registered', workspaceId || null, JSON.stringify({
+        issuer,
+        source: 'manual',
+        clientIdMasked: maskClientId(clientId),
+        authMethod,
+      }));
+    }
     return { ...entry, cached: false };
   }
 
@@ -520,10 +707,23 @@ export class OAuthManager {
       lastRefreshAt: new Date().toISOString(),
     };
 
+    // Phase 10a §3.4: write to ws.oauth.client.* AND mirror to flat fields for
+    // back-compat (keep readable by old code / external scripts for 1 release).
+    const clientBlock = {
+      clientId,
+      clientSecret: clientSecret || null,
+      authMethod,
+      // Preserve existing source marker if present (manual/dcr) — DCR path will
+      // have populated it via admin/routes.js ensureClient(). Default to 'dcr'.
+      source: ws.oauth?.client?.source || 'dcr',
+      registeredAt: ws.oauth?.client?.registeredAt || new Date().toISOString(),
+    };
     ws.oauth = {
       ...(ws.oauth || {}),
       enabled: true,
       issuer,
+      client: clientBlock,
+      // Legacy flat-field mirror (to be removed in Phase 11)
       clientId,
       clientSecret: clientSecret || null,
       authMethod,
@@ -571,13 +771,80 @@ export class OAuthManager {
     return this._refreshWithMutex(workspaceId, identity);
   }
 
-  async _refreshWithMutex(workspaceId, identity = 'default') {
-    // Mutex key: ${wsId}::${identity} (default identity uses "${wsId}::default"
-    // — chosen to keep Phase 6 tests' intuition of "per-ws mutex" working while
-    // allowing 2 identities to refresh in parallel).
+  /**
+   * Phase 10a §6.4 — FIFO chain mutex keyed by (workspaceId, identity).
+   *
+   * Every call chains onto the tail of the Map<key, Promise>, so all ops on
+   * the same (ws, identity) are serialized **without coalescing**. This is
+   * required so that markAuthFailed and _refreshWithMutex are mutually
+   * exclusive (coalescing would have piggy-backed markAuthFailed onto an
+   * in-flight refresh and lost the action_needed write).
+   */
+  _withIdentityMutex(workspaceId, identity, fn) {
     const key = `${workspaceId}::${identity}`;
-    const existing = this._refreshMutex.get(key);
-    if (existing) return existing;
+    const prev = this._identityMutex.get(key) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => fn());
+    this._identityMutex.set(key, next);
+    // Cleanup tail when this call is the last in the chain — prevents leaking
+    // the Map entry for never-refreshed identities.
+    next.finally(() => {
+      if (this._identityMutex.get(key) === next) this._identityMutex.delete(key);
+    }).catch(() => {});
+    return next;
+  }
+
+  /**
+   * Phase 10a §4.10a-4 — mark a (workspace, identity) tuple as requiring
+   * re-authorization. Null out access token, flip the action_needed flag,
+   * and emit an `oauth.threshold_trip` audit event.
+   *
+   * Serialized against refresh via the shared _identityMutex so a concurrent
+   * refresh either completes first (and its tokens get immediately nulled by
+   * this call) or observes the action_needed flag and returns early.
+   */
+  async markAuthFailed(workspaceId, identity = 'default', { correlationId = null, consecutiveCount = null } = {}) {
+    return this._withIdentityMutex(workspaceId, identity, async () => {
+      const ws = this.wm?._getRawWorkspace?.(workspaceId);
+      if (!ws) return { marked: false, reason: 'workspace_not_found' };
+      // null out access token in byIdentity map
+      if (ws.oauth?.byIdentity?.[identity]?.tokens) {
+        ws.oauth.byIdentity[identity].tokens.accessToken = null;
+      }
+      // Default identity also mirrors to legacy ws.oauth.tokens
+      if (identity === 'default' && ws.oauth?.tokens) {
+        ws.oauth.tokens.accessToken = null;
+      }
+      // Root-level action_needed map (NOT nested under oauth)
+      if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};
+      ws.oauthActionNeededBy[identity] = true;
+      if (identity === 'default') ws.oauthActionNeeded = true;
+      if (this.wm?._save) {
+        await this.wm._save().catch(() => {});
+      }
+      if (this.wm?.logAudit) {
+        this.wm.logAudit('oauth.threshold_trip', workspaceId, JSON.stringify({
+          threshold: this._authFailThreshold,
+          consecutiveCount: consecutiveCount ?? this._authFailThreshold,
+          correlationId: correlationId || null,
+        }), identity);
+      }
+      return { marked: true };
+    });
+  }
+
+  async _refreshWithMutex(workspaceId, identity = 'default') {
+    return this._withIdentityMutex(workspaceId, identity, () => this._runRefresh(workspaceId, identity));
+  }
+
+  async _runRefresh(workspaceId, identity) {
+    // Observability: early-return if markAuthFailed already set action_needed
+    // for this identity. §9 "Refresh early-return" assertion.
+    const wsPre = this.wm?._getRawWorkspace?.(workspaceId);
+    const actionNeeded = wsPre?.oauthActionNeededBy?.[identity]
+      || (identity === 'default' && wsPre?.oauthActionNeeded);
+    if (actionNeeded) {
+      return { skipped: true, reason: 'action_needed' };
+    }
 
     const task = (async () => {
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
@@ -587,11 +854,13 @@ export class OAuthManager {
         err.code = 'NO_REFRESH_TOKEN';
         throw err;
       }
+      // Phase 10a §3.4 — prefer ws.oauth.client.*, fall back to flat fields.
+      const client = ws.oauth?.client || null;
       const entry = {
         tokenEndpoint: ws.oauth.metadataCache?.token_endpoint || ws.oauth.tokenEndpoint,
-        clientId: ws.oauth.clientId,
-        clientSecret: ws.oauth.clientSecret,
-        authMethod: ws.oauth.authMethod || 'none',
+        clientId: client?.clientId ?? ws.oauth.clientId,
+        clientSecret: client?.clientSecret ?? ws.oauth.clientSecret,
+        authMethod: client?.authMethod ?? (ws.oauth.authMethod || 'none'),
         resource: ws.oauth.resource,
       };
       // Resolve token endpoint lazily if missing
@@ -636,10 +905,8 @@ export class OAuthManager {
       timeoutHandle = setTimeout(() => reject(new Error('refresh_timeout')), this._refreshTimeoutMs);
       timeoutHandle.unref?.();
     });
-    // Swallow late rejection of the losing promise to avoid unhandledRejection
     task.catch(() => {});
     const wrapped = Promise.race([task, timeout]).finally(() => clearTimeout(timeoutHandle));
-    this._refreshMutex.set(key, wrapped);
     try {
       return await wrapped;
     } catch (err) {
@@ -653,8 +920,6 @@ export class OAuthManager {
         if (identity === 'default') ws.oauthActionNeeded = true;
       }
       throw err;
-    } finally {
-      this._refreshMutex.delete(key);
     }
   }
 }

@@ -47,6 +47,17 @@ function maskOAuth(oauth) {
     masked.clientId = `${oauth.clientId.slice(0, 4)}***${oauth.clientId.slice(-4)}`;
   }
   if (oauth.clientSecret) masked.clientSecret = '***';
+  // Phase 10a §3.4 — nested ws.oauth.client masking
+  if (oauth.client && typeof oauth.client === 'object') {
+    const c = oauth.client;
+    masked.client = {
+      ...c,
+      clientId: (c.clientId && typeof c.clientId === 'string' && c.clientId.length > 8)
+        ? `${c.clientId.slice(0, 4)}***${c.clientId.slice(-4)}`
+        : c.clientId || null,
+      clientSecret: c.clientSecret ? '***' : null,
+    };
+  }
   // Legacy default tokens
   if (oauth.tokens) masked.tokens = maskTokenEntry(oauth.tokens);
   // Phase 7c-pre: byIdentity[*].tokens must be masked too.
