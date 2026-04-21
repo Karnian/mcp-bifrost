@@ -498,10 +498,10 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
     - A 를 동일 id 로 재등록 + OAuth authorize 트리거 시 **DCR endpoint fetch spy call count === 1**
       (cache 에 남아있었다면 재사용돼서 0 이 나와야 정상이지만, purge 됐으므로 새로 호출돼야 함)
     - ★ 이 assertion 하나로 `_clientCache` purge 가 증명됨 (getter null + fetch=1).
-  - **Optional / conditional** (§12 미해결 가정에 의존 — Round 9 조정):
+  - **Behavior 검증 — secondary** (Round 10 — §12-1 실측 확인으로 primary 와 독립 적용 가능):
     - 재등록 후 `wm.getOAuthClient(A).clientId !== `이전 A 의 clientId
-    - 단, "Notion MCP DCR 을 다른 `client_name` 으로 반복 호출 시 매번 새 client_id 반환" 가정 (§12-1)
-      이 curl 실측으로 확인된 경우에만 적용. 확인 안 되면 skip — primary assertion 만으로 충분.
+    - 2026-04-21 curl 실측: Notion MCP `/register` 는 `client_name` 과 무관하게 호출 시마다 새 client_id
+      발급 (동일 `client_name` 3회 호출 — 3개 모두 다른 client_id 반환) → assertion 안정적.
 - [ ] **Soft delete cache 정책**:
   - `softDelete(A)` 직후 → `wm.getOAuthClient(A)` 이전 값 유지 (DCR fetch spy call count === 0)
   - `restoreWorkspace(A)` + `tools/list` → HTTP 200 (재인증 요구 없음, DCR 0회)
@@ -635,6 +635,17 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 
 ## 12. 미해결 질문 (Deep-Dive 전에 확인 필요)
 
-1. **Notion MCP DCR 의 실제 동작** — `/register` 를 다른 `client_name` 으로 반복 호출 시 매번 새 client_id 반환하는지 curl 실측 필요
+1. ~~**Notion MCP DCR 의 실제 동작** — `/register` 를 다른 `client_name` 으로 반복 호출 시 매번 새 client_id 반환하는지 curl 실측 필요~~
+   **✅ 해결 (2026-04-21 실측)**: `https://mcp.notion.com/register` 는 `client_name` 과 무관하게
+   호출 시마다 **새 client_id 발급**. 실측 증거:
+   - 다른 `client_name` 3회 (probe-1/2/3) → `nD2cFNT5JLYC7rXg` / `WjquI9eLjCiExiOG` / `QzOT6_4nDcVroFvR` (전부 다름)
+   - 동일 `client_name` 3회 (bifrost-mcp-bridge) → `HNhfX9d3n_bJKg6k` / `Jao3gN5-35hhrupU` / `UrqOMxobBBM4jelv` (전부 다름)
+   - 모든 호출 `HTTP 201 Created`, `client_id_issued_at` 1초 간격으로 순증
+   - client_id 포맷: `[a-zA-Z0-9_-]{16}` (§9 mask regex 와 일치)
+
+   **설계 함의**:
+   (a) workspace 당 별도 client_id 전략은 Notion 측이 자연스럽게 지원 ✅
+   (b) 등록 결과를 workspace 단위로 **persist 하지 않으면** 재시작마다 새 client 발급 → 토큰 무효화 (§3.1 + §4.10a-2 에 이미 반영됨)
+   (c) §9 Cache purge 의 secondary assertion (`clientId !== 이전값`) 안정적 — §9 에서 optional → secondary 로 승격
 2. **Static client 발급 UX** — 운영자가 Notion integration 페이지에서 직접 받아야 하는데, Bifrost workspace 추가 wizard 에 안내 필요
 3. **Notion MCP 공식 권장사항** — docs 가 "한 integration 당 여러 workspace" 를 권장하는지, 아니면 독립 integration 권장하는지 확인
