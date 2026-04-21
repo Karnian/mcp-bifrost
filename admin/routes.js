@@ -262,33 +262,18 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
               clientSource = 'dcr';
             }
           }
-          // Phase 10a (Codex R3+R4): on rotation, purge pending states AND
-          // invalidate existing tokens. Otherwise a refresh could combine the
-          // old refresh_token with new client credentials and fail.
+          // Phase 10a (Codex R6 blocker 1): pending purge can stay outside
+          // mutex (it only affects browser callbacks, not refresh). But the
+          // token invalidation MUST move inside the mutex so a background
+          // refresh cannot write old tokens back between this block and the
+          // client commit below.
           if (isRotation) {
             if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
-            if (ws.oauth?.byIdentity) {
-              for (const ident of Object.keys(ws.oauth.byIdentity)) {
-                if (ws.oauth.byIdentity[ident]?.tokens) {
-                  ws.oauth.byIdentity[ident].tokens.accessToken = null;
-                  ws.oauth.byIdentity[ident].tokens.refreshToken = null;
-                }
-              }
-            }
-            if (ws.oauth?.tokens) {
-              ws.oauth.tokens.accessToken = null;
-              ws.oauth.tokens.refreshToken = null;
-            }
-            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-            for (const ident of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-              ws.oauthActionNeededBy[ident] = true;
-            }
-            ws.oauthActionNeeded = true;
           }
-          // Phase 10a §3.4 + Codex R5 — persist nested + flat mirror.
-          // When rotating, do it under the identity mutex so a concurrent
-          // refresh cannot write old-client tokens back AFTER this handler.
-          const commitClient = () => {
+          // Phase 10a §3.4 + Codex R5/R6 — commit client + invalidate old
+          // tokens atomically under the identity FIFO mutex so an in-flight
+          // refresh/markAuthFailed cannot write old-client state back.
+          const commitClientAndInvalidate = () => {
             ws.oauth = {
               ...ws.oauth,
               client: {
@@ -302,11 +287,30 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
               clientSecret: clientSecret ?? null,
               authMethod,
             };
+            if (isRotation) {
+              if (ws.oauth?.byIdentity) {
+                for (const ident of Object.keys(ws.oauth.byIdentity)) {
+                  if (ws.oauth.byIdentity[ident]?.tokens) {
+                    ws.oauth.byIdentity[ident].tokens.accessToken = null;
+                    ws.oauth.byIdentity[ident].tokens.refreshToken = null;
+                  }
+                }
+              }
+              if (ws.oauth?.tokens) {
+                ws.oauth.tokens.accessToken = null;
+                ws.oauth.tokens.refreshToken = null;
+              }
+              ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+              for (const ident of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+                ws.oauthActionNeededBy[ident] = true;
+              }
+              ws.oauthActionNeeded = true;
+            }
           };
           if (isRotation && oauth.rotateClientUnderMutex) {
-            await oauth.rotateClientUnderMutex(id, null, async () => { commitClient(); });
+            await oauth.rotateClientUnderMutex(id, null, async () => { commitClientAndInvalidate(); });
           } else {
-            commitClient();
+            commitClientAndInvalidate();
           }
           await wm._save();
 

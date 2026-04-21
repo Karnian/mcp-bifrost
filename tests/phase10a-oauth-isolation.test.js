@@ -742,6 +742,50 @@ test('§4.10a-5 (Codex R5 blocker): rotateClientUnderMutex serializes vs in-flig
   }
 });
 
+test('§4.10a-5 (Codex R6 blocker): completeAuthorization rejects stale pre-rotation callback', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const { WorkspaceManager } = await import('../server/workspace-manager.js');
+    const wm = new WorkspaceManager();
+    wm.config = {
+      workspaces: [
+        {
+          id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+          oauth: {
+            enabled: true, issuer: 'https://auth.example',
+            client: { clientId: 'NEW_CLIENT', authMethod: 'none', source: 'manual', registeredAt: new Date().toISOString() },
+            clientId: 'NEW_CLIENT', authMethod: 'none',
+            metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+          },
+        },
+      ],
+      server: { port: 3100 },
+    };
+    wm._loaded = true;
+    wm._save = async () => {};
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'NEW_AT' }), headers: { get: () => null } }) });
+    wm.setOAuthManager(mgr);
+
+    // Simulate: /authorize started with OLD_CLIENT; pending state saved. Then
+    // rotation happened → ws.oauth.client.clientId is now NEW_CLIENT.
+    // Finally the old browser callback arrives.
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'OLD_CLIENT',
+      clientSecret: null,
+      authMethod: 'none',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+    // completeAuthorization must detect the clientId mismatch and reject.
+    const err = await mgr.completeAuthorization(init.state, 'some-code').catch(e => e);
+    assert.equal(err.code, 'STATE_CLIENT_ROTATED');
+    // ws.oauth.client.clientId still points to NEW_CLIENT (not overwritten)
+    assert.equal(wm.getOAuthClient('w1').clientId, 'NEW_CLIENT');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

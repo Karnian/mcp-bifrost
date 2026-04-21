@@ -115,6 +115,40 @@ Contents:
 
 ---
 
+## Codex review — Round 6 (2026-04-21)
+
+**Verdict**: REVISE (2 blockers — deeper race corners)
+
+### Blocker 1 — `/authorize` token invalidation was still outside the mutex
+R5 wrapped the client commit in `rotateClientUnderMutex` but the token-
+invalidation block lived *before* the mutex call. A refresh that started
+before rotation could complete between the invalidation block and the commit
+block, re-writing old tokens with `oauthActionNeeded = false`.
+
+**Fix**: Merged token invalidation + client commit into a single
+`commitClientAndInvalidate()` closure that runs entirely inside the
+`rotateClientUnderMutex` callback. Now the full rotation is one atomic
+unit vs. refresh/markAuthFailed.
+
+### Blocker 2 — `completeAuthorization` didn't take the identity mutex
+If a rotation happened while a browser tab was mid-`/authorize`, the stale
+callback's pending entry still contained the pre-rotation clientId. Once the
+browser landed back on /oauth/callback, `completeAuthorization` ran outside
+the mutex and wrote old-client fields into `ws.oauth.client` via `_persistTokens`.
+
+**Fix**:
+- `completeAuthorization` now wraps its work in `_withIdentityMutex(wsId, identity, fn)`.
+- Inside the mutex, it re-reads `ws.oauth.client.clientId` and compares to
+  `entry.clientId` (from pending state). If they diverge, throws
+  `STATE_CLIENT_ROTATED` — the stale callback is rejected cleanly.
+
+Verified: `§4.10a-5 (Codex R6 blocker): completeAuthorization rejects stale pre-rotation callback`.
+- Seeds pending with OLD_CLIENT, then sets ws.oauth.client to NEW_CLIENT,
+  then calls completeAuthorization with the old state/code → rejects with
+  STATE_CLIENT_ROTATED. Verifies NEW_CLIENT is preserved in ws.oauth.client.
+
+---
+
 ## Codex review — Round 5 (2026-04-21)
 
 **Verdict**: REVISE (1 High — race + refreshToken drift on two endpoints)

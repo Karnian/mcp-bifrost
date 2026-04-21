@@ -666,28 +666,48 @@ export class OAuthManager {
     delete pending[state];
     await this._savePending();
 
-    const tokens = await this._exchangeCode(entry, code);
+    const identity = entry.identity || 'default';
+    // Phase 10a §6.4 (Codex R6 blocker 2) — serialize completeAuthorization
+    // against rotateClientUnderMutex + refresh + markAuthFailed. Prevents a
+    // stale pre-rotation callback from writing old client + old pending tokens
+    // via _persistTokens after a rotation has already happened.
+    return this._withIdentityMutex(entry.workspaceId, identity, async () => {
+      // Re-check that the stored client on the workspace still matches the
+      // pending entry. If the operator rotated the client after the browser
+      // began /authorize but before the callback landed, the pending entry
+      // carries the pre-rotation clientId. Reject the callback rather than
+      // overwrite the new client.
+      const ws = this.wm?._getRawWorkspace?.(entry.workspaceId);
+      const currentCid = ws?.oauth?.client?.clientId ?? ws?.oauth?.clientId ?? null;
+      if (currentCid && entry.clientId && currentCid !== entry.clientId) {
+        const err = new Error(`state_client_rotated: workspace client rotated since /authorize (expected ${entry.clientId}, got ${currentCid})`);
+        err.code = 'STATE_CLIENT_ROTATED';
+        throw err;
+      }
 
-    if (this.wm?.logAudit) {
-      this.wm.logAudit('oauth.authorize_complete', entry.workspaceId, JSON.stringify({
+      const tokens = await this._exchangeCode(entry, code);
+
+      if (this.wm?.logAudit) {
+        this.wm.logAudit('oauth.authorize_complete', entry.workspaceId, JSON.stringify({
+          issuer: entry.issuer,
+          identity,
+          tokenPrefix: tokenPrefix(tokens.access_token),
+        }), identity);
+      }
+
+      const stored = this._persistTokens(entry.workspaceId, {
         issuer: entry.issuer,
-        identity: entry.identity || 'default',
-        tokenPrefix: tokenPrefix(tokens.access_token),
-      }), entry.identity || 'default');
-    }
-
-    const stored = this._persistTokens(entry.workspaceId, {
-      issuer: entry.issuer,
-      clientId: entry.clientId,
-      clientSecret: entry.clientSecret,
-      authMethod: entry.authMethod,
-      resource: entry.resource,
-      tokens,
-      identity: entry.identity || 'default',
+        clientId: entry.clientId,
+        clientSecret: entry.clientSecret,
+        authMethod: entry.authMethod,
+        resource: entry.resource,
+        tokens,
+        identity,
+      });
+      // Phase 10a §4.10a-4 (Codex R2 blocker 1): expose workspaceId + identity
+      // to callers so they can recover providers from stopped:auth_failed.
+      return Object.assign({}, stored, { workspaceId: entry.workspaceId, identity });
     });
-    // Phase 10a §4.10a-4 (Codex R2 blocker 1): expose workspaceId + identity
-    // to callers so they can recover providers from stopped:auth_failed.
-    return Object.assign({}, stored, { workspaceId: entry.workspaceId, identity: entry.identity || 'default' });
   }
 
   async _exchangeCode(entry, code) {
