@@ -1080,6 +1080,217 @@ test('§4.10a-5 (Codex R10 blocker 1 regression): separate _workspaceMutex — r
   }
 });
 
+// Phase 10a §4.10a-5 (Codex R11 follow-up) — shared helper that monkey-patches
+// the workspace/identity mutex helpers to record actual lock acquisition order.
+// Returns { events, restore } — tests call restore() to undo the instrumentation
+// if they want to continue using the manager.
+function instrumentMutexOrder(mgr) {
+  const events = [];
+  const origWs = mgr._withWorkspaceMutex.bind(mgr);
+  const origId = mgr._withIdentityMutex.bind(mgr);
+  mgr._withWorkspaceMutex = (wsId, fn) => origWs(wsId, async () => {
+    events.push({ kind: 'ws_enter', wsId });
+    try { return await fn(); }
+    finally { events.push({ kind: 'ws_exit', wsId }); }
+  });
+  mgr._withIdentityMutex = (wsId, identity, fn) => origId(wsId, identity, async () => {
+    events.push({ kind: 'id_enter', wsId, identity });
+    try { return await fn(); }
+    finally { events.push({ kind: 'id_exit', wsId, identity }); }
+  });
+  return {
+    events,
+    restore() {
+      mgr._withWorkspaceMutex = origWs;
+      mgr._withIdentityMutex = origId;
+    },
+  };
+}
+
+test('§4.10a-5 (Codex R11 follow-up): rotateClientUnderMutex acquires workspace lock BEFORE any identity lock (instrumented acquisition order)', async () => {
+  // Codex R11 non-blocking follow-up — the previous §4.10a-5 test proves
+  // rotation is GATED on the workspace lock, but did not directly assert
+  // the lock ACQUISITION ORDER inside rotateClientUnderMutex. This test
+  // instruments both mutex helpers to record the actual sequence of
+  // lock entries/exits, then asserts:
+  //   (a) _workspaceMutex is acquired first (outermost),
+  //   (b) every _identityMutex entry is nested strictly inside the
+  //       workspace lock (enter workspace → enter identity → exit
+  //       identity → ... → exit workspace),
+  //   (c) no identity lock is acquired before the workspace lock.
+  //
+  // This is the definitive guard against a future refactor reintroducing
+  // the Codex R10 inversion (bot_ci → default → SENTINEL) by accident.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'OLD', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'OLD', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        byIdentity: {
+          default: { tokens: { accessToken: 'AT', refreshToken: 'RT', expiresAt: new Date(Date.now() + 3600_000).toISOString() } },
+          bot_ci:  { tokens: { accessToken: 'AT2', refreshToken: 'RT2', expiresAt: new Date(Date.now() + 3600_000).toISOString() } },
+          worker:  { tokens: { accessToken: 'AT3', refreshToken: 'RT3', expiresAt: new Date(Date.now() + 3600_000).toISOString() } },
+        },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{}', headers: { get: () => null } }) });
+
+    // Instrument both mutex helpers to record actual entry/exit order.
+    const { events } = instrumentMutexOrder(mgr);
+
+    // Drive a rotation — exercises the full lock chain (workspace outer,
+    // then every identity in byIdentity sequentially).
+    let rotFnRan = false;
+    await mgr.rotateClientUnderMutex('w1', null, async () => { rotFnRan = true; });
+    assert.ok(rotFnRan, 'rotation callback must execute');
+
+    // (a) Assert the VERY FIRST event is ws_enter — workspace lock is
+    // acquired before any identity lock.
+    assert.ok(events.length > 0, 'instrumentation recorded no events');
+    assert.equal(events[0].kind, 'ws_enter', `first lock acquisition must be workspace (got ${events[0].kind}). events=${JSON.stringify(events)}`);
+    assert.equal(events[0].wsId, 'w1');
+
+    // (b) Assert NO identity lock is acquired before the first workspace lock.
+    const firstWsEnterIdx = events.findIndex(e => e.kind === 'ws_enter');
+    const firstIdEnterIdx = events.findIndex(e => e.kind === 'id_enter');
+    if (firstIdEnterIdx !== -1) {
+      assert.ok(firstWsEnterIdx < firstIdEnterIdx,
+        `identity lock must not precede workspace lock (ws_enter@${firstWsEnterIdx}, id_enter@${firstIdEnterIdx}). events=${JSON.stringify(events)}`);
+    }
+
+    // (c) Assert every id_enter is nested inside the (still-open) workspace
+    // lock — i.e. between some ws_enter and its matching ws_exit, we must be
+    // holding exactly one workspace lock when any identity lock is acquired.
+    let wsDepth = 0;
+    let maxWsDepth = 0;
+    for (const ev of events) {
+      if (ev.kind === 'ws_enter') { wsDepth++; maxWsDepth = Math.max(maxWsDepth, wsDepth); }
+      else if (ev.kind === 'ws_exit') { wsDepth--; }
+      else if (ev.kind === 'id_enter') {
+        assert.ok(wsDepth >= 1,
+          `id_enter must be nested inside ws_enter (wsDepth=${wsDepth}). events=${JSON.stringify(events)}`);
+      }
+    }
+    assert.equal(wsDepth, 0, `workspace lock must be balanced (final depth=${wsDepth})`);
+    // Sanity: rotateClientUnderMutex should never re-enter the workspace lock.
+    assert.equal(maxWsDepth, 1, `workspace lock must not be re-entered (maxDepth=${maxWsDepth})`);
+
+    // (d) Assert identity lock chaining is well-formed: every id_exit
+    // pairs with the most recent unmatched id_enter (LIFO nesting). This
+    // is the shape rotateClientUnderMutex produces by wrapping identities
+    // in a reduce — outer identity wraps inner, so locks unwind LIFO.
+    // What matters is that they are all held INSIDE the workspace lock
+    // (already asserted in (c)) and that the chain is balanced.
+    const idEvents = events.filter(e => e.kind === 'id_enter' || e.kind === 'id_exit');
+    const stack = [];
+    for (const ev of idEvents) {
+      if (ev.kind === 'id_enter') {
+        stack.push(ev.identity);
+      } else {
+        const top = stack.pop();
+        assert.equal(top, ev.identity,
+          `id_exit '${ev.identity}' must match top-of-stack (got '${top}'). events=${JSON.stringify(events)}`);
+      }
+    }
+    assert.equal(stack.length, 0, `identity lock chain must be balanced (stack=${stack.join(',')})`);
+
+    // (e) All three known identities must have been visited at least once.
+    const lockedIdentities = new Set(events.filter(e => e.kind === 'id_enter').map(e => e.identity));
+    for (const expected of ['default', 'bot_ci', 'worker']) {
+      assert.ok(lockedIdentities.has(expected),
+        `rotation must lock identity '${expected}' (locked=${Array.from(lockedIdentities).join(',')})`);
+    }
+
+    // (f) Workspace lock must remain held throughout the entire identity
+    // chain — i.e. no ws_exit appears before all id_exit events.
+    const lastIdExitIdx = (() => {
+      let idx = -1;
+      for (let i = 0; i < events.length; i++) if (events[i].kind === 'id_exit') idx = i;
+      return idx;
+    })();
+    const wsExitIdx = events.findIndex(e => e.kind === 'ws_exit');
+    if (lastIdExitIdx !== -1) {
+      assert.ok(wsExitIdx > lastIdExitIdx,
+        `ws_exit must come AFTER the last id_exit (ws_exit@${wsExitIdx}, last id_exit@${lastIdExitIdx}). events=${JSON.stringify(events)}`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-5 (Codex R11 follow-up): completeAuthorization also acquires workspace lock BEFORE identity lock (instrumented)', async () => {
+  // Companion assertion for the OTHER acquirer of the workspace lock:
+  // completeAuthorization must also take the workspace lock as outermost
+  // before grabbing the per-identity mutex. This guards the "ordering
+  // symmetry" contract — both sides of the rotation/callback race enter
+  // locks in the same order (workspace → identity), which is what makes
+  // the FIFO chain deadlock-free.
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'OLD', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'OLD', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT', expiresAt: new Date(Date.now() + 3600_000).toISOString() } } },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({
+      ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'AT_new', refresh_token: 'RT_new', token_type: 'Bearer', expires_in: 3600 }), headers: { get: () => null },
+    }) });
+
+    const { events } = instrumentMutexOrder(mgr);
+
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'OLD', clientSecret: null, authMethod: 'none',
+      identity: 'bot_ci',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+    // Clear any events from initializeAuthorization (which doesn't take the lock)
+    events.length = 0;
+
+    await mgr.completeAuthorization(init.state, 'some-code');
+
+    assert.ok(events.length > 0, 'completeAuthorization recorded no lock events');
+    // Workspace lock must be first.
+    assert.equal(events[0].kind, 'ws_enter', `first lock must be workspace (got ${events[0].kind}). events=${JSON.stringify(events)}`);
+    // Identity lock must be nested inside workspace lock.
+    const idEnterIdx = events.findIndex(e => e.kind === 'id_enter');
+    const wsExitIdx = events.findIndex(e => e.kind === 'ws_exit');
+    assert.ok(idEnterIdx !== -1, 'completeAuthorization must acquire identity lock');
+    assert.ok(idEnterIdx > 0 && idEnterIdx < wsExitIdx,
+      `id_enter must be strictly between ws_enter and ws_exit (id@${idEnterIdx}, ws_exit@${wsExitIdx}). events=${JSON.stringify(events)}`);
+    // Codex R11 follow-up (from R1 APPROVE feedback): assert the SPECIFIC
+    // identity that was locked is 'bot_ci' (the one we authorized), not just
+    // "some identity". This catches a future refactor that accidentally
+    // locks the wrong identity (e.g. hardcoded 'default').
+    const lockedIdEnter = events.find(e => e.kind === 'id_enter');
+    assert.equal(lockedIdEnter.identity, 'bot_ci',
+      `completeAuthorization must lock the authorizing identity (bot_ci), got '${lockedIdEnter.identity}'`);
+    // Nesting depth check.
+    let wsDepth = 0;
+    for (const ev of events) {
+      if (ev.kind === 'ws_enter') wsDepth++;
+      else if (ev.kind === 'ws_exit') wsDepth--;
+      else if (ev.kind === 'id_enter') {
+        assert.ok(wsDepth >= 1, `id_enter outside workspace lock. events=${JSON.stringify(events)}`);
+      }
+    }
+    assert.equal(wsDepth, 0, 'workspace lock must balance');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-5 (Codex R10 blocker 2 regression): identity named "__workspace__" does not self-deadlock (separate Map)', async () => {
   // Codex R10 found that the admin identity regex `[a-zA-Z0-9_\\-.]{1,64}`
   // allowed `__workspace__` as a valid user identity. If workspace locks
