@@ -285,6 +285,11 @@ test('§Phase11-3: --apply scrubs flat OAuth fields from config (nested-only aft
     await writeFile(cfgPath, JSON.stringify(fixture, null, 2), 'utf-8');
     const r = await runScript([`--config=${cfgPath}`, '--apply']);
     assert.equal(r.code, 0, `stderr=${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    // flatScrubbed report surfaces the mutation (Codex Phase 11-3 R1 follow-up)
+    assert.ok(Array.isArray(out.report.flatScrubbed), 'report must include flatScrubbed array');
+    assert.equal(out.report.flatScrubbed.length, 1, 'one workspace must be reported as scrubbed');
+    assert.equal(out.report.flatScrubbed[0].id, 'ws-flat-only');
     const migrated = JSON.parse(await readFile(cfgPath, 'utf-8'));
     const ws = migrated.workspaces[0];
     // Nested is populated
@@ -297,6 +302,52 @@ test('§Phase11-3: --apply scrubs flat OAuth fields from config (nested-only aft
     assert.equal(ws.oauth.clientId, undefined, 'Phase 11 §3: flat clientId must be removed from config');
     assert.equal(ws.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must be removed from config');
     assert.equal(ws.oauth.authMethod, undefined, 'Phase 11 §3: flat authMethod must be removed from config');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§Phase11-3 (Codex R1 follow-up): --apply scrubs flat null keys left by pre-Phase-11 disambiguation', async () => {
+  // Codex Phase 11-3 R1 Medium finding: configs produced by Phase 10a's
+  // disambiguation branch set ws.oauth.client=null AND left flat keys as
+  // null. Previous Phase 11 scrub logic gated on `if (ws.oauth.client)` so
+  // the null-flat keys persisted on disk forever. This test drives exactly
+  // that shape through --apply and asserts the flat keys are scrubbed
+  // despite client===null.
+  const dir = await mkdtemp(join(tmpdir(), 'phase11-null-scrub-'));
+  try {
+    const cfgPath = join(dir, 'my-config.json');
+    const fixture = {
+      server: { port: 3100 },
+      workspaces: [
+        {
+          id: 'disambiguated-ws', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+          oauth: {
+            enabled: true, issuer: 'https://mcp.example',
+            client: null,                  // pre-Phase-11 disambiguation output
+            clientId: null,                // flat=null left behind
+            clientSecret: null,
+            authMethod: null,
+            byIdentity: { default: { tokens: null } },
+          },
+          oauthActionNeeded: true,
+          oauthActionNeededBy: { default: true },
+        },
+      ],
+    };
+    await writeFile(cfgPath, JSON.stringify(fixture, null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--apply']);
+    assert.equal(r.code, 0, `stderr=${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.report.flatScrubbed.length, 1, 'null-only flat keys must also be scrubbed');
+    const migrated = JSON.parse(await readFile(cfgPath, 'utf-8'));
+    const ws = migrated.workspaces[0];
+    // client stays null (no flat to promote)
+    assert.equal(ws.oauth.client, null);
+    // Flat keys fully removed from on-disk config
+    assert.ok(!('clientId' in ws.oauth), 'Phase 11 §3: flat clientId key must be removed (was null)');
+    assert.ok(!('clientSecret' in ws.oauth), 'Phase 11 §3: flat clientSecret key must be removed (was null)');
+    assert.ok(!('authMethod' in ws.oauth), 'Phase 11 §3: flat authMethod key must be removed (was null)');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

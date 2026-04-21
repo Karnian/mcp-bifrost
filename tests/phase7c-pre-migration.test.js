@@ -338,3 +338,61 @@ test('§Phase11-3: WorkspaceManager._migrateLegacy on config that already has ne
   assert.equal(ws.oauth.clientSecret, undefined);
   assert.equal(ws.oauth.authMethod, undefined);
 });
+
+test('§Phase11-3 (Codex R1 follow-up): _migrateLegacy scrubs flat keys when ws.oauth.client is null', () => {
+  // Codex Phase 11-3 R1 identified an edge case: when Phase 10a's old
+  // disambiguation logic ran, it set `ws.oauth.client = null` but left the
+  // flat clientId/clientSecret = null in place. Previous Phase 11 code gated
+  // the scrub on `if (ws.oauth.client)` — that branch was skipped when
+  // client was null, leaving dead flat=null keys on disk forever.
+  //
+  // The fix ungated the scrub so it runs whenever ws.oauth exists and the
+  // flat keys are present (regardless of truthiness).
+  const wm = new WorkspaceManager();
+  wm.config = {
+    server: { port: 3100 },
+    workspaces: [
+      {
+        id: 'disambiguated-ws', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+        oauth: {
+          enabled: true,
+          issuer: 'https://mcp.example',
+          client: null,
+          clientId: null,       // legacy disambiguation output
+          clientSecret: null,
+          authMethod: null,
+          byIdentity: { default: { tokens: null } },
+        },
+      },
+    ],
+  };
+  const mutated = wm._migrateLegacy();
+  assert.ok(mutated, '_migrateLegacy must return true when flat keys are scrubbed');
+  const ws = wm.config.workspaces[0];
+  assert.equal(ws.oauth.client, null, 'client stays null (no flat to promote)');
+  // Flat keys scrubbed (even though they were null)
+  assert.equal('clientId' in ws.oauth, false, 'Phase 11 §3: flat clientId key must be scrubbed (was null)');
+  assert.equal('clientSecret' in ws.oauth, false, 'Phase 11 §3: flat clientSecret key must be scrubbed (was null)');
+  assert.equal('authMethod' in ws.oauth, false, 'Phase 11 §3: flat authMethod key must be scrubbed (was null)');
+});
+
+test('§Phase11-3: _migrateLegacy returns false when no mutation occurs (already-migrated config)', () => {
+  // Sanity: _migrateLegacy must not force-save an already-clean config.
+  const wm = new WorkspaceManager();
+  wm.config = {
+    server: { port: 3100 },
+    workspaces: [
+      {
+        id: 'clean-ws', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+        oauth: {
+          enabled: true,
+          issuer: 'https://mcp.example',
+          client: { clientId: 'CID', authMethod: 'none', source: 'dcr', registeredAt: '2026-01-01' },
+          byIdentity: { default: { tokens: { accessToken: 'AT' } } },
+        },
+      },
+    ],
+  };
+  const mutated = wm._migrateLegacy();
+  assert.equal(mutated, false, 'already-migrated config must not trigger mutation flag');
+});

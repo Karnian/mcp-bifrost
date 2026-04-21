@@ -33,7 +33,8 @@ function makeWm(workspaces) {
     logError: () => {},
     setOAuthManager() {},
     getDiagnostics: () => ({ workspaces, errorLog: [], auditLog: [], oauthAuditLog: [] }),
-    // Phase 10a: getOAuthClient public API
+    // Phase 11 §3: getOAuthClient is nested-only (flat-fallback removed from
+    // production WorkspaceManager; test stub mirrors that behavior).
     getOAuthClient: (id) => {
       const ws = workspaces.find(w => w.id === id);
       if (!ws?.oauth) return null;
@@ -41,7 +42,6 @@ function makeWm(workspaces) {
         const c = ws.oauth.client;
         return { clientId: c.clientId, clientSecret: c.clientSecret ? '***' : null, authMethod: c.authMethod, source: c.source, registeredAt: c.registeredAt };
       }
-      if (ws.oauth.clientId) return { clientId: ws.oauth.clientId, clientSecret: ws.oauth.clientSecret ? '***' : null, authMethod: ws.oauth.authMethod, source: 'legacy-flat', registeredAt: null };
       return null;
     },
     // Phase 10a Codex R2 blocker 1 — provider recreate on rotation

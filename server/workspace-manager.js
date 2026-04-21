@@ -118,8 +118,14 @@ export class WorkspaceManager {
       }
     }
     if (!this.config.workspaces) this.config.workspaces = [];
-    this._migrateLegacy();
+    const mutated = this._migrateLegacy();
     this._loaded = true;
+    // Phase 11 §3 — persist migration results so on-disk config converges
+    // to nested-only (Phase 10a §3.4 deprecation window is closed). Without
+    // this, the scrub only exists in memory until the next unrelated write.
+    if (mutated) {
+      await this._save().catch(() => {});
+    }
     await this._initProviders();
     this._startFileWatcher();
   }
@@ -130,6 +136,7 @@ export class WorkspaceManager {
     let oauthMirrored = 0;
     let clientBlockMigrated = 0;
     let clientMismatchWarned = 0;
+    let flatScrubbed = 0;
     for (const ws of this.config.workspaces) {
       if (!ws.kind) {
         ws.kind = 'native';
@@ -166,12 +173,20 @@ export class WorkspaceManager {
         logger.warn(`[WorkspaceManager] Phase 11 §3: ws.oauth.client.clientId diverges from legacy ws.oauth.clientId for workspace '${ws.id}'. Scrubbing legacy flat fields; preferring nested client.*`);
         clientMismatchWarned++;
       }
-      // Phase 11 §3 — scrub flat-field mirror once nested is present (or
-      // immediately after the flat→nested promotion above).
-      if (ws.oauth?.client) {
-        if ('clientId' in ws.oauth) delete ws.oauth.clientId;
-        if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
-        if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
+      // Phase 11 §3 — scrub flat-field mirror in ALL cases where ws.oauth
+      // exists and flat keys are present, regardless of whether nested is
+      // populated. This covers:
+      //   (1) nested populated (common post-10a case) → scrub flat mirror
+      //   (2) nested===null + flat keys lingering (Phase 10a disambiguation
+      //       output left flat=null in place) → scrub the dead keys anyway
+      //   (3) first-time flat→nested promotion above → scrub originals
+      // Codex Phase 11-3 R1 called out case (2) as previously unhandled.
+      if (ws.oauth && typeof ws.oauth === 'object') {
+        let scrubbed = false;
+        if ('clientId' in ws.oauth) { delete ws.oauth.clientId; scrubbed = true; }
+        if ('clientSecret' in ws.oauth) { delete ws.oauth.clientSecret; scrubbed = true; }
+        if ('authMethod' in ws.oauth) { delete ws.oauth.authMethod; scrubbed = true; }
+        if (scrubbed) flatScrubbed++;
       }
     }
     if (migrated > 0) {
@@ -186,6 +201,13 @@ export class WorkspaceManager {
     if (clientMismatchWarned > 0) {
       logger.warn(`[WorkspaceManager] Phase 10a: ${clientMismatchWarned} workspace(s) have conflicting nested vs flat OAuth client fields`);
     }
+    if (flatScrubbed > 0) {
+      logger.info(`[WorkspaceManager] Phase 11 §3: scrubbed legacy flat OAuth field mirror from ${flatScrubbed} workspace(s)`);
+    }
+    // Phase 11 §3 — report whether the config was mutated so callers can
+    // decide whether to persist. `load()` and the hot-reload watcher use
+    // this to converge on-disk config to nested-only.
+    return (migrated + oauthMirrored + clientBlockMigrated + clientMismatchWarned + flatScrubbed) > 0;
   }
 
   /**
@@ -644,7 +666,19 @@ export class WorkspaceManager {
               const newConfig = JSON.parse(raw);
               this.config = newConfig;
               if (!this.config.workspaces) this.config.workspaces = [];
+              // Phase 11 §3 — apply legacy→nested migration on hot-reload too.
+              // Without this, an externally-edited config carrying flat
+              // ws.oauth.{clientId,clientSecret,authMethod} would bypass the
+              // Phase 11 scrub and reach runtime unnormalized — causing
+              // mis-resolved client fields (reads are nested-only now) and
+              // leaking flat clientSecret through masked admin views (maskOAuth
+              // no longer masks flat fields).
+              const mutated = this._migrateLegacy();
               await this._initProviders();
+              if (mutated) {
+                // Persist the scrubbed form so disk converges on single source.
+                this._save().catch(() => {});
+              }
               this._notifyChange();
               logger.info('[WorkspaceManager] Config hot-reloaded');
             } catch { /* ignore parse errors during write */ }

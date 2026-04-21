@@ -95,6 +95,7 @@ function applyMigration(config) {
   // 1. Flat → nested per workspace. Phase 11 §3: also scrub the flat keys
   // after promotion so no mirror remains on disk. The 1-release deprecation
   // window closed in Phase 11 — all runtime read paths use nested only.
+  const flatScrubbed = []; // [{id}]
   for (const ws of config.workspaces || []) {
     if (!ws.oauth) continue;
     if (!ws.oauth.client && ws.oauth.clientId) {
@@ -106,12 +107,15 @@ function applyMigration(config) {
         registeredAt: ws.oauth.clientRegisteredAt || new Date().toISOString(),
       };
     }
-    // Phase 11 §3 — scrub flat mirror if nested is now present.
-    if (ws.oauth.client) {
-      if ('clientId' in ws.oauth) delete ws.oauth.clientId;
-      if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
-      if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
-    }
+    // Phase 11 §3 — scrub flat mirror in ALL cases (including client===null
+    // + lingering flat=null keys from old Phase 10a disambiguation output).
+    // Codex Phase 11-3 R1 called out that gating on `if (ws.oauth.client)`
+    // left stale null flat keys on disk forever.
+    let scrubbed = false;
+    if ('clientId' in ws.oauth) { delete ws.oauth.clientId; scrubbed = true; }
+    if ('clientSecret' in ws.oauth) { delete ws.oauth.clientSecret; scrubbed = true; }
+    if ('authMethod' in ws.oauth) { delete ws.oauth.authMethod; scrubbed = true; }
+    if (scrubbed) flatScrubbed.push({ id: ws.id });
   }
   // 2. Shared clientId disambiguation. For each group of workspaces with the
   //    same (issuer, clientId), keep the first one and flag the rest for re-auth.
@@ -144,7 +148,7 @@ function applyMigration(config) {
       disambiguated.push({ id: ws.id, groupKey: key });
     }
   }
-  return { disambiguated };
+  return { disambiguated, flatScrubbed };
 }
 
 async function main() {
@@ -178,7 +182,7 @@ async function main() {
   if (process.platform !== 'win32') {
     try { await chmod(backupPath, 0o600); } catch {}
   }
-  const { disambiguated } = applyMigration(config);
+  const { disambiguated, flatScrubbed } = applyMigration(config);
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
   if (process.platform !== 'win32') {
     try { await chmod(configPath, 0o600); } catch {}
@@ -214,7 +218,7 @@ async function main() {
     backup: backupPath,
     backupMode: process.platform === 'win32' ? 'chmod-skipped' : '0o600',
     pendingPurged,
-    report: { ...report, disambiguated },
+    report: { ...report, disambiguated, flatScrubbed },
   }, null, 2));
 }
 
