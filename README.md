@@ -79,7 +79,8 @@ tests/
 - ✅ Cloudflare Tunnel + .mcp.json 자동 생성
 - ✅ **OAuth 2.0 for remote MCP** (Notion 공식, PKCE, DCR, refresh rotation, mutex)
 - ✅ **Multi-tenant (Phase 7)** — `byIdentity` OAuth 격리, 다중 MCP 토큰 + ACL, 프로필, 사용량/감사 로그
-- ✅ 160+ tests passing
+- ✅ **OAuth Client Isolation (Phase 10a)** — workspace 단위 DCR client 격리, 401 fail-fast, FIFO chain mutex (`_identityMutex` + `_workspaceMutex`), migration 스크립트. Codex 11 rounds APPROVE.
+- ✅ 325 tests passing (327 total, 2 skipped)
 
 ## 다중 사용자 운영 (Phase 7)
 

@@ -1,8 +1,16 @@
 # OAuth Client Isolation Plan — Phase 10a
 
 **작성일**: 2026-04-20
+**완료일**: 2026-04-22 (Codex R11 APPROVE)
+**상태**: ✅ **완료 — Production-ready**
 **범위**: 같은 OAuth issuer(예: Notion MCP)에 여러 Bifrost workspace를 연결할 때 refresh-token supersede 로 인한 401 무한 루프 해소
 **주요 목표**: Workspace 단위 OAuth client 격리 + 401 루프 감지 fail-fast + static client 우선 설계
+
+> **구현 결과 요약** (전체 상세는 [`PHASE10a_SELFREVIEW_LOG.md`](PHASE10a_SELFREVIEW_LOG.md) 참고)
+> - Codex 리뷰 11 rounds, 17 blockers 전부 close
+> - 테스트: 327 / pass 325 / fail 0 / skip 2 (Phase 10a 신규 47건)
+> - 주요 커밋: `535ddaf` (기반) → `f038134` (R10) → `1fbd1ff` (R11 APPROVE)
+> - Phase 11 후보: [`NEXT_SESSION.md`](NEXT_SESSION.md) 참고
 
 ---
 
