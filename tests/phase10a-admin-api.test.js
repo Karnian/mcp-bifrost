@@ -322,6 +322,95 @@ test('§4.10a-2 (Codex R3): /authorize purges pending auth states when rotating 
   }
 });
 
+test('§4.10a-2 (Codex R4 blocker): /authorize rotation invalidates existing tokens', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
+  const mock = new MockOAuthServer({ dcrEnabled: true });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: {
+        enabled: true,
+        issuer: base,
+        client: { clientId: 'OLD_CID', authMethod: 'none', source: 'dcr', registeredAt: '2026-01-01' },
+        clientId: 'OLD_CID', authMethod: 'none',
+        metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+        byIdentity: { default: { tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT', expiresAt: null, tokenType: 'Bearer' } } },
+        tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT', expiresAt: null, tokenType: 'Bearer' },
+      },
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forceRegister: true }),
+      });
+      assert.equal(r.status, 200);
+      // Codex R4: both accessToken AND refreshToken must be nulled so a refresh
+      // doesn't combine old refresh_token with new client credentials.
+      assert.equal(ws.oauth.byIdentity.default.tokens.accessToken, null);
+      assert.equal(ws.oauth.byIdentity.default.tokens.refreshToken, null);
+      assert.equal(ws.oauth.tokens.accessToken, null);
+      assert.equal(ws.oauth.tokens.refreshToken, null);
+      assert.equal(ws.oauthActionNeededBy.default, true);
+      assert.equal(ws.oauthActionNeeded, true);
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-2 (Codex R4 blocker): /authorize manual.clientId is honored even when client already exists', async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
+  const mock = new MockOAuthServer({ dcrEnabled: true });
+  const base = await mock.start();
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+      displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+      oauth: {
+        enabled: true,
+        issuer: base,
+        client: { clientId: 'EXISTING', authMethod: 'none', source: 'dcr', registeredAt: '2026-01-01' },
+        clientId: 'EXISTING', authMethod: 'none',
+        metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+        byIdentity: { default: { tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT' } } },
+        tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT' },
+      },
+    };
+    const wm = makeWm([ws]);
+    const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+    const { server, port } = await startAdminServer(wm, oauth);
+    try {
+      // Send /authorize with manual.clientId — contract requires it is honored
+      // even though a client already exists. Previously dropped silently.
+      const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/w1/authorize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manual: { clientId: 'OPERATOR_CID', clientSecret: 's', authMethod: 'client_secret_basic' } }),
+      });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.data.clientId, 'OPERATOR_CID', '/authorize must honor manual override even with an existing client');
+      assert.equal(body.data.authMethod, 'client_secret_basic');
+      assert.equal(ws.oauth.client.clientId, 'OPERATOR_CID');
+      assert.equal(ws.oauth.client.source, 'manual');
+    } finally {
+      await new Promise(r => server.close(r));
+    }
+  } finally {
+    await mock.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1b: /api/oauth/discover response does NOT include cachedClient field', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
   const mock = new MockOAuthServer({ dcrEnabled: true });

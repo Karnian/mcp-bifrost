@@ -218,29 +218,29 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             resource = disc.resource;
             ws.oauth = { ...(ws.oauth || {}), enabled: true, issuer, resource, metadataCache: asMetadata };
           }
-          // Phase 10a §4.10a-2 — client resolution priority:
-          //   1. Manual body.manual (wizard path): honor immediately, persist to ws.oauth.client
-          //   2. ws.oauth.client.clientId (static/stored): reuse, no DCR
-          //   3. Legacy flat ws.oauth.clientId (pre-10a workspaces): treat as stored
-          //   4. Otherwise: call registerClient({ workspaceId }) for DCR with workspace-scoped cache
-          // body.forceRegister bypasses (2)/(3) to force a fresh DCR.
+          // Phase 10a §4.10a-2 — client resolution priority (Codex R4 fix):
+          //   1. body.manual.clientId (operator-supplied) → ALWAYS honored, rotates
+          //      any existing client. No silent ignore when a client already exists.
+          //   2. body.forceRegister === true → fresh DCR, rotates existing client.
+          //   3. Existing ws.oauth.client.clientId (nested) or legacy flat clientId → reuse.
+          //   4. Otherwise: DCR via registerClient({ workspaceId }).
           let authMethod = ws.oauth?.client?.authMethod ?? ws.oauth?.authMethod;
           let clientId = ws.oauth?.client?.clientId ?? ws.oauth?.clientId;
           let clientSecret = ws.oauth?.client?.clientSecret ?? ws.oauth?.clientSecret ?? null;
           let clientSource = ws.oauth?.client?.source || (clientId ? 'legacy-flat' : null);
-          // Phase 10a (Codex R3): /authorize is also a client-rotation path
-          // when `forceRegister === true` OR `body.manual.clientId` is present.
-          // Purge pending entries + invalidate old tokens just like /oauth/register
-          // so a stale browser callback cannot resurrect the pre-rotation client.
-          const isRotation = body?.forceRegister === true || (body?.manual && body.manual.clientId);
-          if (!clientId || body?.forceRegister) {
-            if (body?.manual && body.manual.clientId) {
-              // Phase 10a (Codex R3): authMethod whitelist on the /authorize manual
-              // path matches /oauth/register and /oauth/client.
+          // Detect rotation: manual input OR explicit forceRegister OR missing client.
+          const hasManual = !!(body?.manual && body.manual.clientId);
+          const isRotation = hasManual || body?.forceRegister === true;
+          const needsClient = !clientId || isRotation;
+          if (needsClient) {
+            if (hasManual) {
+              // Phase 10a (Codex R3+R4): manual path — always honored, authMethod whitelist.
               const manualAuth = body.manual.authMethod || 'none';
               if (!['none', 'client_secret_basic', 'client_secret_post'].includes(manualAuth)) {
                 return sendJson(res, 400, { ok: false, error: { code: 'UNSUPPORTED_AUTH_METHOD', message: `authMethod '${manualAuth}' not supported; use none/client_secret_basic/client_secret_post` } });
               }
+              // Purge cache so registerManual replaces the stored client outright.
+              if (oauth.removeClient) await oauth.removeClient(id);
               const reg = await oauth.registerManual({
                 workspaceId: id,
                 issuer,
@@ -251,20 +251,39 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
               clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
               clientSource = 'manual';
             } else {
+              // DCR path. forceRegister → fresh; otherwise reuse.
+              if (body?.forceRegister && oauth.removeClient) await oauth.removeClient(id);
               const reg = await oauth.registerClient(issuer, asMetadata, {
                 workspaceId: id,
-                reuse: body?.reuse !== false,
+                reuse: !body?.forceRegister && body?.reuse !== false,
                 forceNew: body?.forceRegister === true,
               });
               clientId = reg.clientId; clientSecret = reg.clientSecret; authMethod = reg.authMethod;
               clientSource = 'dcr';
             }
           }
-          // Phase 10a (Codex R3 blocker): /authorize can rotate client →
-          // purge pending auth states scoped to this workspace so the
-          // outgoing /authorize stays the only valid callback.
-          if (isRotation && oauth.purgePendingForWorkspace) {
-            await oauth.purgePendingForWorkspace(id);
+          // Phase 10a (Codex R3+R4): on rotation, purge pending states AND
+          // invalidate existing tokens. Otherwise a refresh could combine the
+          // old refresh_token with new client credentials and fail.
+          if (isRotation) {
+            if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
+            if (ws.oauth?.byIdentity) {
+              for (const ident of Object.keys(ws.oauth.byIdentity)) {
+                if (ws.oauth.byIdentity[ident]?.tokens) {
+                  ws.oauth.byIdentity[ident].tokens.accessToken = null;
+                  ws.oauth.byIdentity[ident].tokens.refreshToken = null;
+                }
+              }
+            }
+            if (ws.oauth?.tokens) {
+              ws.oauth.tokens.accessToken = null;
+              ws.oauth.tokens.refreshToken = null;
+            }
+            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+            for (const ident of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+              ws.oauthActionNeededBy[ident] = true;
+            }
+            ws.oauthActionNeeded = true;
           }
           // Phase 10a §3.4 — persist into ws.oauth.client AND mirror flat fields (1 release)
           ws.oauth = {

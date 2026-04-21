@@ -115,6 +115,40 @@ Contents:
 
 ---
 
+## Codex review — Round 4 (2026-04-21)
+
+**Verdict**: REVISE (1 High + 1 Medium — both on `/authorize`)
+
+### Finding 1 (High) — `/authorize` rotation left tokens intact
+R3 added pending-purge to `/authorize` rotation, but the handler never nulled
+existing access/refresh tokens. A concurrent refresh could combine the old
+`refresh_token` with the new client credentials and fail silently.
+
+**Fix**: In the rotation branch of `admin/routes.js /authorize`, null all
+byIdentity access+refresh tokens, null legacy mirror tokens, flip
+`oauthActionNeededBy` and `oauthActionNeeded`. Same pattern as
+`/oauth/register` + `/oauth/client`.
+
+Verified: `§4.10a-2 (Codex R4 blocker): /authorize rotation invalidates existing tokens`.
+
+### Finding 2 (Medium) — `/authorize` silently ignored `manual.clientId` when client exists
+The priority comment said manual input is the #1 priority but the code used
+`if (!clientId || forceRegister)` — so with an existing client, manual input
+was silently dropped.
+
+**Fix**: Restructured client resolution. Now `hasManual = !!manual.clientId`
+triggers the manual path regardless of existing client state. Cache is also
+purged (`removeClient`) before `registerManual` to ensure replacement.
+
+Verified: `§4.10a-2 (Codex R4 blocker): /authorize manual.clientId is honored even when client already exists`.
+
+Notes: Codex flagged the rate_limited status on its response but did produce
+the full verdict before the rate limit error. The Phase-11 cleanup suggestions
+(extract shared "rotate client" helper, remove flat-field mirror, more
+regression tests) are captured below.
+
+---
+
 ## Codex review — Round 3 (2026-04-21)
 
 **Verdict**: REVISE (1 high + 1 medium — both on the `/authorize` endpoint)
@@ -300,7 +334,13 @@ Expected report fields (from stdout JSON):
 
 ## Follow-up (Phase 10a+ deferred)
 
-Per plan §12:
+Per plan §12 + Codex R2/R3/R4 Phase-11 notes:
+
+- **Extract shared rotate-client helper** (Codex R4 suggestion): admin/routes.js
+  now has 3 endpoints (`/authorize` forceRegister/manual, `/oauth/register`,
+  `/oauth/client`) with nearly identical rotation logic (cache purge + pending
+  purge + token invalidation + action_needed + provider recreate). A single
+  helper `rotateClient(oauth, wm, ws, { source, newClient })` would prevent drift.
 - **§12-2** Admin wizard for "Static client" creation path (UX help for operators
   registering Notion integrations directly on mcp.notion.com).
 - **§12-3** Notion MCP official recommendations — documentation clarification
@@ -309,8 +349,9 @@ Per plan §12:
   move to disjoint namespaces `global::` vs `ws::${wsId}::` in Phase 11 for
   stronger schema separation. Current reservation at `addWorkspace` level is
   sufficient for MVP.
-- Flat field mirror removal in Phase 11 (deprecation WARN already in place).
-- `server/oauth-metrics.js` counter-only recorder (plan §6-OBS.2) — deferred,
+- **Flat field mirror removal** in Phase 11 (deprecation WARN already in place).
+  Codex R4 suggested replacing with a single client-resolution helper.
+- **`server/oauth-metrics.js`** counter-only recorder (plan §6-OBS.2) — deferred,
   audit log covers observability for Phase 10a.
 
 ---
