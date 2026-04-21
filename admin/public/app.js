@@ -48,9 +48,19 @@ function bifrostModal({ title, fields, submitLabel = '확인', cancelLabel = '�
           btn.disabled = true;
           setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
         } catch {
-          // Clipboard API blocked (non-HTTPS / older browser) — highlight
-          // the text so the operator can Cmd+C manually.
-          if (target.select) target.select();
+          // Codex R1 non-blocking: clipboard blocked (non-HTTPS / older
+          // browser). `<code>` nodes have no .select(), so use the
+          // selection range API to highlight the text instead — operator
+          // can Cmd+C / Ctrl+C manually.
+          try {
+            const selection = window.getSelection?.();
+            if (selection) {
+              selection.removeAllRanges?.();
+              selection.selectAllChildren?.(target);
+            } else if (target.select) {
+              target.select();
+            }
+          } catch { /* best-effort */ }
         }
       });
     });
@@ -815,9 +825,13 @@ async function runOAuthFlow(wsId, { identity = 'default' } = {}) {
     // Phase 11-9 §12-2: enrich the prompt with a provider-specific guide
     // + copyable redirect URI so operators don't have to dig through docs.
     if (!res.ok && res.error?.code === 'DCR_UNSUPPORTED') {
+      // Codex R1 non-blocking: UX-enrichment fetches must NOT abort the
+      // manual prompt on failure. If either call rejects, degrade to
+      // `null` and show the plain 3-field form — better than blocking
+      // the whole OAuth flow on an admin API hiccup.
       const [wsRes, redirectRes] = await Promise.all([
-        api('GET', `/api/workspaces/${encodeURIComponent(wsId)}`),
-        api('GET', '/api/oauth/redirect-uri'),
+        api('GET', `/api/workspaces/${encodeURIComponent(wsId)}`).catch(() => null),
+        api('GET', '/api/oauth/redirect-uri').catch(() => null),
       ]);
       const manual = await promptManualClientCreds({
         workspaceUrl: wsRes?.data?.url || null,

@@ -1,10 +1,9 @@
 # 다음 세션 핸드오프
 
-**마지막 세션 완료일**: 2026-04-22 (Phase 11-5 완료)
-**마지막 완료 Phase**: 11-5 — Refresh timeout + AbortController (Codex R1 APPROVE)
-**이전 완료 Phase**: 11-4 — OAuthMetrics 본격 구현 (§6-OBS.2 Codex R2 APPROVE)
-**추가 완료 Phase**: 11-1/2/3 — R10 regression test + Rotate-client helper + Flat-field mirror removal
-**Phase 10a 완료**: OAuth Client Isolation (Codex R11 APPROVE)
+**마지막 세션 완료일**: 2026-04-22 (Phase 11 전체 후보 소진)
+**마지막 완료 Phase**: 11-9 — Admin Wizard Static client UX (Codex R1 APPROVE)
+**이번 세션 추가 Phase**: 11-6 (metrics cardinality) · 11-7 (cache key schema) · 11-8 (watcher atomic-replace) · 11-9 (static client wizard)
+**이전 완료 Phase**: 11-5 (refresh timeout AbortController) · 11-4 (OAuthMetrics recorder) · 11-1/2/3 · 10a
 
 ---
 
@@ -88,21 +87,19 @@ node scripts/migrate-oauth-clients.mjs --restore
 - `admin/routes.js` — `GET /api/oauth/metrics` endpoint (broken recorder 시 `wm.logError('oauth.metrics', ...)` 후 빈 배열 degrade)
 - `tests/phase11-4-oauth-metrics.test.js` — 29 tests (unit + integration + admin API + late-success regression + NO_REFRESH_TOKEN/TOKEN_ENDPOINT_UNKNOWN + action_needed contract)
 
-### 5. §12-2 Admin Wizard — Static client 발급 UX
-**목적**: 운영자가 Notion integration 페이지에서 static client 직접 발급하는 과정을 Admin UI 에서 안내
-**현재**: `POST /api/workspaces/:id/oauth/register` API 는 이미 존재. UI wizard 만 없음.
-**필요 작업**: `admin/public/app.js` 에 "Add workspace" 플로우 확장 — Step 2b 에 Notion integration 생성 안내 + 복사 가능한 redirect URI + client_id/secret 입력 폼
-**규모**: 소 (1일 미만, 백엔드 변경 없음)
+### ~~5. §12-2 Admin Wizard — Static client 발급 UX~~ ✅ **완료 2026-04-22 (Phase 11-9)**
+**커밋**: `<HEAD>` — `GET /api/oauth/redirect-uri` 엔드포인트 + `bifrostModal({ bodyHtml })` 옵션 + `STATIC_CLIENT_GUIDES` (Notion/GitHub) + copyable redirect URI + CSS 가이드 스타일 + 3 tests
+**Codex**: R1 APPROVE (blocker 없음). 2 non-blocking 반영 — clipboard fallback `selectAllChildren` / admin API 실패 시 Promise.all graceful degrade.
 
-### 6. `__global__` namespace 강화 (Codex R1 non-blocking)
-**위치**: `server/oauth-manager.js:_cacheKey` — 현재 `__global__::${issuer}::${authMethod}` legacy 호환
-**개선**: `ws::` / `global::` prefix 로 더 엄격한 schema 분리. 테스트/legacy 경계 명확화.
-**규모**: 소 (2~3시간)
+### ~~6. `__global__` namespace 강화~~ ✅ **완료 2026-04-22 (Phase 11-7)**
+**커밋**: `<HEAD>` — `_cacheKey` schema 갱신 + `_migrateLegacyCacheKeys` 추가 + `removeClient` prefix 갱신 + hardcoded test 갱신 + 15 tests
+**Codex**: R1 CONDITIONAL (IPv6 literal + RFC 8414 path issuer migration miss) → R2 APPROVE. 2 rounds.
+**산출물**: 신규 key schema `ws::${wsId}::${issuer}::${authMethod}` / `global::${issuer}::${authMethod}`. first/last delimiter 기반 parser 로 issuer 에 `::` 포함 OK. `KNOWN_AUTH_METHODS` set 으로 pass-through 보수적 처리.
 
-### 7. Watcher atomic-replace gap (Phase 11-3 Codex R2 low)
-**위치**: `server/workspace-manager.js._startFileWatcher` — 현재 `eventType === 'change'` 만 처리. `rename`-style atomic save (에디터의 temp-file+rename)는 hot-reload 를 바이패스함.
-**개선**: `rename` 이벤트도 처리하거나 `chokidar` 같은 watcher 로 전환. Phase 11 에서는 scope out — Phase 11-3 의 Migration가 hot-reload에 plug-in되긴 했지만 watcher 자체의 event-type coverage는 별개 이슈.
-**규모**: 소 (2~3시간)
+### ~~7. Watcher atomic-replace gap~~ ✅ **완료 2026-04-22 (Phase 11-8)**
+**커밋**: `<HEAD>` — `_startFileWatcher` 가 `rename` 도 처리 + watcher rebind (new inode) + `configDir` DI + 50ms grace + 5 tests
+**Codex**: R1 CONDITIONAL (mutated hot-reload 시 `_save()` 와 rebind 경합 → watcher stale 가능성) → fix (rebind 를 `savePromise.finally(...)` 로 sequencing) → regression test 재현.
+**산출물**: `WorkspaceManager({ configDir })` DI, rename 이벤트 수용, mutated migration save 완료 후 rebind.
 
 ### ~~8. Refresh timeout + AbortController~~ ✅ **완료 2026-04-22 (Phase 11-5)**
 **커밋**: `<HEAD>` — `_tokenRequest(…, { signal })` optional arg + `_runRefresh` 에 `AbortController` 통합 + post-fetch guard + 7 신규 tests
@@ -112,10 +109,19 @@ node scripts/migrate-oauth-clients.mjs --restore
 - `server/oauth-manager.js._runRefresh` — `AbortController` 생성 → `_tokenRequest({ signal })` + timeout `setTimeout` 에서 `controller.abort()` 를 `reject` 전에 호출 + post-fetch `if (controller.signal.aborted) throw REFRESH_ABORTED` guard (signal-ignoring stub 커버).
 - `tests/phase11-5-refresh-abort.test.js` — 7 tests (standards fetch / stub fetch / signal passthrough / backwards compat / happy path ok 유지 / phase6c 호환 / quiesced state revive 방지).
 
-### 9. OAuthMetrics cardinality cap / workspace-delete cleanup (Phase 11-4 Codex R2 non-blocking)
-**현상**: in-memory Map 이 삭제된 workspace/identity 튜플에 대한 entry 도 수명 종료 시까지 보유. production 에서 workspace churn 이 크면 메모리 monotonic 증가.
-**개선**: `WorkspaceManager.deleteWorkspace()` hook 에서 `OAuthMetrics` 의 workspace 라벨 entry 일괄 삭제 + 옵션 soft cap (1k entries, LRU evict).
-**규모**: 소 (2~3시간)
+### ~~9. OAuthMetrics cardinality cap / workspace-delete cleanup~~ ✅ **완료 2026-04-22 (Phase 11-6)**
+**커밋**: `<HEAD>` — `OAuthMetrics.pruneWorkspace(wsId)` + soft cap (default 10_000, insertion-order evict) + `size()` + `OAuthManager.removeClient` 에서 prune 호출 + 12 tests
+**Codex**: R1 APPROVE (blocker 없음, non-blocking 없음).
+
+---
+
+## Phase 11 전체 완료 — 남은 후속 후보 (모두 non-blocking/선택적)
+
+- **Admin `size()` saturation 엔드포인트** — Phase 11-6 Codex R1 non-blocking. `/api/oauth/metrics/status` 같은 경로에서 `{ entries, maxEntries, capped, evictionsTotal }` 반환.
+- **`STATIC_CLIENT_GUIDES` hostname 기반 매칭** — Phase 11-9 Codex R1 non-blocking. 현재 substring match → `new URL(url).hostname` 로 전환 (false positive 방지).
+- **unknown-authMethod legacy key `removeClient` overmatch** — Phase 11-7 Codex R2 non-blocking. 현재 `ws::` prefix 만 purge → legacy pass-through 형태는 잔존. `private_key_jwt` 같은 미래 enum 추가 시 coordination 필요.
+- **Watcher rename 후 re-migration loop 회피** — Phase 11-8 후속 hardening 후보. 현재 save-before-rebind sequencing 으로 기본 race 는 닫음.
+- **Frontend unit test (`guideFor`, `renderStaticClientBody`)** — Phase 11-9 Codex R1 nice-to-have.
 
 ---
 

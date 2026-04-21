@@ -135,6 +135,71 @@ test('self _save does NOT loop the hot-reload (self-save guard)', async () => {
   }
 });
 
+test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays observed', async () => {
+  // Repro: external atomic write plants a flat-field (pre-Phase-11-3)
+  // legacy config → hot-reload triggers _migrateLegacy() mutated=true
+  // → background _save() fires another atomic rename. Without the
+  // save-before-rebind sequencing, the rebound watcher would arm on
+  // the old inode, the save's rename would skip because _saving=true,
+  // and the watcher goes stale. A subsequent external rename is then
+  // silently missed.
+  const dir = await mkdtemp(join(tmpdir(), 'phase11-8-'));
+  const configPath = join(dir, 'workspaces.json');
+  try {
+    await writeFile(configPath, JSON.stringify(makeConfig([])), 'utf-8');
+    const wm = new WorkspaceManager({ configDir: dir });
+    await wm.load();
+
+    // 1) External atomic write with a FLAT-FIELD legacy oauth entry.
+    //    _migrateLegacy() promotes flat → nested + scrubs, returning
+    //    mutated=true → hot-reload pipeline schedules _save() which
+    //    itself is an atomic rename.
+    const legacyWs = {
+      id: 'http-legacy',
+      kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      displayName: 'Legacy', alias: 'legacy', namespace: 'legacy', enabled: true,
+      oauth: {
+        enabled: true,
+        issuer: 'https://auth.example',
+        // Flat fields — pre-Phase-11-3 shape. Migration moves them
+        // under ws.oauth.client + scrubs the flat keys.
+        clientId: 'LEGACY_CID',
+        clientSecret: null,
+        authMethod: 'none',
+      },
+    };
+    const tmpPath1 = join(dir, 'external1.tmp');
+    await writeFile(tmpPath1, JSON.stringify(makeConfig([legacyWs]), null, 2), 'utf-8');
+    await rename(tmpPath1, configPath);
+
+    // Wait for migration + background _save to flush.
+    const promoted = await waitForCondition(() => {
+      const ws = wm.getRawWorkspace?.('http-legacy') || wm._getRawWorkspace?.('http-legacy');
+      return ws?.oauth?.client?.clientId === 'LEGACY_CID';
+    });
+    assert.ok(promoted, 'flat field must have been migrated into ws.oauth.client');
+    // Give _save's own atomic rename time to finalise.
+    await new Promise(r => setTimeout(r, 120));
+
+    // 2) Second external atomic rename AFTER the migration save. If the
+    //    rebind raced the save, this event is missed and the test fails
+    //    on timeout.
+    const tmpPath2 = join(dir, 'external2.tmp');
+    await writeFile(tmpPath2, JSON.stringify(makeConfig([
+      // Different workspace id so we can assert state change.
+      { id: 'native-fresh', kind: 'native', provider: 'notion', displayName: 'Fresh', alias: 'fresh', namespace: 'fresh', enabled: true, credentials: {} },
+    ]), null, 2), 'utf-8');
+    await rename(tmpPath2, configPath);
+
+    const observed = await waitForCondition(() =>
+      wm.getWorkspaces().length === 1 && wm.getWorkspaces()[0].id === 'native-fresh'
+    );
+    assert.ok(observed, 'second external rename after mutated hot-reload must still be hot-reloaded');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('non-existent file at startup: watcher stays idle (no crash)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'phase11-8-'));
   try {

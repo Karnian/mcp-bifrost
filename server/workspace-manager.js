@@ -709,6 +709,14 @@ export class WorkspaceManager {
           // nothing to reload from.
           break;
         }
+        // Phase 11-8 §7 (Codex R1 blocker) — if the hot-reload triggers a
+        // migration `_save()`, the rebind below MUST wait for that save
+        // to finish. Otherwise the rebind can arm a new watcher on the
+        // old inode, and the subsequent `_save()`-driven atomic rename
+        // (flipping to a fresh inode) is silently skipped by the
+        // `_saving` guard — after which the new watcher is stale. The
+        // second external write would then be missed entirely.
+        let savePromise = Promise.resolve();
         try {
           const raw = await readFile(this._configPath, 'utf-8');
           const newConfig = JSON.parse(raw);
@@ -726,7 +734,7 @@ export class WorkspaceManager {
           if (mutated) {
             // Persist the scrubbed form so disk converges on single source.
             // Codex Phase 11-3 R2: log failures so operators notice.
-            this._save().catch((err) => {
+            savePromise = this._save().catch((err) => {
               logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
             });
           }
@@ -740,9 +748,11 @@ export class WorkspaceManager {
         // don't rebind on every write.
         if (event.eventType === 'rename') {
           try { watcher.close(); } catch { /* already closed */ }
-          // schedule rebind on next tick so the current async-iter
-          // finishes cleanly.
-          setImmediate(() => {
+          // Phase 11-8 §7 Codex R1 blocker fix — wait for any in-flight
+          // migration `_save()` to finish before rearming, so the new
+          // watcher binds to the post-save inode rather than racing with
+          // the save's own rename.
+          savePromise.finally(() => {
             if (this._watcher === watcher) this._watcher = null;
             this._startFileWatcher();
           });
