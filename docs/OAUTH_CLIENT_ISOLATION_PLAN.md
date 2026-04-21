@@ -244,9 +244,10 @@ workspaceId 맥락이 없음 (preview 시점엔 workspace 미생성).
   ```
   - 단순히 `tokens.accessToken = null` 만 하던 이전 설계안은 byIdentity 경로에서
     작동 안 함 (Codex Round 2 반영).
-  - `_withIdentityMutex` 는 기존 `_refreshMutex` 와 동일 구조 — (wsId, identity) 튜플 키.
+  - `_withIdentityMutex` 는 **(wsId, identity) 튜플 키 + FIFO chain 패턴** — §6.4 참고.
+    기존 `_refreshMutex` 의 coalescing 패턴을 **버리고** chain 으로 대체 (Round 8 blocker 1 반영).
     workspace-단위 격상은 identity 병렬 refresh 계약 (oauth-manager.js:575-580 +
-    phase7c-pre-migration.test.js:148-160) 을 깨뜨리므로 금지 (Codex Round 5 반영).
+    phase7c-pre-migration.test.js:148-160) 을 깨뜨리므로 금지 (Round 5 반영).
 - [ ] `_rpc()` 의 HTTP 401 처리도 동일 카운터 공유 (스트림/RPC 통합)
 - [ ] 테스트 시나리오:
   - default identity: 401 → refresh → 401 × 3 → markAuthFailed → `byIdentity.default.tokens.accessToken === null` + `oauthActionNeededBy.default === true` + `ws.oauth.tokens.accessToken === null`
@@ -315,19 +316,47 @@ workspaceId 맥락이 없음 (preview 시점엔 workspace 미생성).
 - reload/reconnect 시 카운터 리셋 — 일시적 서버 오류와 영구 토큰 문제를 구별 가능
 - 3회 임계치는 `BIFROST_AUTH_FAIL_THRESHOLD` 환경변수로 조정 가능
 
-### 6.4 동시성 제어 (Codex Round 3+5+6 반영)
+### 6.4 동시성 제어 (Codex Round 3+5+6+8 반영)
 - `markAuthFailed()` 와 `_refreshWithMutex()` 는 **`(workspaceId, identity)` 튜플 단위 mutex** 로 직렬화.
 - 현재 `oauth-manager.js:575-580` 은 이미 identity 별 병렬 refresh 를 보장하고 있음
   (`tests/phase7c-pre-migration.test.js:148-160` 에서 default/bot_ci 병렬 refresh 검증).
   **workspace-단위로 격상하면 기존 계약 깨짐** → 튜플 키로 유지.
-- 구현: **기존 `_refreshMutex` Map 을 `_identityMutex` 로 rename** + `_withIdentityMutex(wsId, identity, fn)` 헬퍼 도입.
-  - `_refreshWithMutex()` 와 `markAuthFailed()` 가 **동일 Map 을 공유** 해야 실제 직렬화 성립
-    (Codex Round 6 지적 — 서로 다른 Map 쓰면 상호배제 안 됨).
-  - 기존 `_refreshMutex` 사용처 전부 `_withIdentityMutex` 헬퍼로 전환.
-- 경쟁 시나리오 방지:
-  - 시나리오 1: refresh 진행 중 markAuthFailed(동일 identity) 호출 → markAuthFailed 대기 → refresh 완료 후 action_needed 처리
-  - 시나리오 2: markAuthFailed 중 동일 identity refresh 트리거 → refresh 대기 → action_needed 플래그 확인 후 early-return (`{ skipped: true, reason: 'action_needed' }`)
-  - 시나리오 3: default 가 markAuthFailed 중 bot_ci 는 독립적으로 refresh 가능 (격리 유지)
+- ⚠️ **Semantics 전환 — coalescing ❌ → FIFO chain ✅** (Codex Round 8 blocker 1):
+  - 현재 `_refreshMutex` 는 **coalescing** 패턴 (`if (existing) return existing` — `oauth-manager.js:579-580`).
+    같은 identity 재진입 refresh 가 in-flight promise 에 piggyback → refresh 중복 호출 방지에는 적합.
+  - 그러나 `markAuthFailed ↔ refresh` 상호배제는 coalescing 만으로 **성립 불가** — refresh 진행 중
+    markAuthFailed 가 호출되면 coalescing 은 "같은 refresh promise 반환" 이므로 **action_needed 처리가
+    refresh 뒤로 chain 되지 않고 refresh 결과로 대체됨**.
+  - 해결: `_withIdentityMutex(wsId, identity, fn)` 는 **FIFO chain 패턴**. 내부 `Map<key, Promise>` 에
+    마지막 꼬리를 저장, 각 호출은 그 꼬리에 `.then(fn)` 으로 체이닝 후 꼬리를 자기 것으로 교체. 즉
+    **모든 호출이 순차 실행** (coalescing 아님).
+  - 결과적으로 refresh coalescing 효과는 **사라짐** (같은 identity 병렬 refresh 2건 이 순차 실행됨).
+    단, refresh 는 일반적으로 동일 identity 가 동시에 쏟아지지 않으므로 실용 영향 미미. coalescing 이
+    필요한 경로가 있다면 `_withIdentityMutex` 내부에서 "최근 N ms 내 refresh 결과 캐시" 로 별도 처리.
+- 구현 요약:
+  - **`_refreshMutex` → `_identityMutex` rename** + coalescing 코드 (`if (existing) return existing`) **제거**
+  - `_withIdentityMutex(wsId, identity, fn)` 헬퍼 신규:
+    ```js
+    _withIdentityMutex(wsId, identity, fn) {
+      const key = `${wsId}::${identity}`;
+      const prev = this._identityMutex.get(key) || Promise.resolve();
+      const next = prev.catch(() => {}).then(() => fn());
+      this._identityMutex.set(key, next);
+      // 꼬리가 완료되면 Map entry 제거 (메모리 누수 방지)
+      next.finally(() => {
+        if (this._identityMutex.get(key) === next) this._identityMutex.delete(key);
+      });
+      return next;
+    }
+    ```
+  - `_refreshWithMutex()` 와 `markAuthFailed()` 둘 다 위 헬퍼로 감싸 **동일 Map 공유**
+    (Codex Round 6 — 서로 다른 Map 쓰면 상호배제 안 됨).
+- 경쟁 시나리오 방지 (chain 패턴 기준):
+  - 시나리오 1: refresh 진행 중 markAuthFailed(동일 identity) 호출 → markAuthFailed 는 refresh tail 에
+    chain → refresh 완료 후 순차 실행 (action_needed 처리 보장)
+  - 시나리오 2: markAuthFailed 중 동일 identity refresh 트리거 → refresh 는 markAuthFailed tail 에
+    chain → 실행 시점에 action_needed 플래그 관찰 → early-return (`{ skipped: true, reason: 'action_needed' }`)
+  - 시나리오 3: default 가 markAuthFailed 중 bot_ci 는 독립적으로 refresh 가능 (튜플 키가 달라 다른 chain)
 - save() 자체도 `_saving` 플래그 + chain 패턴이 이미 재진입 방어 중 (Phase 8b #6 완료 항목)
 
 ---
@@ -421,18 +450,21 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 
 ---
 
-## 9. 성공 기준 (assertion-style, Codex Round 3+4 반영)
+## 9. 성공 기준 (assertion-style, Codex Round 3+4+8 반영)
 
 모든 항목은 자동화 테스트로 검증 가능한 단정형. 외부 리뷰/수동 E2E 기준 제거.
 내부 구현 symbol (cache key 문자열 등) 대신 **공개 API / 파일 상태** 기준.
 
 ### 핵심
 - [ ] **테스트 수**: `npm test` 결과 `# pass ≥ 286`, `# fail == 0`
-- [ ] **다중 Notion isolation (자동 테스트, 모의 시계)**:
+- [ ] **다중 Notion isolation (자동 테스트, 모의 시계)** (Round 8 — API 정합화):
   - 2개 workspace 등록 + 첫 token 저장
-  - `node:test` 의 `mock.timers.tick(24 * 60 * 60 * 1000)` 로 24h 경과 시뮬레이션 + refresh 트리거 (Round 5 반영)
-  - 검증: `wm.getWorkspace(A).oauth.byIdentity.default.tokens.accessToken` 값이
-    `wm.getWorkspace(B).oauth.byIdentity.default.tokens.accessToken` 과 상위 12자 이상 다름
+  - `node:test` 의 `mock.timers.tick(24 * 60 * 60 * 1000)` 로 24h 경과 시뮬레이션 + `forceRefresh(id, 'default')` 트리거 (Round 5 반영)
+  - 검증 (masked API — `workspace-manager.js:236` 기본 `masked=true` 고려):
+    `wm.getWorkspace(A).oauth.byIdentity.default.tokens.accessTokenPrefix`
+    !== `wm.getWorkspace(B).oauth.byIdentity.default.tokens.accessTokenPrefix`
+    (prefix 포맷 `${first4}***${last4}` — 서로 다른 token 이면 prefix 도 달라짐)
+  - 또는 raw 비교가 필요한 경우: `wm.getWorkspace(A, { masked: false }).oauth.byIdentity.default.tokens.accessToken`
   - 검증: 양쪽 `wm.getDiagnostics().workspaces[i].status === 'healthy'`
   - **수동 E2E 제거** (자동화로 동일 검증)
 - [ ] **마이그레이션 파일 상태**:
@@ -452,28 +484,36 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 ### 추가 검증
 - [ ] **재시작 시 DCR 0회**: 테스트 (fetch spy) — 첫 OAuth 사이클 DCR POST 1회,
   서버 재시작 (OAuthManager 재생성) 후 `tools/list` 호출 시 추가 DCR POST 0회 + tools/list 응답 성공
-- [ ] **비 default identity 401 경로**:
-  - `wm.getWorkspace(id).oauth.byIdentity.bot_ci.tokens.accessToken === null`
+- [ ] **비 default identity 401 경로** (Round 8 — masked API 기준으로 교체):
+  - `wm.getWorkspace(id).oauth.byIdentity.bot_ci.tokens.hasAccessToken === false`
   - `wm.getWorkspace(id).oauthActionNeededBy.bot_ci === true`
-  - `wm.getWorkspace(id).oauth.byIdentity.default.tokens.accessToken !== null` (원값 유지)
-  - `wm.getWorkspace(id).oauth.tokens.accessToken !== null` (legacy mirror 미변경)
+  - `wm.getWorkspace(id).oauth.byIdentity.default.tokens.hasAccessToken === true` (원값 유지)
+  - `wm.getWorkspace(id).oauth.tokens.hasAccessToken === true` (legacy mirror 미변경)
   - `wm.getWorkspace(id).oauthActionNeeded === false` (root 플래그는 default 전용)
-- [ ] **Cache purge 대상 격리 (공개 API 기준)**:
-  - workspace A 영구 삭제 후 A 재인증 시 `wm.getOAuthClient(A)` → null
-  - workspace B 의 `wm.getOAuthClient(B)` → 여전히 이전 값
+  - 참고: `hasAccessToken` 은 `workspace-manager.js:33` 의 `maskTokenEntry()` 가 반환하는 boolean — raw token 노출 없이 존재 여부만 확인.
+- [ ] **Cache purge 대상 격리 (공개 API + behavior 검증)** (Round 8 — 보강):
+  - workspace A hard delete 후 → `wm.getOAuthClient(A)` === null
+  - workspace B 의 `wm.getOAuthClient(B)` → 여전히 이전 값 (격리 유지)
+  - **Behavior 검증** (purge 가 실제로 cache 에서 제거됐는지 — getter null 만으로는 내부 `_clientCache` 잔존 가능):
+    - A 를 동일 id 로 재등록 + OAuth authorize 트리거 시 DCR endpoint fetch spy call count === 1
+      (cache 에 남아있었다면 재사용돼서 0 이 나와야 정상이지만, purge 됐으므로 새로 호출돼야 함)
+    - 재등록 후 `wm.getOAuthClient(A).clientId !== `이전 A 의 clientId (새 clientId 발급 확인)
 - [ ] **Soft delete cache 정책**:
-  - `softDelete(A)` 직후 → `wm.getOAuthClient(A)` 이전 값 유지
-  - `restoreWorkspace(A)` + `tools/list` → HTTP 200 (재인증 요구 없음)
+  - `softDelete(A)` 직후 → `wm.getOAuthClient(A)` 이전 값 유지 (DCR fetch spy call count === 0)
+  - `restoreWorkspace(A)` + `tools/list` → HTTP 200 (재인증 요구 없음, DCR 0회)
   - `purgeExpiredWorkspaces()` 실행 후 → `wm.getOAuthClient(A)` === null
+  - purge 후 동일 id 재등록 + authorize → DCR fetch spy call count === 1 (새 등록)
 - [ ] **마이그레이션 3 경로**:
   - `--dry-run`: stdout JSON 출력 0 ≠ empty, `stat(workspaces.json).mtime` 변경 없음
   - `--apply`: `.bak` 존재 + `0o600` + 원본 변경됨 + process 종료 후 WARN 로그 0건
   - `--restore`: `diff workspaces.json workspaces.json.pre-10a.bak === ''`
-- [ ] **Concurrency 안전성**:
-  - `Promise.all([markAuthFailed(A,'default'), refreshWithMutex(A,'default')])` 후
+- [ ] **Concurrency 안전성** (Round 8 — 공개 API `forceRefresh` 사용):
+  - `Promise.all([om.markAuthFailed(A,'default'), om.forceRefresh(A,'default')])` 후
     최종 `wm.getWorkspace(A).oauthActionNeededBy.default === true` (어떤 순서든)
-- [ ] **Refresh early-return 검증** (Codex Round 4 신규):
-  - `markAuthFailed(A, 'default')` 호출 후 `refreshWithMutex(A, 'default')` 호출
+  - chain 패턴이므로 `forceRefresh` 가 markAuthFailed 뒤에 실행돼도 action_needed 관찰 → early-return
+- [ ] **Refresh early-return 검증** (Codex Round 4 신규, Round 8 API 수정):
+  - `om.markAuthFailed(A, 'default')` 호출 후 `om.forceRefresh(A, 'default')` 호출
+    (`forceRefresh` 는 `oauth-manager.js:570-572` 의 공개 래퍼 — 내부에서 `_refreshWithMutex` 호출)
   - fetch spy → token endpoint POST call count === 0 (refresh 시도하지 않음)
   - 반환값에 `{ skipped: true, reason: 'action_needed' }`
 - [ ] **Audit clientId 마스킹** (Codex Round 4 신규):
@@ -564,12 +604,21 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 | 평면필드 참조 위치 2곳 추가 발견 | `admin/routes.js:222-247` (init 엔드포인트), `server/oauth-manager.js:527-529` (`_persistTokens`) | §3.4 — 참조 위치 목록 3→6 확장 |
 | §11 문서 불일치 | Round 3 이력에 `_withWorkspaceMutex` 잔존 | 전역 치환으로 통일 |
 
-### Round 7 — 2026-04-20 (REVISE → 반영 후 Round 8 검토 예정)
+### Round 7 — 2026-04-20 (REVISE)
 
 | # | 지적 | 반영 |
 |---|------|------|
 | `markAuthFailed()` 저장경로 오류 | `getWorkspace()` masked clone + `save()` 미존재 | §4.10a-4 코드블록 — `_getRawWorkspace()` + `_save()` 로 수정 (기존 `oauth-manager.js:499, 503, 651-653` 패턴 일치) |
 | `/api/oauth/discover` cachedClient 의미 충돌 | workspace-aware 전환 후 workspaceId 없는 맥락에서 조회 의미 희박 | §4.10a-1b 신규 단계 — cachedClient 필드 제거 (Option Y) |
+
+### Round 8 — 2026-04-21 (REVISE)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| Mutex semantics 오인 유도 | `_identityMutex` 를 "기존 `_refreshMutex` 와 동일 구조" 로 기술 → 실제 `oauth-manager.js:579-580` 는 **coalescing** 패턴이라 그대로 구현하면 `markAuthFailed ↔ refresh` 상호배제 실패 | §6.4 전면 재작성 — **FIFO chain 패턴** 명시 + coalescing 제거 + `_withIdentityMutex` 헬퍼 코드 블록 추가 |
+| §9 masked API 불일치 | `wm.getWorkspace(id).oauth.byIdentity.*.tokens.accessToken` 검증은 기본 `masked=true` (`workspace-manager.js:236-243`) 에서 raw token 못 봄 | §9 — `accessTokenPrefix` 비교 또는 `hasAccessToken` boolean 사용으로 교체. raw 필요 시 `{ masked: false }` 명시 |
+| §9 비공개 API 참조 | `refreshWithMutex` 는 내부 `_refreshWithMutex` 로 공개 API 아님 | §9 — 공개 래퍼 `forceRefresh(wsId, identity)` (`oauth-manager.js:570-572`) 로 교체 |
+| Cache purge 검증 약함 | `wm.getOAuthClient()` null 만으로는 `_clientCache` 내부 purge 증명 불가 | §9 Cache purge — 재등록 시 DCR fetch spy call count === 1 + 새 clientId 발급 behavior assertion 추가 |
 
 ---
 
