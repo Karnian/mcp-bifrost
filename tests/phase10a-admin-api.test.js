@@ -413,6 +413,140 @@ test('§4.10a-2 (Codex R4 blocker): /authorize manual.clientId is honored even w
   }
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// Phase 11 §2 — _rotateClientAndInvalidate consolidation coverage
+//
+// These tests verify that all three rotation paths (POST /oauth/register,
+// PUT /oauth/client, POST /oauth/authorize with rotation) produce the
+// EXACT SAME post-rotation state — a guarantee of the consolidated helper.
+
+async function doRotateRegisterDcr(ws, wm, oauth, port) {
+  return fetch(`http://127.0.0.1:${port}/api/workspaces/${ws.id}/oauth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+}
+async function doRotatePutClient(ws, wm, oauth, port) {
+  return fetch(`http://127.0.0.1:${port}/api/workspaces/${ws.id}/oauth/client`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId: 'NEW_PUT_CLIENT', clientSecret: 'SECRET', authMethod: 'client_secret_basic' }),
+  });
+}
+async function doRotateAuthorizeForceRegister(ws, wm, oauth, port) {
+  return fetch(`http://127.0.0.1:${port}/api/workspaces/${ws.id}/authorize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ forceRegister: true }),
+  });
+}
+
+test('§Phase11-2: all three rotation paths invalidate tokens + action_needed (consistency via consolidated helper)', async () => {
+  // Proves all three paths — POST /oauth/register (DCR), PUT /oauth/client
+  // (manual), POST /oauth/authorize (forceRegister) — produce identical
+  // invalidation state after rotation. This is the behavioral contract
+  // the _rotateClientAndInvalidate helper enforces.
+  for (const [label, doRotate] of [
+    ['register-dcr', doRotateRegisterDcr],
+    ['put-client', doRotatePutClient],
+    ['authorize-force', doRotateAuthorizeForceRegister],
+  ]) {
+    const stateDir = await mkdtemp(join(tmpdir(), `phase11-helper-${label}-`));
+    const mock = new MockOAuthServer({ dcrEnabled: true });
+    const base = await mock.start();
+    try {
+      const ws = {
+        id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+        displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+        oauth: {
+          enabled: true,
+          issuer: base,
+          client: { clientId: 'OLD_CLIENT', authMethod: 'none', source: 'dcr', registeredAt: '2020-01-01' },
+          clientId: 'OLD_CLIENT',
+          authMethod: 'none',
+          metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+          byIdentity: {
+            default:  { tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT', expiresAt: null, tokenType: 'Bearer' } },
+            bot_ci:   { tokens: { accessToken: 'OLD_AT2', refreshToken: 'OLD_RT2', expiresAt: null, tokenType: 'Bearer' } },
+          },
+          tokens: { accessToken: 'OLD_AT', refreshToken: 'OLD_RT', expiresAt: null, tokenType: 'Bearer' },
+        },
+      };
+      const wm = makeWm([ws]);
+      const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+      const { server, port } = await startAdminServer(wm, oauth);
+      try {
+        const r = await doRotate(ws, wm, oauth, port);
+        assert.equal(r.status, 200, `${label}: rotation must succeed`);
+        // Post-rotation invariants (identical across all three paths).
+        assert.notEqual(ws.oauth.client.clientId, 'OLD_CLIENT', `${label}: client must have rotated`);
+        for (const ident of ['default', 'bot_ci']) {
+          assert.equal(ws.oauth.byIdentity[ident].tokens.accessToken, null, `${label}: ${ident} accessToken must be nulled`);
+          assert.equal(ws.oauth.byIdentity[ident].tokens.refreshToken, null, `${label}: ${ident} refreshToken must be nulled`);
+          assert.equal(ws.oauthActionNeededBy[ident], true, `${label}: ${ident} must be flagged action_needed`);
+        }
+        assert.equal(ws.oauth.tokens.accessToken, null, `${label}: legacy tokens.accessToken must be nulled`);
+        assert.equal(ws.oauth.tokens.refreshToken, null, `${label}: legacy tokens.refreshToken must be nulled`);
+        assert.equal(ws.oauthActionNeeded, true, `${label}: legacy oauthActionNeeded must be true`);
+        // Flat field mirror must be updated alongside nested client (§3.4).
+        assert.equal(ws.oauth.clientId, ws.oauth.client.clientId, `${label}: flat clientId mirror must match nested`);
+        assert.equal(ws.oauth.authMethod, ws.oauth.client.authMethod, `${label}: flat authMethod mirror must match nested`);
+      } finally {
+        await new Promise(r => server.close(r));
+      }
+    } finally {
+      await mock.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('§Phase11-2: POST /oauth/register and PUT /oauth/client BOTH recreate provider (consistent via helper)', async () => {
+  // POST /register and PUT /client must recreate the provider so the new
+  // client is effective immediately. /authorize does NOT recreate (it
+  // expects the browser to follow up via /callback). This test proves the
+  // helper's `recreateProvider` option is correctly wired per route.
+  for (const [label, doRotate, expectRecreate] of [
+    ['register-dcr', doRotateRegisterDcr, true],
+    ['put-client', doRotatePutClient, true],
+    ['authorize-force', doRotateAuthorizeForceRegister, false],
+  ]) {
+    const stateDir = await mkdtemp(join(tmpdir(), `phase11-recreate-${label}-`));
+    const mock = new MockOAuthServer({ dcrEnabled: true });
+    const base = await mock.start();
+    try {
+      const ws = {
+        id: 'w1', kind: 'mcp-client', transport: 'http', url: `${base}/mcp`,
+        displayName: 'X', namespace: 'x', provider: 'notion', enabled: true,
+        oauth: {
+          enabled: true, issuer: base,
+          client: { clientId: 'OLD', authMethod: 'none', source: 'dcr', registeredAt: '2020-01-01' },
+          clientId: 'OLD', authMethod: 'none',
+          metadataCache: { registration_endpoint: `${base}/register`, token_endpoint: `${base}/token`, authorization_endpoint: `${base}/authorize` },
+          byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT' } } },
+          tokens: { accessToken: 'AT', refreshToken: 'RT' },
+        },
+      };
+      const wm = makeWm([ws]);
+      const oauth = new OAuthManager(wm, { stateDir, redirectPort: 3100 });
+      const { server, port } = await startAdminServer(wm, oauth);
+      try {
+        const r = await doRotate(ws, wm, oauth, port);
+        assert.equal(r.status, 200, `${label}: rotation must succeed`);
+        const recreated = wm.providerRecreateLog.includes('w1');
+        assert.equal(recreated, expectRecreate,
+          `${label}: provider recreate expected=${expectRecreate}, got=${recreated}`);
+      } finally {
+        await new Promise(r => server.close(r));
+      }
+    } finally {
+      await mock.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('§4.10a-1b: /api/oauth/discover response does NOT include cachedClient field', async () => {
   const stateDir = await mkdtemp(join(tmpdir(), 'phase10a-admin-'));
   const mock = new MockOAuthServer({ dcrEnabled: true });

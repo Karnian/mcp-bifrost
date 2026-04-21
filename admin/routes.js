@@ -23,6 +23,95 @@ const MIME_TYPES = {
 
 export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extras = {}) {
   const { usage = null, audit = null } = extras;
+
+  // Phase 11 §2 — Consolidated client-rotation helper.
+  //
+  // The three admin OAuth client-rotation paths (POST /oauth/register,
+  // PUT /oauth/client, POST /oauth/authorize with rotation) previously
+  // repeated near-identical rotation-commit + token-invalidation + pending-
+  // purge + provider-recreate logic. This helper centralizes that sequence
+  // so all three share one source of truth and drift is eliminated.
+  //
+  // Contract (matches what the three routes did individually):
+  //   1. Commit the new client under _workspaceMutex via
+  //      oauth.rotateClientUnderMutex(wsId, null, commitFn) — so every
+  //      in-flight refresh/markAuthFailed quiesces before ws.oauth mutates
+  //      and a late callback cannot resurrect the pre-rotation client.
+  //   2. Inside the mutex: replace ws.oauth.client (nested), mirror flat
+  //      fields (§3.4 deprecation window), null ALL tokens under
+  //      ws.oauth.byIdentity and legacy ws.oauth.tokens, and set
+  //      oauthActionNeededBy[identity]=true for every known identity
+  //      (+ ws.oauthActionNeeded for 'default' compat).
+  //   3. Outside the mutex: purge pending auth states (§4.10a-5 Codex R2b2)
+  //      and persist (wm._save).
+  //   4. If recreateProvider is true (default): call wm._createProvider(ws)
+  //      so the new client is effective immediately (POST/PUT paths).
+  //      /authorize does NOT recreate (it expects the browser to follow up
+  //      with /callback) — pass recreateProvider: false.
+  //
+  // Caller is responsible for purging the DCR cache BEFORE this helper
+  // (oauth.removeClient(wsId)) if that's desired — the helper doesn't do
+  // it so operators retain control over cache semantics per route.
+  async function _rotateClientAndInvalidate(wsId, newClient, {
+    reason = 'rotate',            // free-form: 'dcr-register', 'manual', 'authorize'
+    recreateProvider = true,
+    invalidateTokens = true,
+  } = {}) {
+    const ws = wm._getRawWorkspace(wsId);
+    if (!ws) throw new Error(`_rotateClientAndInvalidate: workspace '${wsId}' not found`);
+    if (!newClient || !newClient.clientId) {
+      throw new Error('_rotateClientAndInvalidate: newClient.clientId is required');
+    }
+    const source = newClient.source
+      || (reason === 'manual' ? 'manual' : reason === 'dcr-register' ? 'dcr' : (ws.oauth?.client?.source || 'dcr'));
+    const registeredAt = newClient.registeredAt || new Date().toISOString();
+    await oauth.rotateClientUnderMutex(wsId, null, async () => {
+      ws.oauth = {
+        ...ws.oauth,
+        client: {
+          clientId: newClient.clientId,
+          clientSecret: newClient.clientSecret ?? null,
+          authMethod: newClient.authMethod,
+          source,
+          registeredAt,
+        },
+        // mirror flat fields (§3.4, one release — Phase 11 candidate #3 removes)
+        clientId: newClient.clientId,
+        clientSecret: newClient.clientSecret ?? null,
+        authMethod: newClient.authMethod,
+      };
+      if (invalidateTokens) {
+        if (ws.oauth.byIdentity) {
+          for (const identity of Object.keys(ws.oauth.byIdentity)) {
+            if (ws.oauth.byIdentity[identity]?.tokens) {
+              ws.oauth.byIdentity[identity].tokens.accessToken = null;
+              ws.oauth.byIdentity[identity].tokens.refreshToken = null;
+            }
+          }
+        }
+        if (ws.oauth.tokens) {
+          ws.oauth.tokens.accessToken = null;
+          ws.oauth.tokens.refreshToken = null;
+        }
+        ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+        for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+          ws.oauthActionNeededBy[identity] = true;
+        }
+        ws.oauthActionNeeded = true;
+      }
+    });
+    // Pending purge + save — outside the mutex (they don't mutate the client
+    // and pending lives in a separate file anyway).
+    if (oauth.purgePendingForWorkspace) {
+      await oauth.purgePendingForWorkspace(wsId);
+    }
+    await wm._save();
+    if (recreateProvider && wm._createProvider) {
+      wm._createProvider(ws);
+    }
+    return ws;
+  }
+
   return async (req, res, url) => {
     const path = url.pathname;
     const method = req.method;
@@ -262,18 +351,28 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
               clientSource = 'dcr';
             }
           }
-          // Phase 10a (Codex R6 blocker 1): pending purge can stay outside
-          // mutex (it only affects browser callbacks, not refresh). But the
-          // token invalidation MUST move inside the mutex so a background
-          // refresh cannot write old tokens back between this block and the
-          // client commit below.
+          // Phase 11 §2 — rotation branch uses the consolidated helper.
+          // First-time auth (isRotation=false) keeps the inline commit since
+          // it neither rotates client fields semantically nor invalidates
+          // tokens — and must preserve the existing registeredAt.
           if (isRotation) {
-            if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
-          }
-          // Phase 10a §3.4 + Codex R5/R6 — commit client + invalidate old
-          // tokens atomically under the identity FIFO mutex so an in-flight
-          // refresh/markAuthFailed cannot write old-client state back.
-          const commitClientAndInvalidate = () => {
+            // Note: helper purges pending INSIDE its sequence. The prior
+            // behavior purged BEFORE the rotation mutex; helper runs it after.
+            // Functionally equivalent — pending purge only affects browser
+            // callbacks, and we're about to create a brand-new pending entry
+            // via initializeAuthorization below, so stale entries can't
+            // survive this request either way. Any rogue callback racing
+            // this window would already be gated by _workspaceMutex via
+            // completeAuthorization.
+            await _rotateClientAndInvalidate(id, {
+              clientId,
+              clientSecret: clientSecret ?? null,
+              authMethod,
+              source: clientSource || ws.oauth?.client?.source || 'dcr',
+            }, { reason: 'authorize', recreateProvider: false });
+          } else {
+            // First-time authorization — just persist the client fields with
+            // preserved registeredAt. No mutex needed (no rotation race).
             ws.oauth = {
               ...ws.oauth,
               client: {
@@ -287,32 +386,8 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
               clientSecret: clientSecret ?? null,
               authMethod,
             };
-            if (isRotation) {
-              if (ws.oauth?.byIdentity) {
-                for (const ident of Object.keys(ws.oauth.byIdentity)) {
-                  if (ws.oauth.byIdentity[ident]?.tokens) {
-                    ws.oauth.byIdentity[ident].tokens.accessToken = null;
-                    ws.oauth.byIdentity[ident].tokens.refreshToken = null;
-                  }
-                }
-              }
-              if (ws.oauth?.tokens) {
-                ws.oauth.tokens.accessToken = null;
-                ws.oauth.tokens.refreshToken = null;
-              }
-              ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-              for (const ident of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-                ws.oauthActionNeededBy[ident] = true;
-              }
-              ws.oauthActionNeeded = true;
-            }
-          };
-          if (isRotation && oauth.rotateClientUnderMutex) {
-            await oauth.rotateClientUnderMutex(id, null, async () => { commitClientAndInvalidate(); });
-          } else {
-            commitClientAndInvalidate();
+            await wm._save();
           }
-          await wm._save();
 
           const init = await oauth.initializeAuthorization(id, {
             issuer,
@@ -414,52 +489,14 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             reg = await oauth.registerClient(issuer, md, { workspaceId: id, forceNew: true, reuse: false });
             reg.source = 'dcr';
           }
-          // Codex R5 blocker — rotate under identity mutex so in-flight
-          // refresh/markAuthFailed cannot race our writes.
-          await oauth.rotateClientUnderMutex(id, null, async () => {
-            ws.oauth = {
-              ...ws.oauth,
-              client: {
-                clientId: reg.clientId,
-                clientSecret: reg.clientSecret ?? null,
-                authMethod: reg.authMethod,
-                source: reg.source,
-                registeredAt: new Date().toISOString(),
-              },
-              // mirror flat fields (§3.4, one release)
-              clientId: reg.clientId,
-              clientSecret: reg.clientSecret ?? null,
-              authMethod: reg.authMethod,
-            };
-            // Mark all identities as requiring re-authorization — old tokens
-            // (both access AND refresh) are bound to the old client_id and invalid.
-            if (ws.oauth.byIdentity) {
-              for (const identity of Object.keys(ws.oauth.byIdentity)) {
-                if (ws.oauth.byIdentity[identity]?.tokens) {
-                  ws.oauth.byIdentity[identity].tokens.accessToken = null;
-                  ws.oauth.byIdentity[identity].tokens.refreshToken = null;
-                }
-              }
-            }
-            if (ws.oauth.tokens) {
-              ws.oauth.tokens.accessToken = null;
-              ws.oauth.tokens.refreshToken = null;
-            }
-            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-            for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-              ws.oauthActionNeededBy[identity] = true;
-            }
-            ws.oauthActionNeeded = true;
-          });
-          // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
-          // for this workspace so a stale browser tab/callback cannot resurrect
-          // the pre-rotation client.
-          if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
-          await wm._save();
-          // Phase 10a §4.10a-5 (Codex R2 blocker 1) — recreate the provider so
-          // the new client is effective immediately (especially if the old
-          // provider was in stopped:auth_failed).
-          if (wm._createProvider) wm._createProvider(ws);
+          // Phase 11 §2 — consolidated rotate + invalidate + purge + save +
+          // recreate-provider via _rotateClientAndInvalidate helper.
+          await _rotateClientAndInvalidate(id, {
+            clientId: reg.clientId,
+            clientSecret: reg.clientSecret ?? null,
+            authMethod: reg.authMethod,
+            source: reg.source,
+          }, { reason: body?.manual ? 'manual' : 'dcr-register' });
           sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
         } catch (err) {
           const code = err.code || 'OAUTH_ERROR';
@@ -508,44 +545,13 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             clientSecret: body.clientSecret ?? null,
             authMethod,
           });
-          // Codex R5 — rotate under mutex to prevent refresh race.
-          await oauth.rotateClientUnderMutex(id, null, async () => {
-            ws.oauth = {
-              ...ws.oauth,
-              client: {
-                clientId: reg.clientId,
-                clientSecret: reg.clientSecret ?? null,
-                authMethod: reg.authMethod,
-                source: 'manual',
-                registeredAt: new Date().toISOString(),
-              },
-              clientId: reg.clientId,
-              clientSecret: reg.clientSecret ?? null,
-              authMethod: reg.authMethod,
-            };
-            if (ws.oauth.byIdentity) {
-              for (const identity of Object.keys(ws.oauth.byIdentity)) {
-                if (ws.oauth.byIdentity[identity]?.tokens) {
-                  ws.oauth.byIdentity[identity].tokens.accessToken = null;
-                  ws.oauth.byIdentity[identity].tokens.refreshToken = null;
-                }
-              }
-            }
-            if (ws.oauth.tokens) {
-              ws.oauth.tokens.accessToken = null;
-              ws.oauth.tokens.refreshToken = null;
-            }
-            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-            for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-              ws.oauthActionNeededBy[identity] = true;
-            }
-            ws.oauthActionNeeded = true;
-          });
-          // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
-          if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
-          await wm._save();
-          // Phase 10a §4.10a-5 (Codex R2 blocker 1) — recreate provider
-          if (wm._createProvider) wm._createProvider(ws);
+          // Phase 11 §2 — consolidated rotation via _rotateClientAndInvalidate.
+          await _rotateClientAndInvalidate(id, {
+            clientId: reg.clientId,
+            clientSecret: reg.clientSecret ?? null,
+            authMethod: reg.authMethod,
+            source: 'manual',
+          }, { reason: 'manual' });
           sendJson(res, 200, { ok: true, data: wm.getOAuthClient(id) });
         } catch (err) {
           sendJson(res, 500, { ok: false, error: { code: err.code || 'OAUTH_ERROR', message: err.message } });
