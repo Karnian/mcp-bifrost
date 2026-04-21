@@ -6,6 +6,7 @@ import { McpHandler } from './mcp-handler.js';
 import { SseManager } from './sse-manager.js';
 import { createAdminRoutes } from '../admin/routes.js';
 import { OAuthManager } from './oauth-manager.js';
+import { OAuthMetrics } from './oauth-metrics.js';
 import { McpTokenManager } from './mcp-token-manager.js';
 import { UsageRecorder } from './usage-recorder.js';
 import { AuditLogger } from './audit-logger.js';
@@ -76,7 +77,8 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
   const audit = new AuditLogger();
   const mcp = new McpHandler(wm, tr, { usage });
   const sse = new SseManager();
-  const oauth = new OAuthManager(wm);
+  const oauthMetrics = new OAuthMetrics();
+  const oauth = new OAuthManager(wm, { metrics: oauthMetrics });
   const tokenManager = new McpTokenManager(wm);
   wm.setOAuthManager(oauth);
   wm.setAuditLogger?.(audit);
@@ -99,7 +101,7 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
   // server handle is the one that holds the process open in production.
   healthInterval.unref?.();
 
-  const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit });
+  const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit, oauthMetrics });
 
   async function authenticateMcp(req, res, url) {
     if (!tokenManager.isConfigured()) {

@@ -581,6 +581,29 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // GET /api/oauth/metrics — in-memory OAuth counter snapshot (Phase 11-4 §6-OBS.2).
+      // Prefer the recorder wired into extras (server/index.js injects it) but
+      // fall back to `oauth.metrics` so the admin UI keeps working even if the
+      // caller forgot to pass it through extras.
+      //
+      // Codex R1 non-blocking: guard snapshot() so a broken recorder cannot
+      // 500 the admin page. Consistent with the _metric() try/catch on the
+      // OAuthManager side.
+      if (path === '/api/oauth/metrics' && method === 'GET') {
+        const metrics = extras.oauthMetrics || oauth?.metrics || null;
+        let data = [];
+        try {
+          data = metrics?.snapshot?.() || [];
+        } catch (err) {
+          // Broken recorder must not 500 the admin page. Surface the fault
+          // via error log so operators still see it in /api/diagnostics.
+          wm.logError?.('oauth.metrics', null, `snapshot failed: ${err?.message || err}`);
+          data = [];
+        }
+        sendJson(res, 200, { ok: true, data });
+        return;
+      }
+
       // GET /api/oauth/security — fileSecurityWarning flag
       if (path === '/api/oauth/security' && method === 'GET') {
         sendJson(res, 200, { ok: true, data: {

@@ -1,8 +1,9 @@
 # 다음 세션 핸드오프
 
-**마지막 세션 완료일**: 2026-04-22 (Phase 11 완료)
-**마지막 완료 Phase**: 11 — 3 candidates (R10 regression test + Rotate-client helper consolidation + Flat-field mirror removal)
-**이전 완료 Phase**: 10a — OAuth Client Isolation (Codex R11 APPROVE)
+**마지막 세션 완료일**: 2026-04-22 (Phase 11-4 완료)
+**마지막 완료 Phase**: 11-4 — OAuthMetrics 본격 구현 (§6-OBS.2 Codex R2 APPROVE)
+**이전 완료 Phase**: 11-1/2/3 — R10 regression test + Rotate-client helper + Flat-field mirror removal
+**Phase 10a 완료**: OAuth Client Isolation (Codex R11 APPROVE)
 
 ---
 
@@ -76,10 +77,15 @@ node scripts/migrate-oauth-clients.mjs --restore
 - `admin/public/app.js` — flat-field fallback 제거
 - 5 새 테스트 (flat scrub, mutated flag, null case)
 
-### 4. `server/oauth-metrics.js` 본격 구현 (§6-OBS.2 플랜 deferred)
-**현재**: audit event 는 기록되지만 counter 집계 없음
-**필요 작업**: `OAuthMetrics` 클래스 구현 — lightweight in-memory Map 으로 `oauth_threshold_trip_total`, `oauth_dcr_total{status}`, `oauth_refresh_total{status}`, `oauth_cache_hit_total / miss_total` 집계. Admin UI `/api/oauth/metrics` 엔드포인트 노출.
-**규모**: 중 (반일)
+### ~~4. `server/oauth-metrics.js` 본격 구현 (§6-OBS.2 플랜 deferred)~~ ✅ **완료 2026-04-22**
+**커밋**: `<HEAD>` — OAuthMetrics 클래스 + 4개 counter + admin endpoint + 29개 테스트
+**Codex**: R1 CONDITIONAL (refresh timeout 시 late-success 가 `ok` 이중 카운트하는 race) → R2 APPROVE (outer try 블록으로 `ok` 이동, admin snapshot try/catch, regression test 3건 추가). 2 rounds.
+**산출물**:
+- `server/oauth-metrics.js` — `OAuthMetrics` class (stable label 직렬화, defensive snapshot) + `dcrStatusBucket` helper
+- `server/oauth-manager.js` — constructor 에 `metrics` 옵션, `_metric()` private helper, cache hit/miss/expire + DCR 4-bucket + refresh ok/fail_4xx/fail_net + threshold_trip instrumentation
+- `server/index.js` — `new OAuthMetrics()` 생성 → OAuthManager + admin routes 양쪽 주입
+- `admin/routes.js` — `GET /api/oauth/metrics` endpoint (broken recorder 시 `wm.logError('oauth.metrics', ...)` 후 빈 배열 degrade)
+- `tests/phase11-4-oauth-metrics.test.js` — 29 tests (unit + integration + admin API + late-success regression + NO_REFRESH_TOKEN/TOKEN_ENDPOINT_UNKNOWN + action_needed contract)
 
 ### 5. §12-2 Admin Wizard — Static client 발급 UX
 **목적**: 운영자가 Notion integration 페이지에서 static client 직접 발급하는 과정을 Admin UI 에서 안내
@@ -95,6 +101,16 @@ node scripts/migrate-oauth-clients.mjs --restore
 ### 7. Watcher atomic-replace gap (Phase 11-3 Codex R2 low)
 **위치**: `server/workspace-manager.js._startFileWatcher` — 현재 `eventType === 'change'` 만 처리. `rename`-style atomic save (에디터의 temp-file+rename)는 hot-reload 를 바이패스함.
 **개선**: `rename` 이벤트도 처리하거나 `chokidar` 같은 watcher 로 전환. Phase 11 에서는 scope out — Phase 11-3 의 Migration가 hot-reload에 plug-in되긴 했지만 watcher 자체의 event-type coverage는 별개 이슈.
+**규모**: 소 (2~3시간)
+
+### 8. Refresh timeout + AbortController (Phase 11-4 Codex R2 non-blocking)
+**현상**: `_runRefresh` 가 `refreshTimeoutMs` 초과 시 outer `Promise.race` 는 `refresh_timeout` 으로 reject 하지만 background task 는 계속 살아 token endpoint 응답을 받아 `_storeTokens` + `oauth.refresh_success` audit 까지 남긴다. metrics 는 Phase 11-4 에서 `ok` 이중 카운트를 봉쇄했지만 state/audit convergence 는 여전히 어긋남.
+**개선**: `_tokenRequest()` 에 `AbortSignal` 파라미터 추가, `refreshTimeoutMs` 시 `controller.abort()` 로 background fetch 조기 종료. 기존 `tests/phase6c-refresh.test.js:194` `refresh mutex timeout releases lock` 테스트 호환 유지.
+**규모**: 소 (2~3시간)
+
+### 9. OAuthMetrics cardinality cap / workspace-delete cleanup (Phase 11-4 Codex R2 non-blocking)
+**현상**: in-memory Map 이 삭제된 workspace/identity 튜플에 대한 entry 도 수명 종료 시까지 보유. production 에서 workspace churn 이 크면 메모리 monotonic 증가.
+**개선**: `WorkspaceManager.deleteWorkspace()` hook 에서 `OAuthMetrics` 의 workspace 라벨 entry 일괄 삭제 + 옵션 soft cap (1k entries, LRU evict).
 **규모**: 소 (2~3시간)
 
 ---

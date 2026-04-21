@@ -21,6 +21,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { sanitize, tokenPrefix } from './oauth-sanitize.js';
+import { dcrStatusBucket } from './oauth-metrics.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(__dirname, '..', '.ao', 'state');
@@ -99,12 +100,16 @@ async function writeJsonSecure(path, data, opts) {
 }
 
 export class OAuthManager {
-  constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort, refreshTimeoutMs = REFRESH_TIMEOUT_MS } = {}) {
+  constructor(wm, { stateDir = STATE_DIR, platform = process.platform, fetchImpl = globalThis.fetch, redirectPort, refreshTimeoutMs = REFRESH_TIMEOUT_MS, metrics = null } = {}) {
     this.wm = wm;
     this.platform = platform;
     this.fetch = fetchImpl;
     this._redirectPort = redirectPort;
     this._refreshTimeoutMs = refreshTimeoutMs;
+    // Phase 11-4 §6-OBS.2 — optional OAuthMetrics recorder (in-memory).
+    // When null, all _metric(...) calls are no-ops so tests/legacy callers
+    // that construct OAuthManager without a recorder are unaffected.
+    this.metrics = metrics;
     this._issuerCachePath = join(stateDir, 'oauth-issuer-cache.json');
     this._pendingPath = join(stateDir, 'oauth-pending.json');
     this._secretPath = join(stateDir, 'server-secret');
@@ -126,6 +131,19 @@ export class OAuthManager {
     // Phase 10a §4.10a-4: auth-fail threshold (401 count at which fail-fast trips).
     this._authFailThreshold = parseInt(process.env.BIFROST_AUTH_FAIL_THRESHOLD || '', 10) || 3;
     this._fileSecurityWarning = isWindows(platform); // true if any file couldn't be chmod'd
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Metrics (Phase 11-4 §6-OBS.2)
+  //
+  // Guarded by `this.metrics` so a missing recorder silently no-ops. Keep
+  // the instrumentation sites lean — any exception from the recorder must
+  // NOT break the OAuth path. We defensively try/catch because a future
+  // recorder backed by IO (Prometheus push, file persist) could throw.
+
+  _metric(name, labels) {
+    if (!this.metrics) return;
+    try { this.metrics.inc(name, labels); } catch { /* swallow */ }
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -261,19 +279,27 @@ export class OAuthManager {
   }
 
   async getCachedClient(issuerOrWsId, authMethodOrIssuer, maybeAuthMethod) {
+    const scopedWorkspaceId = maybeAuthMethod === undefined ? null : issuerOrWsId;
+    const metricsLabel = { workspace: scopedWorkspaceId || '__global__' };
     const key = maybeAuthMethod === undefined
       ? this._cacheKey(issuerOrWsId, authMethodOrIssuer)
       : this._cacheKey(issuerOrWsId, authMethodOrIssuer, maybeAuthMethod);
     const cache = await this._loadIssuerCache();
     const entry = cache[key];
-    if (!entry) return null;
+    if (!entry) {
+      this._metric('oauth_cache_miss_total', metricsLabel);
+      return null;
+    }
     // TTL: expire cached entries after 24 hours
     const ttlMs = parseInt(process.env.BIFROST_OAUTH_CACHE_TTL_MS || '', 10) || 24 * 60 * 60 * 1000;
     if (entry.registeredAt && Date.now() - new Date(entry.registeredAt).getTime() > ttlMs) {
       delete cache[key];
       await this._saveIssuerCache();
+      // Expired → miss (entry existed but is no longer usable).
+      this._metric('oauth_cache_miss_total', metricsLabel);
       return null;
     }
+    this._metric('oauth_cache_hit_total', metricsLabel);
     return entry;
   }
 
@@ -381,6 +407,7 @@ export class OAuthManager {
         });
       } catch (netErr) {
         // Network failure → transient, retry with backoff
+        this._metric('oauth_dcr_total', { workspace: workspaceId || '__global__', issuer, status: '5xx' });
         lastErr = Object.assign(new Error(`DCR_TRANSIENT: network error — ${netErr.message}`), {
           code: 'DCR_TRANSIENT',
           cause: netErr,
@@ -392,6 +419,7 @@ export class OAuthManager {
         break;
       }
       if (res.ok) {
+        this._metric('oauth_dcr_total', { workspace: workspaceId || '__global__', issuer, status: '200' });
         const json = await res.json();
         const entry = {
           clientId: json.client_id,
@@ -419,6 +447,7 @@ export class OAuthManager {
       const text = await res.text().catch(() => '');
       const sanitized = sanitize(text).slice(0, 200);
       if (res.status === 429) {
+        this._metric('oauth_dcr_total', { workspace: workspaceId || '__global__', issuer, status: '429' });
         // Rate-limited — honor Retry-After
         const retryAfterMs = parseRetryAfterMs(res.headers?.get?.('retry-after') ?? res.headers?.['retry-after']);
         const err = Object.assign(new Error(`DCR_RATE_LIMITED: ${sanitized}`), {
@@ -435,6 +464,7 @@ export class OAuthManager {
         throw err;
       }
       if (res.status >= 400 && res.status < 500) {
+        this._metric('oauth_dcr_total', { workspace: workspaceId || '__global__', issuer, status: '4xx' });
         // Client-side reject — no retry, require manual intervention
         const err = Object.assign(new Error(`DCR_REJECTED: ${res.status} ${sanitized}`), {
           code: 'DCR_REJECTED',
@@ -443,6 +473,7 @@ export class OAuthManager {
         throw err;
       }
       // 5xx → transient, retry with backoff
+      this._metric('oauth_dcr_total', { workspace: workspaceId || '__global__', issuer, status: dcrStatusBucket(res.status) });
       lastErr = Object.assign(new Error(`DCR_TRANSIENT: ${res.status} ${sanitized}`), {
         code: 'DCR_TRANSIENT',
         status: res.status,
@@ -1017,6 +1048,7 @@ export class OAuthManager {
           correlationId: correlationId || null,
         }), identity);
       }
+      this._metric('oauth_threshold_trip_total', { workspace: workspaceId, identity });
       return { marked: true };
     });
   }
@@ -1097,11 +1129,29 @@ export class OAuthManager {
     task.catch(() => {});
     const wrapped = Promise.race([task, timeout]).finally(() => clearTimeout(timeoutHandle));
     try {
-      return await wrapped;
+      const result = await wrapped;
+      // Phase 11-4 §6-OBS.2 (Codex R1 blocker) — emit the `ok` counter only
+      // from the outer race winner, not from inside the background task. If
+      // the timeout fires first, the catch branch below records `fail_net`;
+      // if the still-running background task later resolves, we MUST NOT
+      // record a second `ok` because the caller already observed a failure.
+      this._metric('oauth_refresh_total', { workspace: workspaceId, identity, status: 'ok' });
+      return result;
     } catch (err) {
       if (this.wm?.logAudit) {
         this.wm.logAudit('oauth.refresh_fail', workspaceId, sanitize(`identity=${identity} ${err.message}`), identity);
       }
+      // Phase 11-4 §6-OBS.2 — classify refresh failure by surface.
+      //   fail_4xx → token endpoint rejected (client error: expired refresh
+      //              token, invalid_grant, etc.); not retriable.
+      //   fail_net → everything else (timeout, DNS, 5xx, NO_REFRESH_TOKEN,
+      //              TOKEN_ENDPOINT_UNKNOWN). Retriable / re-auth needed.
+      const status4xx = typeof err?.status === 'number' && err.status >= 400 && err.status < 500;
+      this._metric('oauth_refresh_total', {
+        workspace: workspaceId,
+        identity,
+        status: status4xx ? 'fail_4xx' : 'fail_net',
+      });
       const ws = this.wm?._getRawWorkspace?.(workspaceId);
       if (ws && err.code !== 'NO_REFRESH_TOKEN' && err.code !== 'TOKEN_ENDPOINT_UNKNOWN') {
         if (!ws.oauthActionNeededBy) ws.oauthActionNeededBy = {};

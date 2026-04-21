@@ -390,27 +390,29 @@ workspaceId 맥락이 없음 (preview 시점엔 workspace 미생성).
 - **`clientId` 는 raw 저장 금지** — `maskClientId(clientId)` 로 `abcd***wxyz` 포맷 고정.
   이유: audit.jsonl 이 backup/외부 도구로 유출될 때 토큰 발급 요청 재구성 위험 감소.
 
-### 6-OBS.2 Metrics — 별도 Recorder (UsageRecorder 와 분리)
+### 6-OBS.2 Metrics — 별도 Recorder (UsageRecorder 와 분리)  ✅ **완료 — Phase 11-4 (2026-04-22)**
 
-현재 `UsageRecorder` 는 tool-call 집계기라 Phase 10a counter 를 직접 담기 불가.
-**신규 `server/oauth-metrics.js` 도입** (lightweight, in-memory Map):
+Phase 10a 에서는 deferred 됐고 Phase 11-4 (Codex R2 APPROVE) 에서 본격 구현.
 
-```js
-export class OAuthMetrics {
-  constructor() { this._counters = new Map(); }
-  inc(name, labels = {}, delta = 1) { /* key = name + JSON(labels) */ }
-  snapshot() { return [...this._counters]; }  // Admin UI /api/oauth/metrics
-}
-```
+**`server/oauth-metrics.js`** — lightweight in-memory counter aggregator:
+- `OAuthMetrics.inc(name, labels, delta=1)` — stable label 직렬화(sorted keys, null/undefined/'' 드롭) 로 같은 name+labels 호출이 동일 버킷으로 집계
+- `OAuthMetrics.snapshot()` — defensive-copy array `[{name, labels, value}]` 반환
+- `dcrStatusBucket(status)` helper — 429/200/4xx/5xx 4-버킷 매핑 (unknown → 5xx)
+
+**Counter 목록** (plan 과 동일):
 
 | Counter | Labels | 의미 |
 |---------|--------|------|
-| `oauth_threshold_trip_total` | `{workspace, identity}` | 401 fail-fast 발생 |
-| `oauth_dcr_total` | `{workspace, issuer, status: 200\|4xx\|5xx\|429}` | DCR 호출 결과별 |
-| `oauth_refresh_total` | `{workspace, identity, status: ok\|fail_4xx\|fail_net}` | refresh 시도 결과별 |
-| `oauth_cache_hit_total / oauth_cache_miss_total` | `{workspace}` | cache 이력 |
+| `oauth_threshold_trip_total` | `{workspace, identity}` | 401 fail-fast 발생 (`markAuthFailed`) |
+| `oauth_dcr_total` | `{workspace, issuer, status: 200\|4xx\|5xx\|429}` | DCR 호출 결과별 — **per attempt** (1 initial + 최대 3 retries 각각 inc) |
+| `oauth_refresh_total` | `{workspace, identity, status: ok\|fail_4xx\|fail_net}` | refresh 시도 결과별. `ok` 는 outer `await wrapped` 성공 경로에서만 기록 (Codex R1 blocker — timeout 후 late resolve 이중 카운트 방지). NO_REFRESH_TOKEN / TOKEN_ENDPOINT_UNKNOWN 은 `fail_net` 으로 분류. |
+| `oauth_cache_hit_total` / `oauth_cache_miss_total` | `{workspace}` | cache 이력. TTL 만료는 miss 로 분류 |
 
-Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus export 는 Phase 11+.
+**Admin endpoint**: `GET /api/oauth/metrics` — `{ok:true, data:[{name,labels,value}]}` 반환. `extras.oauthMetrics` 우선, fallback 으로 `oauth.metrics`. Broken recorder 는 `wm.logError('oauth.metrics', ...)` 로 surface 하고 응답은 빈 배열로 degrade.
+
+**Wiring**: `server/index.js` 에서 `new OAuthMetrics()` 를 생성해 `OAuthManager({ metrics })` + `createAdminRoutes(..., { oauthMetrics })` 양쪽에 주입.
+
+Metric 은 여전히 **process-memory only**. 영구 저장 / Prometheus export / cardinality cap 은 deferred (Codex R2 non-blocking — workspace 삭제 시 metric 정리 hook 후속 후보).
 
 ### 6-OBS.3 로그 표준화
 - 동일 workspace + identity 의 401 시퀀스에는 같은 `correlationId` (randomUUID) 부여.
