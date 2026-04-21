@@ -701,6 +701,47 @@ test('§9 masked API: after markAuthFailed, hasAccessToken is false via getWorks
 // ────────────────────────────────────────────────────────────────────────
 // §4.10a-1 getOAuthClient() — masked secret
 
+test('§4.10a-5 (Codex R5 blocker): rotateClientUnderMutex serializes vs in-flight refresh', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = makeWs('ws-1');
+    ws.oauth.byIdentity.default.tokens.expiresAt = new Date(Date.now() - 1000).toISOString();
+    ws.oauth.tokens.expiresAt = ws.oauth.byIdentity.default.tokens.expiresAt;
+    const wm = mockWm({ 'ws-1': ws });
+    const order = [];
+    let refreshDone = false;
+    const fetchImpl = async () => {
+      order.push('refresh_fetch_start');
+      await new Promise(r => setTimeout(r, 20));
+      order.push('refresh_fetch_end');
+      refreshDone = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'OLD_CLIENT_AT', refresh_token: 'OLD_CLIENT_RT', expires_in: 3600 }), headers: { get: () => null } };
+    };
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl });
+    // Start a refresh — it takes 20ms because of the fetch delay.
+    const refreshPromise = mgr.forceRefresh('ws-1', 'default');
+    // In parallel, kick off a rotation that must WAIT for the refresh to complete
+    // before mutating ws.oauth.client.
+    const rotation = mgr.rotateClientUnderMutex('ws-1', null, async () => {
+      order.push('rotation_start');
+      // After rotation, tokens must be nulled. Verify the refresh finished first.
+      assert.equal(refreshDone, true, 'refresh must complete before rotation starts (mutex holds)');
+      ws.oauth.client = { clientId: 'NEW', clientSecret: null, authMethod: 'none', source: 'manual', registeredAt: new Date().toISOString() };
+      ws.oauth.byIdentity.default.tokens.accessToken = null;
+      ws.oauth.byIdentity.default.tokens.refreshToken = null;
+      order.push('rotation_end');
+    });
+    await Promise.all([refreshPromise, rotation]);
+    // Order must show refresh ran fully before rotation started.
+    assert.deepEqual(order, ['refresh_fetch_start', 'refresh_fetch_end', 'rotation_start', 'rotation_end']);
+    // Final state: rotation nulled tokens
+    assert.equal(ws.oauth.byIdentity.default.tokens.accessToken, null);
+    assert.equal(ws.oauth.client.clientId, 'NEW');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();

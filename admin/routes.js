@@ -285,20 +285,29 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             }
             ws.oauthActionNeeded = true;
           }
-          // Phase 10a §3.4 — persist into ws.oauth.client AND mirror flat fields (1 release)
-          ws.oauth = {
-            ...ws.oauth,
-            client: {
+          // Phase 10a §3.4 + Codex R5 — persist nested + flat mirror.
+          // When rotating, do it under the identity mutex so a concurrent
+          // refresh cannot write old-client tokens back AFTER this handler.
+          const commitClient = () => {
+            ws.oauth = {
+              ...ws.oauth,
+              client: {
+                clientId,
+                clientSecret: clientSecret ?? null,
+                authMethod,
+                source: clientSource || ws.oauth?.client?.source || 'dcr',
+                registeredAt: ws.oauth?.client?.registeredAt || new Date().toISOString(),
+              },
               clientId,
               clientSecret: clientSecret ?? null,
               authMethod,
-              source: clientSource || ws.oauth?.client?.source || 'dcr',
-              registeredAt: ws.oauth?.client?.registeredAt || new Date().toISOString(),
-            },
-            clientId,
-            clientSecret: clientSecret ?? null,
-            authMethod,
+            };
           };
+          if (isRotation && oauth.rotateClientUnderMutex) {
+            await oauth.rotateClientUnderMutex(id, null, async () => { commitClient(); });
+          } else {
+            commitClient();
+          }
           await wm._save();
 
           const init = await oauth.initializeAuthorization(id, {
@@ -401,35 +410,43 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             reg = await oauth.registerClient(issuer, md, { workspaceId: id, forceNew: true, reuse: false });
             reg.source = 'dcr';
           }
-          ws.oauth = {
-            ...ws.oauth,
-            client: {
+          // Codex R5 blocker — rotate under identity mutex so in-flight
+          // refresh/markAuthFailed cannot race our writes.
+          await oauth.rotateClientUnderMutex(id, null, async () => {
+            ws.oauth = {
+              ...ws.oauth,
+              client: {
+                clientId: reg.clientId,
+                clientSecret: reg.clientSecret ?? null,
+                authMethod: reg.authMethod,
+                source: reg.source,
+                registeredAt: new Date().toISOString(),
+              },
+              // mirror flat fields (§3.4, one release)
               clientId: reg.clientId,
               clientSecret: reg.clientSecret ?? null,
               authMethod: reg.authMethod,
-              source: reg.source,
-              registeredAt: new Date().toISOString(),
-            },
-            // mirror flat fields (§3.4, one release)
-            clientId: reg.clientId,
-            clientSecret: reg.clientSecret ?? null,
-            authMethod: reg.authMethod,
-          };
-          // Mark all identities as requiring re-authorization — old tokens
-          // are bound to the old client_id and invalid.
-          if (ws.oauth.byIdentity) {
-            for (const identity of Object.keys(ws.oauth.byIdentity)) {
-              if (ws.oauth.byIdentity[identity]?.tokens) {
-                ws.oauth.byIdentity[identity].tokens.accessToken = null;
+            };
+            // Mark all identities as requiring re-authorization — old tokens
+            // (both access AND refresh) are bound to the old client_id and invalid.
+            if (ws.oauth.byIdentity) {
+              for (const identity of Object.keys(ws.oauth.byIdentity)) {
+                if (ws.oauth.byIdentity[identity]?.tokens) {
+                  ws.oauth.byIdentity[identity].tokens.accessToken = null;
+                  ws.oauth.byIdentity[identity].tokens.refreshToken = null;
+                }
               }
             }
-          }
-          if (ws.oauth.tokens) ws.oauth.tokens.accessToken = null;
-          ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-          for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-            ws.oauthActionNeededBy[identity] = true;
-          }
-          ws.oauthActionNeeded = true;
+            if (ws.oauth.tokens) {
+              ws.oauth.tokens.accessToken = null;
+              ws.oauth.tokens.refreshToken = null;
+            }
+            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+            for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+              ws.oauthActionNeededBy[identity] = true;
+            }
+            ws.oauthActionNeeded = true;
+          });
           // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
           // for this workspace so a stale browser tab/callback cannot resurrect
           // the pre-rotation client.
@@ -487,33 +504,39 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
             clientSecret: body.clientSecret ?? null,
             authMethod,
           });
-          ws.oauth = {
-            ...ws.oauth,
-            client: {
+          // Codex R5 — rotate under mutex to prevent refresh race.
+          await oauth.rotateClientUnderMutex(id, null, async () => {
+            ws.oauth = {
+              ...ws.oauth,
+              client: {
+                clientId: reg.clientId,
+                clientSecret: reg.clientSecret ?? null,
+                authMethod: reg.authMethod,
+                source: 'manual',
+                registeredAt: new Date().toISOString(),
+              },
               clientId: reg.clientId,
               clientSecret: reg.clientSecret ?? null,
               authMethod: reg.authMethod,
-              source: 'manual',
-              registeredAt: new Date().toISOString(),
-            },
-            clientId: reg.clientId,
-            clientSecret: reg.clientSecret ?? null,
-            authMethod: reg.authMethod,
-          };
-          // Invalidate any existing tokens + flag action_needed
-          if (ws.oauth.byIdentity) {
-            for (const identity of Object.keys(ws.oauth.byIdentity)) {
-              if (ws.oauth.byIdentity[identity]?.tokens) {
-                ws.oauth.byIdentity[identity].tokens.accessToken = null;
+            };
+            if (ws.oauth.byIdentity) {
+              for (const identity of Object.keys(ws.oauth.byIdentity)) {
+                if (ws.oauth.byIdentity[identity]?.tokens) {
+                  ws.oauth.byIdentity[identity].tokens.accessToken = null;
+                  ws.oauth.byIdentity[identity].tokens.refreshToken = null;
+                }
               }
             }
-          }
-          if (ws.oauth.tokens) ws.oauth.tokens.accessToken = null;
-          ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
-          for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
-            ws.oauthActionNeededBy[identity] = true;
-          }
-          ws.oauthActionNeeded = true;
+            if (ws.oauth.tokens) {
+              ws.oauth.tokens.accessToken = null;
+              ws.oauth.tokens.refreshToken = null;
+            }
+            ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
+            for (const identity of Object.keys(ws.oauth?.byIdentity || { default: true })) {
+              ws.oauthActionNeededBy[identity] = true;
+            }
+            ws.oauthActionNeeded = true;
+          });
           // Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states
           if (oauth.purgePendingForWorkspace) await oauth.purgePendingForWorkspace(id);
           await wm._save();

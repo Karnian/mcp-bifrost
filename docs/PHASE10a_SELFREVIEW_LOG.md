@@ -115,6 +115,41 @@ Contents:
 
 ---
 
+## Codex review — Round 5 (2026-04-21)
+
+**Verdict**: REVISE (1 High — race + refreshToken drift on two endpoints)
+
+### Finding — Rotation not serialized vs. refresh + refreshToken not nulled in 2 paths
+
+Codex R5 noted that while `/authorize` path now invalidates tokens, two
+problems remained:
+
+1. **Race**: Rotation paths in all 3 endpoints mutated `ws.oauth` directly at
+   the route layer, bypassing the identity-level FIFO mutex used by
+   `_refreshWithMutex` and `markAuthFailed`. A background refresh that started
+   *before* rotation could complete *after* rotation, and its `_storeTokens()`
+   call would clear `oauthActionNeededBy` — effectively reviving old-client state.
+2. **refreshToken drift**: `/oauth/register` and `/oauth/client` were nulling
+   only `accessToken`, not `refreshToken`. An automatic refresh could then combine
+   the old refresh_token with the new client credentials.
+
+**Fix**:
+- Added `OAuthManager.rotateClientUnderMutex(workspaceId, identities, fn)` —
+  wraps an async rotation fn with serialized identity-level mutex chains. Uses
+  the same `_identityMutex` Map so refresh/markAuthFailed/rotation are all
+  mutually exclusive.
+- All 3 rotation paths (`/authorize` forceRegister/manual, `/oauth/register`,
+  `/oauth/client`) now call `rotateClientUnderMutex` to commit client + invalidate
+  tokens atomically.
+- `/oauth/register` and `/oauth/client` now also null `refreshToken` (not just
+  `accessToken`) to match `/authorize`.
+
+Test: `§4.10a-5 (Codex R5 blocker): rotateClientUnderMutex serializes vs in-flight refresh`.
+Verifies ordering: refresh fetch completes fully before rotation_start runs.
+Admin API tests now assert both accessToken AND refreshToken are nulled.
+
+---
+
 ## Codex review — Round 4 (2026-04-21)
 
 **Verdict**: REVISE (1 High + 1 Medium — both on `/authorize`)

@@ -541,6 +541,38 @@ export class OAuthManager {
   }
 
   /**
+   * Phase 10a §4.10a-5 (Codex R5 blocker) — serialize client rotation against
+   * concurrent refresh. Acquires the same identity-level FIFO mutex used by
+   * `_refreshWithMutex` and `markAuthFailed`, so an in-flight refresh cannot
+   * complete *after* a rotation and revive the old-client state via _storeTokens.
+   *
+   * Accepts an async mutator fn that performs the rotation work (config mutation
+   * + _save). The caller (admin/routes.js) supplies the business logic;
+   * OAuthManager only guarantees the mutex.
+   *
+   * By default rotation is serialized against every known identity for the
+   * workspace. If the operator wants to rotate only one identity (rare),
+   * they can pass an identities array.
+   */
+  async rotateClientUnderMutex(workspaceId, identities, fn) {
+    const ws = this.wm?._getRawWorkspace?.(workspaceId);
+    const idents = (identities && identities.length)
+      ? identities
+      : Object.keys(ws?.oauth?.byIdentity || { default: true });
+    // Chain through each identity's mutex sequentially so every in-flight
+    // refresh/markAuthFailed on this workspace quiesces before we mutate.
+    let result;
+    const run = async () => { result = await fn(); };
+    let chained = run;
+    for (const identity of idents) {
+      const prev = chained;
+      chained = () => this._withIdentityMutex(workspaceId, identity, prev);
+    }
+    await chained();
+    return result;
+  }
+
+  /**
    * Phase 10a §4.10a-5 (Codex R2 blocker 2) — purge pending auth states bound
    * to a workspace. Called when the workspace's OAuth client is rotated
    * (POST /oauth/register, PUT /oauth/client) so stale browser callbacks can

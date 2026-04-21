@@ -103,9 +103,11 @@ test('§4.10a-5: POST /oauth/register (DCR forceNew) issues new client + invalid
       assert.equal(body.ok, true);
       assert.notEqual(body.data.clientId, 'OLD_CLIENT', 'new DCR issues new client_id');
       assert.equal(body.data.source, 'dcr');
-      // Tokens must be invalidated + action_needed flipped
+      // Tokens must be invalidated — both access AND refresh (Codex R5 blocker)
       assert.equal(ws.oauth.byIdentity.default.tokens.accessToken, null);
+      assert.equal(ws.oauth.byIdentity.default.tokens.refreshToken, null, 'refreshToken MUST be nulled too (Codex R5)');
       assert.equal(ws.oauth.tokens.accessToken, null);
+      assert.equal(ws.oauth.tokens.refreshToken, null);
       assert.equal(ws.oauthActionNeededBy.default, true);
       assert.equal(ws.oauthActionNeeded, true);
       // Codex R2 blocker 1: provider must be recreated so new client takes effect
