@@ -494,10 +494,14 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 - [ ] **Cache purge 대상 격리 (공개 API + behavior 검증)** (Round 8 — 보강):
   - workspace A hard delete 후 → `wm.getOAuthClient(A)` === null
   - workspace B 의 `wm.getOAuthClient(B)` → 여전히 이전 값 (격리 유지)
-  - **Behavior 검증** (purge 가 실제로 cache 에서 제거됐는지 — getter null 만으로는 내부 `_clientCache` 잔존 가능):
-    - A 를 동일 id 로 재등록 + OAuth authorize 트리거 시 DCR endpoint fetch spy call count === 1
+  - **Behavior 검증 — primary** (Round 9 반영, purge proof 는 fetch count 에 위임):
+    - A 를 동일 id 로 재등록 + OAuth authorize 트리거 시 **DCR endpoint fetch spy call count === 1**
       (cache 에 남아있었다면 재사용돼서 0 이 나와야 정상이지만, purge 됐으므로 새로 호출돼야 함)
-    - 재등록 후 `wm.getOAuthClient(A).clientId !== `이전 A 의 clientId (새 clientId 발급 확인)
+    - ★ 이 assertion 하나로 `_clientCache` purge 가 증명됨 (getter null + fetch=1).
+  - **Optional / conditional** (§12 미해결 가정에 의존 — Round 9 조정):
+    - 재등록 후 `wm.getOAuthClient(A).clientId !== `이전 A 의 clientId
+    - 단, "Notion MCP DCR 을 다른 `client_name` 으로 반복 호출 시 매번 새 client_id 반환" 가정 (§12-1)
+      이 curl 실측으로 확인된 경우에만 적용. 확인 안 되면 skip — primary assertion 만으로 충분.
 - [ ] **Soft delete cache 정책**:
   - `softDelete(A)` 직후 → `wm.getOAuthClient(A)` 이전 값 유지 (DCR fetch spy call count === 0)
   - `restoreWorkspace(A)` + `tools/list` → HTTP 200 (재인증 요구 없음, DCR 0회)
@@ -619,6 +623,13 @@ Metric 은 **process-memory only** (Phase 10a 범위). 영구 저장/Prometheus 
 | §9 masked API 불일치 | `wm.getWorkspace(id).oauth.byIdentity.*.tokens.accessToken` 검증은 기본 `masked=true` (`workspace-manager.js:236-243`) 에서 raw token 못 봄 | §9 — `accessTokenPrefix` 비교 또는 `hasAccessToken` boolean 사용으로 교체. raw 필요 시 `{ masked: false }` 명시 |
 | §9 비공개 API 참조 | `refreshWithMutex` 는 내부 `_refreshWithMutex` 로 공개 API 아님 | §9 — 공개 래퍼 `forceRefresh(wsId, identity)` (`oauth-manager.js:570-572`) 로 교체 |
 | Cache purge 검증 약함 | `wm.getOAuthClient()` null 만으로는 `_clientCache` 내부 purge 증명 불가 | §9 Cache purge — 재등록 시 DCR fetch spy call count === 1 + 새 clientId 발급 behavior assertion 추가 |
+
+### Round 9 — 2026-04-21 (REVISE → 1건만)
+
+| # | 지적 | 반영 |
+|---|------|------|
+| Cache purge 과잉 assertion | "재등록 후 clientId !== 이전 clientId" 는 §12-1 (Notion MCP DCR 이 매번 새 client_id 반환하는지) 미확인 가정에 의존 — 이 가정이 깨지면 위양성 | §9 Cache purge — primary 는 DCR fetch call count === 1 에 위임, clientId 비교는 **optional/conditional** 로 강등 (§12-1 curl 실측 확인 시에만 적용) |
+| (그 외 전부 승인) | R8 blocker 3건 + 보강 방향성 OK — §6.4 FIFO chain / accessTokenPrefix / hasAccessToken / forceRefresh 자동화 가능 확인 | — |
 
 ---
 
