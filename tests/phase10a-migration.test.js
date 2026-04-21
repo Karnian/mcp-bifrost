@@ -165,7 +165,9 @@ test('§4.10a-6: --apply creates .pre-10a.bak (0o600) + disambiguates shared + m
     assert.equal(wsA.oauth.client.source, 'legacy-flat');
     // wsB stripped + action_needed
     assert.equal(wsB.oauth.client, null);
-    assert.equal(wsB.oauth.clientId, null);
+    // Phase 11 §3 — flat keys scrubbed entirely (not set to null)
+    assert.equal(wsB.oauth.clientId, undefined, 'Phase 11 §3: flat clientId must be scrubbed from config');
+    assert.equal(wsB.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must be scrubbed from config');
     assert.equal(wsB.oauthActionNeeded, true);
     assert.equal(wsB.oauthActionNeededBy.default, true);
     assert.equal(wsB.oauth.byIdentity.default.tokens.accessToken, null);
@@ -251,6 +253,50 @@ test('§4.10a-6: no-op workspace (already migrated or non-OAuth) is safely handl
     assert.equal(out.report.flatToNested.length, 0, 'no flat-to-nested needed');
     assert.equal(out.report.alreadyMigrated.length, 1);
     assert.equal(out.report.nonOAuth.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§Phase11-3: --apply scrubs flat OAuth fields from config (nested-only after migration)', async () => {
+  // Phase 11 §3 — the flat-field mirror was preserved for 1 release by
+  // Phase 10a §3.4. Phase 11 removes it. The migration script must now
+  // delete ws.oauth.{clientId,clientSecret,authMethod} after promoting
+  // them into ws.oauth.client, so the on-disk config never carries the
+  // legacy mirror.
+  const dir = await mkdtemp(join(tmpdir(), 'phase11-flat-scrub-'));
+  try {
+    const cfgPath = join(dir, 'my-config.json');
+    const fixture = {
+      server: { port: 3100 },
+      workspaces: [
+        {
+          id: 'ws-flat-only', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+          oauth: {
+            enabled: true, issuer: 'https://mcp.example',
+            clientId: 'FLAT_CLIENT',
+            clientSecret: 'FLAT_SECRET',
+            authMethod: 'client_secret_basic',
+            byIdentity: { default: { tokens: { accessToken: 'AT' } } },
+          },
+        },
+      ],
+    };
+    await writeFile(cfgPath, JSON.stringify(fixture, null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--apply']);
+    assert.equal(r.code, 0, `stderr=${r.stderr}`);
+    const migrated = JSON.parse(await readFile(cfgPath, 'utf-8'));
+    const ws = migrated.workspaces[0];
+    // Nested is populated
+    assert.ok(ws.oauth.client);
+    assert.equal(ws.oauth.client.clientId, 'FLAT_CLIENT');
+    assert.equal(ws.oauth.client.clientSecret, 'FLAT_SECRET');
+    assert.equal(ws.oauth.client.authMethod, 'client_secret_basic');
+    assert.equal(ws.oauth.client.source, 'legacy-flat');
+    // Flat keys are SCRUBBED (Phase 11 §3)
+    assert.equal(ws.oauth.clientId, undefined, 'Phase 11 §3: flat clientId must be removed from config');
+    assert.equal(ws.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must be removed from config');
+    assert.equal(ws.oauth.authMethod, undefined, 'Phase 11 §3: flat authMethod must be removed from config');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

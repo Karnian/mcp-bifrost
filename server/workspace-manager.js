@@ -43,11 +43,9 @@ function maskTokenEntry(t) {
 function maskOAuth(oauth) {
   if (!oauth) return oauth;
   const masked = { ...oauth };
-  if (oauth.clientId && typeof oauth.clientId === 'string' && oauth.clientId.length > 8) {
-    masked.clientId = `${oauth.clientId.slice(0, 4)}***${oauth.clientId.slice(-4)}`;
-  }
-  if (oauth.clientSecret) masked.clientSecret = '***';
-  // Phase 10a §3.4 — nested ws.oauth.client masking
+  // Phase 11 §3 — flat-field (ws.oauth.{clientId,clientSecret,authMethod})
+  // mirror removed. Startup migration promotes any lingering flat fields
+  // into ws.oauth.client and scrubs the originals, so mask from nested only.
   if (oauth.client && typeof oauth.client === 'object') {
     const c = oauth.client;
     masked.client = {
@@ -146,8 +144,11 @@ export class WorkspaceManager {
         };
         oauthMirrored++;
       }
-      // Phase 10a §3.4: migrate flat ws.oauth.{clientId,clientSecret,authMethod}
-      // into nested ws.oauth.client. Keep the flat mirror for one release.
+      // Phase 11 §3: migrate flat ws.oauth.{clientId,clientSecret,authMethod}
+      // into nested ws.oauth.client AND scrub the flat keys. The 1-release
+      // deprecation window (Phase 10a §3.4) is now closed — no code reads
+      // flat fields anymore. Any config written by an old CLI that still
+      // carries flat fields gets promoted on first load.
       if (ws.oauth && ws.oauth.clientId && !ws.oauth.client) {
         ws.oauth.client = {
           clientId: ws.oauth.clientId,
@@ -158,10 +159,19 @@ export class WorkspaceManager {
         };
         clientBlockMigrated++;
       }
-      // Phase 10a §3.4 — startup validation: warn when nested ↔ flat diverge.
+      // Phase 11 §3 — divergence check: if BOTH nested and flat exist and
+      // their clientIds disagree, prefer nested (already authoritative) but
+      // log a warning BEFORE we scrub so operators notice. Silent on match.
       if (ws.oauth?.client && ws.oauth.clientId && ws.oauth.client.clientId !== ws.oauth.clientId) {
-        logger.warn(`[WorkspaceManager] Phase 10a: ws.oauth.client.clientId diverges from legacy ws.oauth.clientId for workspace '${ws.id}'. Preferring nested client.*`);
+        logger.warn(`[WorkspaceManager] Phase 11 §3: ws.oauth.client.clientId diverges from legacy ws.oauth.clientId for workspace '${ws.id}'. Scrubbing legacy flat fields; preferring nested client.*`);
         clientMismatchWarned++;
+      }
+      // Phase 11 §3 — scrub flat-field mirror once nested is present (or
+      // immediately after the flat→nested promotion above).
+      if (ws.oauth?.client) {
+        if ('clientId' in ws.oauth) delete ws.oauth.clientId;
+        if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
+        if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
       }
     }
     if (migrated > 0) {
@@ -186,6 +196,8 @@ export class WorkspaceManager {
   getOAuthClient(workspaceId) {
     const ws = this.config.workspaces.find(w => w.id === workspaceId);
     if (!ws?.oauth) return null;
+    // Phase 11 §3 — nested-only. Startup migration guarantees ws.oauth.client
+    // is populated for any OAuth workspace that previously used flat fields.
     if (ws.oauth.client) {
       const c = ws.oauth.client;
       // Return masked view (clientSecret redacted). Keep clientId raw so
@@ -196,16 +208,6 @@ export class WorkspaceManager {
         authMethod: c.authMethod || null,
         source: c.source || null,
         registeredAt: c.registeredAt || null,
-      };
-    }
-    // Legacy flat path (pre-10a workspaces that haven't been re-authorized yet)
-    if (ws.oauth.clientId) {
-      return {
-        clientId: ws.oauth.clientId,
-        clientSecret: ws.oauth.clientSecret ? '***' : null,
-        authMethod: ws.oauth.authMethod || null,
-        source: 'legacy-flat',
-        registeredAt: null,
       };
     }
     return null;
@@ -387,16 +389,27 @@ export class WorkspaceManager {
         ws.url = data.url;
         ws.headers = data.headers || {};
         if (data.oauth && typeof data.oauth === 'object') {
+          // Phase 11 §3 — write nested ws.oauth.client from the start. If the
+          // caller still passes legacy flat clientId/authMethod/etc., promote
+          // those into client.* here (no persistent flat mirror).
+          const hasClientInput = !!(data.oauth.client?.clientId || data.oauth.clientId);
           ws.oauth = {
             enabled: !!data.oauth.enabled,
             issuer: data.oauth.issuer || null,
-            clientId: data.oauth.clientId || null,
-            clientSecret: data.oauth.clientSecret || null,
-            authMethod: data.oauth.authMethod || 'none',
             resource: data.oauth.resource || null,
             metadataCache: data.oauth.metadataCache || null,
             tokens: null,
           };
+          if (hasClientInput) {
+            const src = data.oauth.client || {};
+            ws.oauth.client = {
+              clientId: src.clientId ?? data.oauth.clientId ?? null,
+              clientSecret: src.clientSecret ?? data.oauth.clientSecret ?? null,
+              authMethod: src.authMethod ?? data.oauth.authMethod ?? 'none',
+              source: src.source || 'manual',
+              registeredAt: src.registeredAt || new Date().toISOString(),
+            };
+          }
         }
       }
     }

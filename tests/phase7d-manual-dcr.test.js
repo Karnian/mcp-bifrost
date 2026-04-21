@@ -64,7 +64,19 @@ test('Manual client_id flow completes authorization when DCR is disabled', async
     assert.equal(cached.clientId, 'user_provided_client');
 
     // 4. initializeAuthorization + simulate mock approval + completeAuthorization
-    ws.oauth = { enabled: true, issuer: disc.issuer, clientId: manual.clientId, clientSecret: manual.clientSecret, authMethod: manual.authMethod, metadataCache: disc.authServerMetadata };
+    // Phase 11 §3 — nested ws.oauth.client only.
+    ws.oauth = {
+      enabled: true,
+      issuer: disc.issuer,
+      client: {
+        clientId: manual.clientId,
+        clientSecret: manual.clientSecret,
+        authMethod: manual.authMethod,
+        source: 'manual',
+        registeredAt: new Date().toISOString(),
+      },
+      metadataCache: disc.authServerMetadata,
+    };
     const init = await oauth.initializeAuthorization(ws.id, {
       issuer: disc.issuer,
       clientId: manual.clientId,
@@ -84,7 +96,8 @@ test('Manual client_id flow completes authorization when DCR is disabled', async
     const result = await oauth.completeAuthorization(state, code);
     assert.ok(result.tokens.accessToken);
     assert.ok(result.tokens.refreshToken);
-    assert.equal(result.clientId, 'user_provided_client');
+    // Phase 11 §3 — nested client only.
+    assert.equal(result.client.clientId, 'user_provided_client');
   } finally {
     await mock.stop();
     await rm(stateDir, { recursive: true, force: true });

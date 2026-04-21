@@ -73,6 +73,8 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       || (reason === 'manual' ? 'manual' : reason === 'dcr-register' ? 'dcr' : (ws.oauth?.client?.source || 'dcr'));
     const registeredAt = newClient.registeredAt || new Date().toISOString();
     await oauth.rotateClientUnderMutex(wsId, null, async () => {
+      // Phase 11 §3 — nested-only write. Flat mirror (§3.4) removed; all
+      // read paths now use ws.oauth.client.* exclusively.
       ws.oauth = {
         ...ws.oauth,
         client: {
@@ -82,11 +84,11 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           source,
           registeredAt,
         },
-        // mirror flat fields (§3.4, one release — Phase 11 candidate #3 removes)
-        clientId: newClient.clientId,
-        clientSecret: newClient.clientSecret ?? null,
-        authMethod: newClient.authMethod,
       };
+      // Scrub any leftover flat-field mirror from pre-Phase-11 writes.
+      if ('clientId' in ws.oauth) delete ws.oauth.clientId;
+      if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
+      if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
       if (invalidateTokens) {
         if (ws.oauth.byIdentity) {
           for (const identity of Object.keys(ws.oauth.byIdentity)) {
@@ -326,12 +328,13 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           //   1. body.manual.clientId (operator-supplied) → ALWAYS honored, rotates
           //      any existing client. No silent ignore when a client already exists.
           //   2. body.forceRegister === true → fresh DCR, rotates existing client.
-          //   3. Existing ws.oauth.client.clientId (nested) or legacy flat clientId → reuse.
+          //   3. Existing ws.oauth.client.clientId → reuse.
           //   4. Otherwise: DCR via registerClient({ workspaceId }).
-          let authMethod = ws.oauth?.client?.authMethod ?? ws.oauth?.authMethod;
-          let clientId = ws.oauth?.client?.clientId ?? ws.oauth?.clientId;
-          let clientSecret = ws.oauth?.client?.clientSecret ?? ws.oauth?.clientSecret ?? null;
-          let clientSource = ws.oauth?.client?.source || (clientId ? 'legacy-flat' : null);
+          // Phase 11 §3 — nested-only reads. Flat-field fallback removed.
+          let authMethod = ws.oauth?.client?.authMethod;
+          let clientId = ws.oauth?.client?.clientId;
+          let clientSecret = ws.oauth?.client?.clientSecret ?? null;
+          let clientSource = ws.oauth?.client?.source || null;
           // Detect rotation: manual input OR explicit forceRegister OR missing client.
           const hasManual = !!(body?.manual && body.manual.clientId);
           const isRotation = hasManual || body?.forceRegister === true;
@@ -385,6 +388,7 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           } else {
             // First-time authorization — just persist the client fields with
             // preserved registeredAt. No mutex needed (no rotation race).
+            // Phase 11 §3 — nested-only write.
             ws.oauth = {
               ...ws.oauth,
               client: {
@@ -394,10 +398,10 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
                 source: clientSource || ws.oauth?.client?.source || 'dcr',
                 registeredAt: ws.oauth?.client?.registeredAt || new Date().toISOString(),
               },
-              clientId,
-              clientSecret: clientSecret ?? null,
-              authMethod,
             };
+            if ('clientId' in ws.oauth) delete ws.oauth.clientId;
+            if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
+            if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
             await wm._save();
           }
 

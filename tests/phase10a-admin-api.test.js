@@ -210,7 +210,10 @@ test('§4.10a-5: PUT /oauth/client sets static client + returns 400 on invalid c
       assert.equal(body.data.source, 'manual');
       assert.equal(body.data.clientSecret, '***');
       assert.equal(ws.oauth.client.clientId, 'MY_CID');
-      assert.equal(ws.oauth.clientId, 'MY_CID', 'flat mirror (§3.4) written');
+      // Phase 11 §3 — flat mirror removed. Assert it's NOT written.
+      assert.equal(ws.oauth.clientId, undefined, 'Phase 11 §3: flat mirror must NOT be written');
+      assert.equal(ws.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must NOT be written');
+      assert.equal(ws.oauth.authMethod, undefined, 'Phase 11 §3: flat authMethod must NOT be written');
       assert.equal(ws.oauth.client.source, 'manual');
       // Codex R2 blocker 1
       assert.ok(wm.providerRecreateLog.includes('w1'), 'provider must be recreated');
@@ -489,9 +492,10 @@ test('§Phase11-2: all three rotation paths invalidate tokens + action_needed (c
         assert.equal(ws.oauth.tokens.accessToken, null, `${label}: legacy tokens.accessToken must be nulled`);
         assert.equal(ws.oauth.tokens.refreshToken, null, `${label}: legacy tokens.refreshToken must be nulled`);
         assert.equal(ws.oauthActionNeeded, true, `${label}: legacy oauthActionNeeded must be true`);
-        // Flat field mirror must be updated alongside nested client (§3.4).
-        assert.equal(ws.oauth.clientId, ws.oauth.client.clientId, `${label}: flat clientId mirror must match nested`);
-        assert.equal(ws.oauth.authMethod, ws.oauth.client.authMethod, `${label}: flat authMethod mirror must match nested`);
+        // Phase 11 §3 — flat mirror removed; assert NOT present.
+        assert.equal(ws.oauth.clientId, undefined, `${label}: Phase 11 §3: flat clientId mirror must NOT exist`);
+        assert.equal(ws.oauth.clientSecret, undefined, `${label}: Phase 11 §3: flat clientSecret mirror must NOT exist`);
+        assert.equal(ws.oauth.authMethod, undefined, `${label}: Phase 11 §3: flat authMethod mirror must NOT exist`);
       } finally {
         await new Promise(r => server.close(r));
       }

@@ -738,9 +738,12 @@ export class OAuthManager {
       //   - Migrated/rotated: ws.oauth was fully configured, then client was
       //     stripped or replaced — callback must be rejected.
       const ws = this.wm?._getRawWorkspace?.(entry.workspaceId);
-      const currentCid = ws?.oauth?.client?.clientId ?? ws?.oauth?.clientId ?? null;
-      const currentAuth = ws?.oauth?.client?.authMethod ?? ws?.oauth?.authMethod ?? null;
-      const currentSecret = ws?.oauth?.client?.clientSecret ?? ws?.oauth?.clientSecret ?? null;
+      // Phase 11 §3 — nested-only reads. Flat fallback removed; migration
+      // (startup + scripts/migrate-oauth-clients.mjs) guarantees
+      // ws.oauth.client is populated for any OAuth-enabled workspace.
+      const currentCid = ws?.oauth?.client?.clientId ?? null;
+      const currentAuth = ws?.oauth?.client?.authMethod ?? null;
+      const currentSecret = ws?.oauth?.client?.clientSecret ?? null;
       const wsHasEstablishedOAuth = !!(ws?.oauth?.enabled && ws?.oauth?.issuer);
       if (entry.clientId) {
         const fieldMismatch = (currentCid && currentCid !== entry.clientId)
@@ -864,8 +867,10 @@ export class OAuthManager {
       lastRefreshAt: new Date().toISOString(),
     };
 
-    // Phase 10a §3.4: write to ws.oauth.client.* AND mirror to flat fields for
-    // back-compat (keep readable by old code / external scripts for 1 release).
+    // Phase 11 §3 — nested-only write. The flat-field mirror
+    // (ws.oauth.{clientId,clientSecret,authMethod}) that Phase 10a §3.4
+    // preserved "for 1 release" is removed. All read paths now consult
+    // ws.oauth.client.* exclusively.
     const clientBlock = {
       clientId,
       clientSecret: clientSecret || null,
@@ -880,12 +885,13 @@ export class OAuthManager {
       enabled: true,
       issuer,
       client: clientBlock,
-      // Legacy flat-field mirror (to be removed in Phase 11)
-      clientId,
-      clientSecret: clientSecret || null,
-      authMethod,
       resource: resource || ws.oauth?.resource || null,
     };
+    // Phase 11 §3 — scrub stale flat-field mirror if present (pre-migration
+    // configs that lingered after the old read-fallback paths were removed).
+    if ('clientId' in ws.oauth) delete ws.oauth.clientId;
+    if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
+    if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
 
     this._storeTokens(ws, identity, newTokens);
     return ws.oauth;
@@ -1037,13 +1043,13 @@ export class OAuthManager {
         err.code = 'NO_REFRESH_TOKEN';
         throw err;
       }
-      // Phase 10a §3.4 — prefer ws.oauth.client.*, fall back to flat fields.
+      // Phase 11 §3 — nested-only reads. Flat fallback removed.
       const client = ws.oauth?.client || null;
       const entry = {
         tokenEndpoint: ws.oauth.metadataCache?.token_endpoint || ws.oauth.tokenEndpoint,
-        clientId: client?.clientId ?? ws.oauth.clientId,
-        clientSecret: client?.clientSecret ?? ws.oauth.clientSecret,
-        authMethod: client?.authMethod ?? (ws.oauth.authMethod || 'none'),
+        clientId: client?.clientId ?? null,
+        clientSecret: client?.clientSecret ?? null,
+        authMethod: client?.authMethod ?? 'none',
         resource: ws.oauth.resource,
       };
       // Resolve token endpoint lazily if missing

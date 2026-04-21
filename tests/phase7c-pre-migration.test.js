@@ -210,6 +210,7 @@ test('non-default identity authorization does not inherit default refresh_token'
 
 test('WorkspaceManager masking hides access/refresh tokens inside byIdentity[*]', () => {
   const wm = new WorkspaceManager();
+  // Phase 11 §3 — use nested ws.oauth.client; flat mirror is removed.
   wm.config = {
     workspaces: [
       {
@@ -217,8 +218,13 @@ test('WorkspaceManager masking hides access/refresh tokens inside byIdentity[*]'
         enabled: true,
         oauth: {
           enabled: true,
-          clientId: 'abcd1234efgh5678',
-          clientSecret: 'super_secret_xyz',
+          client: {
+            clientId: 'abcd1234efgh5678',
+            clientSecret: 'super_secret_xyz',
+            authMethod: 'client_secret_basic',
+            source: 'manual',
+            registeredAt: new Date().toISOString(),
+          },
           tokens: { accessToken: 'default_access_xyz_ENDD', refreshToken: 'default_refresh_xyz', tokenType: 'Bearer' },
           byIdentity: {
             default: { tokens: { accessToken: 'default_access_xyz_ENDD', refreshToken: 'default_refresh_xyz', tokenType: 'Bearer' } },
@@ -232,8 +238,10 @@ test('WorkspaceManager masking hides access/refresh tokens inside byIdentity[*]'
   wm._loaded = true;
   const list = wm.getWorkspaces({ masked: true });
   const oauth = list[0].oauth;
-  // clientSecret redacted
-  assert.equal(oauth.clientSecret, '***');
+  // Phase 11 §3 — nested client.clientSecret redacted (flat mirror removed)
+  assert.equal(oauth.client.clientSecret, '***');
+  // Flat fields must NOT exist post-Phase-11
+  assert.equal(oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must not exist in masked view');
   // Legacy tokens object is the masked shape
   assert.equal(oauth.tokens.accessTokenPrefix?.startsWith('defa'), true);
   assert.equal(oauth.tokens.accessToken, undefined);
@@ -261,4 +269,72 @@ test('non-default identity refresh does NOT clear legacy oauthActionNeeded for d
   const wm = new WorkspaceManager();
   wm.config = { workspaces: [ws], server: { port: 3100 } };
   assert.equal(wm._computeStatus(ws, null), 'action_needed');
+});
+
+test('§Phase11-3: WorkspaceManager._migrateLegacy promotes flat→nested AND scrubs the flat keys', () => {
+  // Phase 11 §3 — flat-field mirror removal. When a legacy config arrives
+  // with ws.oauth.{clientId,clientSecret,authMethod} (pre-Phase-10a or
+  // pre-Phase-11), startup migration must promote them into
+  // ws.oauth.client AND delete the flat keys — so the in-memory config
+  // and the subsequent on-disk save carry nested-only schema.
+  const wm = new WorkspaceManager();
+  wm.config = {
+    server: { port: 3100 },
+    workspaces: [
+      {
+        id: 'flat-ws', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+        oauth: {
+          enabled: true,
+          issuer: 'https://mcp.example',
+          clientId: 'FLAT_CID',
+          clientSecret: 'FLAT_SECRET',
+          authMethod: 'client_secret_basic',
+          byIdentity: { default: { tokens: { accessToken: 'AT' } } },
+        },
+      },
+    ],
+  };
+  wm._migrateLegacy();
+  const ws = wm.config.workspaces[0];
+  // Nested populated
+  assert.ok(ws.oauth.client, 'nested client must be populated');
+  assert.equal(ws.oauth.client.clientId, 'FLAT_CID');
+  assert.equal(ws.oauth.client.clientSecret, 'FLAT_SECRET');
+  assert.equal(ws.oauth.client.authMethod, 'client_secret_basic');
+  assert.equal(ws.oauth.client.source, 'legacy-flat');
+  // Flat keys scrubbed
+  assert.equal(ws.oauth.clientId, undefined, 'Phase 11 §3: flat clientId must be scrubbed from in-memory config');
+  assert.equal(ws.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must be scrubbed');
+  assert.equal(ws.oauth.authMethod, undefined, 'Phase 11 §3: flat authMethod must be scrubbed');
+});
+
+test('§Phase11-3: WorkspaceManager._migrateLegacy on config that already has nested+flat scrubs flat (drift safety)', () => {
+  // If a previous process wrote both nested AND flat (e.g. a node running
+  // pre-Phase-11 code on disk that already had nested), startup on the new
+  // binary must scrub the flat side to converge to single-source.
+  const wm = new WorkspaceManager();
+  wm.config = {
+    server: { port: 3100 },
+    workspaces: [
+      {
+        id: 'mixed-ws', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+        oauth: {
+          enabled: true,
+          issuer: 'https://mcp.example',
+          client: { clientId: 'NESTED_CID', clientSecret: null, authMethod: 'none', source: 'dcr', registeredAt: '2026-01-01' },
+          clientId: 'NESTED_CID',  // matching flat mirror
+          clientSecret: null,
+          authMethod: 'none',
+          byIdentity: { default: { tokens: { accessToken: 'AT' } } },
+        },
+      },
+    ],
+  };
+  wm._migrateLegacy();
+  const ws = wm.config.workspaces[0];
+  assert.equal(ws.oauth.client.clientId, 'NESTED_CID', 'nested client preserved');
+  // Flat keys scrubbed (even though they matched nested)
+  assert.equal(ws.oauth.clientId, undefined);
+  assert.equal(ws.oauth.clientSecret, undefined);
+  assert.equal(ws.oauth.authMethod, undefined);
 });

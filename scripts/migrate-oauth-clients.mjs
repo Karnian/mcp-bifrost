@@ -92,7 +92,9 @@ function inspect(config) {
 }
 
 function applyMigration(config) {
-  // 1. Flat → nested per workspace.
+  // 1. Flat → nested per workspace. Phase 11 §3: also scrub the flat keys
+  // after promotion so no mirror remains on disk. The 1-release deprecation
+  // window closed in Phase 11 — all runtime read paths use nested only.
   for (const ws of config.workspaces || []) {
     if (!ws.oauth) continue;
     if (!ws.oauth.client && ws.oauth.clientId) {
@@ -103,6 +105,12 @@ function applyMigration(config) {
         source: 'legacy-flat',
         registeredAt: ws.oauth.clientRegisteredAt || new Date().toISOString(),
       };
+    }
+    // Phase 11 §3 — scrub flat mirror if nested is now present.
+    if (ws.oauth.client) {
+      if ('clientId' in ws.oauth) delete ws.oauth.clientId;
+      if ('clientSecret' in ws.oauth) delete ws.oauth.clientSecret;
+      if ('authMethod' in ws.oauth) delete ws.oauth.authMethod;
     }
   }
   // 2. Shared clientId disambiguation. For each group of workspaces with the
@@ -120,11 +128,10 @@ function applyMigration(config) {
   for (const [key, wss] of groups) {
     if (wss.length <= 1) continue;
     // Keep wss[0], strip client from wss[1..] and set action_needed.
+    // Phase 11 §3 — nested-only; flat keys (if any) are scrubbed above.
     for (let i = 1; i < wss.length; i++) {
       const ws = wss[i];
       ws.oauth.client = null;
-      ws.oauth.clientId = null;
-      ws.oauth.clientSecret = null;
       // Mark all existing identities as requiring re-authorization.
       const byId = ws.oauth.byIdentity || { default: { tokens: null } };
       ws.oauthActionNeededBy = ws.oauthActionNeededBy || {};
