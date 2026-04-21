@@ -556,11 +556,24 @@ export class OAuthManager {
    */
   async rotateClientUnderMutex(workspaceId, identities, fn) {
     const ws = this.wm?._getRawWorkspace?.(workspaceId);
-    const idents = (identities && identities.length)
-      ? identities
-      : Object.keys(ws?.oauth?.byIdentity || { default: true });
+    // Codex R7 blocker 2: also lock any identity that has a pending /authorize
+    // state for this workspace — otherwise a stale callback for a not-yet-
+    // authorized identity (e.g. bot_ci before first-ever /authorize) can slip
+    // through its own mutex and call _persistTokens on the pre-rotation client.
+    const pending = await this._loadPending();
+    const pendingIdentities = new Set();
+    for (const entry of Object.values(pending)) {
+      if (entry?.workspaceId === workspaceId && entry.identity) {
+        pendingIdentities.add(entry.identity);
+      }
+    }
+    const explicit = (identities && identities.length) ? identities : [];
+    const fromByIdentity = Object.keys(ws?.oauth?.byIdentity || { default: true });
+    const lockSet = new Set([...explicit, ...fromByIdentity, ...pendingIdentities]);
+    const idents = Array.from(lockSet);
     // Chain through each identity's mutex sequentially so every in-flight
-    // refresh/markAuthFailed on this workspace quiesces before we mutate.
+    // refresh/markAuthFailed/completeAuthorization on this workspace quiesces
+    // before we mutate.
     let result;
     const run = async () => { result = await fn(); };
     let chained = run;
@@ -675,14 +688,24 @@ export class OAuthManager {
       // Re-check that the stored client on the workspace still matches the
       // pending entry. If the operator rotated the client after the browser
       // began /authorize but before the callback landed, the pending entry
-      // carries the pre-rotation clientId. Reject the callback rather than
-      // overwrite the new client.
+      // carries the pre-rotation client fields. Reject the callback rather
+      // than overwrite the new client.
+      //
+      // Codex R7 blocker 1: compare ALL client fields, not just clientId.
+      // Same clientId with different authMethod/clientSecret is still a rotation.
       const ws = this.wm?._getRawWorkspace?.(entry.workspaceId);
       const currentCid = ws?.oauth?.client?.clientId ?? ws?.oauth?.clientId ?? null;
-      if (currentCid && entry.clientId && currentCid !== entry.clientId) {
-        const err = new Error(`state_client_rotated: workspace client rotated since /authorize (expected ${entry.clientId}, got ${currentCid})`);
-        err.code = 'STATE_CLIENT_ROTATED';
-        throw err;
+      const currentAuth = ws?.oauth?.client?.authMethod ?? ws?.oauth?.authMethod ?? null;
+      const currentSecret = ws?.oauth?.client?.clientSecret ?? ws?.oauth?.clientSecret ?? null;
+      if (currentCid && entry.clientId) {
+        const mismatch = (currentCid !== entry.clientId)
+          || (currentAuth && entry.authMethod && currentAuth !== entry.authMethod)
+          || (currentSecret !== (entry.clientSecret ?? null));
+        if (mismatch) {
+          const err = new Error(`state_client_rotated: workspace client fields diverged since /authorize`);
+          err.code = 'STATE_CLIENT_ROTATED';
+          throw err;
+        }
       }
 
       const tokens = await this._exchangeCode(entry, code);

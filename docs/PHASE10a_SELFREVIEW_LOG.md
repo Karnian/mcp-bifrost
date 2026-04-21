@@ -115,6 +115,36 @@ Contents:
 
 ---
 
+## Codex review — Round 7 (2026-04-21)
+
+**Verdict**: REVISE (2 deeper race blockers)
+
+### Blocker 1 — completeAuthorization clientId-only rotation check insufficient
+Same clientId with different `authMethod` or `clientSecret` is still a rotation
+(operator could change public client → confidential, or rotate the secret).
+R6's check only compared `clientId`, so a stale callback passing this check
+could still overwrite `authMethod` + `clientSecret` via `_persistTokens`.
+
+**Fix**: Expanded rotation check to compare ALL three fields:
+`(currentCid !== entry.clientId) || (currentAuth !== entry.authMethod) || (currentSecret !== entry.clientSecret)`.
+
+Verified: `§4.10a-5 (Codex R7 blocker 1): completeAuthorization rejects pre-rotation callback with same clientId but different authMethod`.
+
+### Blocker 2 — rotateClientUnderMutex didn't lock pending-only identities
+Locked set was built from `ws.oauth.byIdentity`, which misses identities
+whose first `/authorize` is still pending (no tokens persisted yet). A stale
+`bot_ci` callback could slip through its own mutex while rotation held only
+the `default` mutex.
+
+**Fix**: `rotateClientUnderMutex` now also reads the pending-state file and
+adds any identity with a pending entry for this workspace to the lock set.
+
+Verified: `§4.10a-5 (Codex R7 blocker 2): rotateClientUnderMutex locks pending-only identities too`.
+Proves ordering: a concurrent `_withIdentityMutex('w1', 'bot_ci', ...)` must
+finish before rotation_start runs, even though bot_ci has no entry in byIdentity.
+
+---
+
 ## Codex review — Round 6 (2026-04-21)
 
 **Verdict**: REVISE (2 blockers — deeper race corners)
@@ -331,17 +361,30 @@ Verified: new assertion `§4.10a-1: workspace id "__global__" is reserved`.
 
 ```
 $ npm test
-# tests 310
+# tests 322
 # suites 69
-# pass 308
+# pass 320
 # fail 0
 # cancelled 0
 # skipped 2
 # todo 0
 ```
 
-Phase 10a new tests: 23 (isolation) + 4 (admin-api) + 4 (migration) + 1 (workspace reservation) = 32.
-Plus existing regression tests all green.
+Phase 10a new tests: 30 (isolation) + 7 (admin-api) + 5 (migration) = 42.
+Plus 3 Phase 6/7 regression-fix tests (aligned with plan-intended breaking changes).
+All existing regression tests pass.
+
+### Codex review history
+
+- R1 — REVISE: DCR retry 1s/2s/4s + __global__ reservation → CLOSED
+- R2 — REVISE: provider recovery + pending purge + authMethod whitelist + migration backup → CLOSED
+- R3 — REVISE: /authorize pending purge + authMethod whitelist → CLOSED
+- R4 — REVISE: /authorize token invalidation + manual-with-existing → CLOSED
+- R5 — REVISE: rotation-vs-refresh race + refreshToken drift → CLOSED
+- R6 — REVISE: /authorize atomic invalidation + completeAuthorization under mutex → CLOSED
+- R7 — REVISE: completeAuthorization full-field rotation check + rotateClientUnderMutex pending-identity lock → CLOSED
+
+Total Codex round findings: 13 blockers + 2 Phase-11 cleanup suggestions. All blockers closed with code + test evidence.
 
 ---
 

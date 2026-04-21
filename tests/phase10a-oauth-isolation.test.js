@@ -786,6 +786,91 @@ test('§4.10a-5 (Codex R6 blocker): completeAuthorization rejects stale pre-rota
   }
 });
 
+test('§4.10a-5 (Codex R7 blocker 1): completeAuthorization rejects pre-rotation callback with same clientId but different authMethod', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const { WorkspaceManager } = await import('../server/workspace-manager.js');
+    const wm = new WorkspaceManager();
+    wm.config = {
+      workspaces: [
+        {
+          id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+          oauth: {
+            enabled: true, issuer: 'https://auth.example',
+            // Post-rotation: same clientId, but operator switched to client_secret_basic with a new secret
+            client: { clientId: 'SAME_CID', clientSecret: 'NEW_SECRET', authMethod: 'client_secret_basic', source: 'manual', registeredAt: new Date().toISOString() },
+            clientId: 'SAME_CID', clientSecret: 'NEW_SECRET', authMethod: 'client_secret_basic',
+            metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+          },
+        },
+      ],
+      server: { port: 3100 },
+    };
+    wm._loaded = true;
+    wm._save = async () => {};
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '', headers: { get: () => null } }) });
+    wm.setOAuthManager(mgr);
+
+    // Stale pending state: SAME_CID but authMethod='none' (pre-rotation)
+    const init = await mgr.initializeAuthorization('w1', {
+      issuer: 'https://auth.example',
+      clientId: 'SAME_CID',
+      clientSecret: null,
+      authMethod: 'none',
+      authServerMetadata: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+    });
+    const err = await mgr.completeAuthorization(init.state, 'some-code').catch(e => e);
+    assert.equal(err.code, 'STATE_CLIENT_ROTATED', 'same clientId but different authMethod must still count as rotation');
+    // Workspace client still has new settings
+    const finalClient = wm.getOAuthClient('w1');
+    assert.equal(finalClient.clientId, 'SAME_CID');
+    assert.equal(finalClient.authMethod, 'client_secret_basic');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§4.10a-5 (Codex R7 blocker 2): rotateClientUnderMutex locks pending-only identities too', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-'));
+  try {
+    const ws = {
+      id: 'w1', kind: 'mcp-client', transport: 'http', url: 'https://mcp.example/mcp',
+      oauth: {
+        enabled: true, issuer: 'https://auth.example',
+        client: { clientId: 'CID', authMethod: 'none', source: 'dcr', registeredAt: new Date().toISOString() },
+        clientId: 'CID', authMethod: 'none',
+        metadataCache: { authorization_endpoint: 'https://auth.example/authorize', token_endpoint: 'https://auth.example/token' },
+        // Only `default` has ever been authorized
+        byIdentity: { default: { tokens: { accessToken: 'AT', refreshToken: 'RT', expiresAt: new Date(Date.now() + 3600_000).toISOString() } } },
+      },
+    };
+    const wm = mockWm({ 'w1': ws });
+    const mgr = new OAuthManager(wm, { stateDir: dir, fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'X' }), headers: { get: () => null } }) });
+    // Simulate a pending /authorize for identity=bot_ci (never authorized before)
+    const pending = await mgr._loadPending();
+    pending['state-bot'] = { workspaceId: 'w1', identity: 'bot_ci', issuer: 'https://auth.example', clientId: 'CID', clientSecret: null, authMethod: 'none', verifier: 'v', tokenEndpoint: 'https://auth.example/token', resource: null, expiresAt: Date.now() + 60_000 };
+    await mgr._savePending();
+    // Now rotate. rotateClientUnderMutex must include 'bot_ci' in its lock set
+    // even though bot_ci has no entry in ws.oauth.byIdentity yet.
+    let order = [];
+    // Hold the bot_ci mutex busy simulating an in-flight completeAuthorization
+    const botCiBusy = mgr._withIdentityMutex('w1', 'bot_ci', async () => {
+      order.push('bot_ci_busy_start');
+      await new Promise(r => setTimeout(r, 20));
+      order.push('bot_ci_busy_end');
+    });
+    const rotation = mgr.rotateClientUnderMutex('w1', null, async () => {
+      order.push('rotate_start');
+      order.push('rotate_end');
+    });
+    await Promise.all([botCiBusy, rotation]);
+    // Rotation must wait for bot_ci — proves pending identity was locked.
+    assert.deepEqual(order, ['bot_ci_busy_start', 'bot_ci_busy_end', 'rotate_start', 'rotate_end']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('§4.10a-1: workspace id "__global__" is reserved (Codex R1)', async () => {
   const { WorkspaceManager } = await import('../server/workspace-manager.js');
   const wm = new WorkspaceManager();
