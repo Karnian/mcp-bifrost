@@ -141,7 +141,7 @@ test('OAuthManager.registerClient throws DCR_UNSUPPORTED when no registration_en
   }
 });
 
-test('OAuthManager.registerClient throws DCR_FAILED on 4xx', async () => {
+test('OAuthManager.registerClient throws DCR_REJECTED on 4xx (phase10a §4.10a-3)', async () => {
   const handlers = {
     'https://auth.example/register': () => ({ ok: false, status: 403, text: async () => 'forbidden', json: async () => ({}) }),
   };
@@ -150,7 +150,7 @@ test('OAuthManager.registerClient throws DCR_FAILED on 4xx', async () => {
     const mgr = new OAuthManager(mockWm(), { stateDir: dir, fetchImpl: stubFetch(handlers) });
     await assert.rejects(
       () => mgr.registerClient('https://auth.example', { registration_endpoint: 'https://auth.example/register' }),
-      (err) => err.code === 'DCR_FAILED' && err.status === 403,
+      (err) => err.code === 'DCR_REJECTED' && err.status === 403,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

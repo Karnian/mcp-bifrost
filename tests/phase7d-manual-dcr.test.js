@@ -159,7 +159,9 @@ test('registerManual persists entry in issuer cache under "manual" source', asyn
     await oauth.registerManual('https://example.test', { clientId: 'cid', clientSecret: null, authMethod: 'none' });
     const cachePath = join(stateDir, 'oauth-issuer-cache.json');
     const raw = JSON.parse(await readFile(cachePath, 'utf-8'));
-    const key = 'https://example.test::none';
+    // Phase 10a §4.10a-1: legacy 2-arg form falls into the reserved `__global__` bucket.
+    // Production callers pass workspaceId, landing in `${wsId}::${issuer}::${authMethod}`.
+    const key = '__global__::https://example.test::none';
     assert.ok(raw[key], `cache should have key ${key}`);
     assert.equal(raw[key].clientId, 'cid');
     assert.equal(raw[key].source, 'manual');

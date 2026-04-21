@@ -86,19 +86,29 @@ test('refresh without rotation preserves existing refresh_token', async () => {
   }
 });
 
-test('concurrent refresh calls share the same promise (mutex)', async () => {
+test('concurrent refresh calls serialize via FIFO chain (phase10a §6.4)', async () => {
+  // Phase 10a Round 8: mutex semantics flipped from coalescing to FIFO chain
+  // so that markAuthFailed ↔ refresh are mutually exclusive. Concurrent
+  // refreshes are now serialized (not coalesced) — each call executes the
+  // fetch, but they run one after another without racing.
   const dir = await mkdtemp(join(tmpdir(), 'oauth-'));
   try {
     const ws = makeWsWithTokens({ refreshToken: 'RT', expiresAt: new Date(Date.now() - 1000).toISOString() });
     let calls = 0;
+    let maxConcurrent = 0;
+    let inFlight = 0;
     const fetchImpl = async () => {
       calls++;
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
       await new Promise(r => setTimeout(r, 30));
+      inFlight--;
       return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'NEW', expires_in: 3600, token_type: 'Bearer' }) };
     };
     const mgr = new OAuthManager(mockWm({ 'ws-1': ws }), { stateDir: dir, fetchImpl });
     const [a, b, c] = await Promise.all([mgr.forceRefresh('ws-1'), mgr.forceRefresh('ws-1'), mgr.forceRefresh('ws-1')]);
-    assert.equal(calls, 1, 'mutex should coalesce concurrent calls');
+    assert.equal(maxConcurrent, 1, 'FIFO chain must serialize — no concurrent token requests');
+    assert.equal(calls, 3, 'FIFO chain executes each call sequentially (coalescing removed in Phase 10a)');
     assert.equal(a.accessToken, 'NEW');
     assert.equal(b.accessToken, 'NEW');
     assert.equal(c.accessToken, 'NEW');
@@ -200,7 +210,8 @@ test('refresh mutex timeout releases lock and propagates error', async () => {
     });
     const err = await mgr.forceRefresh('ws-1').catch(e => e);
     assert.equal(err.message, 'refresh_timeout');
-    assert.equal(mgr._refreshMutex.size, 0, 'mutex must be cleared after timeout');
+    // Phase 10a §6.4: _refreshMutex renamed to _identityMutex (shared with markAuthFailed)
+    assert.equal(mgr._identityMutex.size, 0, 'identity mutex must be cleared after timeout');
     assert.ok(wm.audits.some(a => a.action === 'oauth.refresh_fail'));
     // Drain pending fetches so the test doesn't leak timers into the runner
     await Promise.all(pendingFetches);
