@@ -47,6 +47,11 @@ export class OAuthMetrics {
   constructor({ maxEntries = 10_000 } = {}) {
     this._counters = new Map();
     this._maxEntries = Math.max(0, maxEntries | 0);
+    // Phase 11-10 §1 — saturation telemetry. Counts the total number of
+    // entries evicted by the soft cap so operators can tell "the cap is
+    // trimming things" from "steady-state fits inside the cap". Never
+    // decremented; reset() zeroes it too.
+    this._evictionsTotal = 0;
   }
 
   inc(name, labels = {}, delta = 1) {
@@ -74,6 +79,7 @@ export class OAuthMetrics {
         const firstKey = this._counters.keys().next().value;
         if (firstKey === undefined) break;
         this._counters.delete(firstKey);
+        this._evictionsTotal++;
       }
     }
   }
@@ -88,6 +94,28 @@ export class OAuthMetrics {
 
   reset() {
     this._counters.clear();
+    this._evictionsTotal = 0;
+  }
+
+  /**
+   * Phase 11-10 §1 — saturation summary for Admin UI / diagnostics.
+   * Returns counter-map health instead of the counter values themselves.
+   *   entries         — current resident entries
+   *   maxEntries      — configured soft cap (0 when disabled)
+   *   capped          — whether a cap is active
+   *   evictionsTotal  — lifetime count of entries ejected to fit the cap
+   *   saturation      — entries / maxEntries (0 when maxEntries=0)
+   */
+  stats() {
+    const entries = this._counters.size;
+    const max = this._maxEntries;
+    return {
+      entries,
+      maxEntries: max,
+      capped: max > 0,
+      evictionsTotal: this._evictionsTotal,
+      saturation: max > 0 ? Math.min(1, entries / max) : 0,
+    };
   }
 
   /**

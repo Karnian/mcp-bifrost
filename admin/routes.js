@@ -614,6 +614,22 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // GET /api/oauth/metrics/status — saturation summary (Phase 11-10 §1).
+      // Lightweight health of the counter-map (resident entries, cap,
+      // eviction counter). Separate from `/metrics` so the UI can show a
+      // capacity badge without paginating through the whole snapshot.
+      if (path === '/api/oauth/metrics/status' && method === 'GET') {
+        const metrics = extras.oauthMetrics || oauth?.metrics || null;
+        let data = { entries: 0, maxEntries: 0, capped: false, evictionsTotal: 0, saturation: 0 };
+        try {
+          if (metrics?.stats) data = metrics.stats();
+        } catch (err) {
+          wm.logError?.('oauth.metrics', null, `stats failed: ${err?.message || err}`);
+        }
+        sendJson(res, 200, { ok: true, data });
+        return;
+      }
+
       // GET /api/oauth/security — fileSecurityWarning flag
       if (path === '/api/oauth/security' && method === 'GET') {
         sendJson(res, 200, { ok: true, data: {

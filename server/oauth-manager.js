@@ -421,12 +421,26 @@ export class OAuthManager {
   async removeClient(workspaceId) {
     const cache = await this._loadIssuerCache();
     // Phase 11-7 §6 — new schema uses `ws::${workspaceId}::` prefix.
-    // _loadIssuerCache() has already migrated any legacy keys, so there
-    // is exactly one prefix to match here.
-    const prefix = `ws::${workspaceId}::`;
+    // _loadIssuerCache() has already migrated any legacy keys it could
+    // recognize. Phase 11-10 §3 (Codex R2 non-blocking) — legacy bare-
+    // scoped keys whose trailing authMethod wasn't in KNOWN_AUTH_METHODS
+    // survive migration as pass-through, so we must also purge keys of
+    // the form `${workspaceId}::...` that don't carry the `ws::` /
+    // `global::` prefix. Without this, a future release that adds a new
+    // enum value (e.g. `private_key_jwt`) could resurrect a stale cached
+    // client for a reused workspace id.
+    const newPrefix = `ws::${workspaceId}::`;
+    const bareLegacyPrefix = `${workspaceId}::`;
     let removed = 0;
     for (const key of Object.keys(cache)) {
-      if (key.startsWith(prefix)) {
+      if (key.startsWith(newPrefix)) {
+        delete cache[key];
+        removed++;
+        continue;
+      }
+      // Don't overmatch already-prefixed keys (both `ws::…` and
+      // `global::…` are guarded explicitly), then apply the bare prefix.
+      if (!key.startsWith('ws::') && !key.startsWith('global::') && key.startsWith(bareLegacyPrefix)) {
         delete cache[key];
         removed++;
       }

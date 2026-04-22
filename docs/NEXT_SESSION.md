@@ -1,9 +1,9 @@
 # 다음 세션 핸드오프
 
-**마지막 세션 완료일**: 2026-04-22 (Phase 11 전체 후보 소진)
-**마지막 완료 Phase**: 11-9 — Admin Wizard Static client UX (Codex R1 APPROVE)
-**이번 세션 추가 Phase**: 11-6 (metrics cardinality) · 11-7 (cache key schema) · 11-8 (watcher atomic-replace) · 11-9 (static client wizard)
-**이전 완료 Phase**: 11-5 (refresh timeout AbortController) · 11-4 (OAuthMetrics recorder) · 11-1/2/3 · 10a
+**마지막 세션 완료일**: 2026-04-22 (Phase 11 완전 마감, 후속 cleanup 포함)
+**마지막 완료 Phase**: 11-10 — non-blocking cleanup 일괄 (Codex R1 APPROVE)
+**직전 Phase**: 11-9 (Admin Wizard) · 11-8 (watcher rename) · 11-7 (cache key schema) · 11-6 (metrics cardinality)
+**이전 완료 Phase**: 11-5 (refresh AbortController) · 11-4 (OAuthMetrics) · 11-1/2/3 · 10a
 
 ---
 
@@ -115,13 +115,19 @@ node scripts/migrate-oauth-clients.mjs --restore
 
 ---
 
-## Phase 11 전체 완료 — 남은 후속 후보 (모두 non-blocking/선택적)
+## Phase 11 전체 완료 — Phase 11-10 에서 후속 non-blocking 도 모두 소진 ✅
 
-- **Admin `size()` saturation 엔드포인트** — Phase 11-6 Codex R1 non-blocking. `/api/oauth/metrics/status` 같은 경로에서 `{ entries, maxEntries, capped, evictionsTotal }` 반환.
-- **`STATIC_CLIENT_GUIDES` hostname 기반 매칭** — Phase 11-9 Codex R1 non-blocking. 현재 substring match → `new URL(url).hostname` 로 전환 (false positive 방지).
-- **unknown-authMethod legacy key `removeClient` overmatch** — Phase 11-7 Codex R2 non-blocking. 현재 `ws::` prefix 만 purge → legacy pass-through 형태는 잔존. `private_key_jwt` 같은 미래 enum 추가 시 coordination 필요.
-- **Watcher rename 후 re-migration loop 회피** — Phase 11-8 후속 hardening 후보. 현재 save-before-rebind sequencing 으로 기본 race 는 닫음.
-- **Frontend unit test (`guideFor`, `renderStaticClientBody`)** — Phase 11-9 Codex R1 nice-to-have.
+### Phase 11-10 cleanup (완료 2026-04-22, Codex R1 APPROVE)
+- **§1 OAuthMetrics saturation** — `_evictionsTotal` 누적 + `stats()` + `GET /api/oauth/metrics/status` (`{entries, maxEntries, capped, evictionsTotal, saturation}`). Broken recorder 는 zero-state 로 degrade + logError surface.
+- **§2 Hostname 기반 guide matching** — `admin/public/static-client-guides.js` 모듈 분리. `guideFor` 가 `new URL(url).hostname` + exact/suffix 매칭 (`host === needle || host.endsWith('.' + needle)`). `user-notion.com.attacker.tld` 류 false positive 차단.
+- **§3 `removeClient` legacy overmatch 개선** — 신규 `ws::${wsId}::` 와 legacy bare `${wsId}::` 둘 다 purge. `ws::` / `global::` 명시적 guard 로 신규 스키마 key 는 보호.
+- **§4 Watcher rename re-migration** — Phase 11-8 `savePromise.finally(rebind)` sequencing 으로 이미 커버됨. 추가 코드 없음.
+- **§5 Frontend unit test** — `guideFor` / `renderStaticClientBody` Node 테스트. HTML escape, 악성 host rejection, Notion/GitHub exact/suffix/alias 전부.
+
+### Phase 11 최종 상태
+- 전체 tests: **428 / 426 pass / 0 fail / 2 skipped** (누적 신규 ~100 tests across 11-1 ~ 11-10)
+- Codex 리뷰: 총 15 rounds across Phase 11 sub-phases, 모든 blocker closed, 최종 APPROVE.
+- 남은 open 항목: 없음 (선택적 follow-up 도 전부 소진).
 
 ---
 

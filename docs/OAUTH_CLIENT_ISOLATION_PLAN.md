@@ -412,7 +412,7 @@ Phase 10a 에서는 deferred 됐고 Phase 11-4 (Codex R2 APPROVE) 에서 본격 
 
 **Wiring**: `server/index.js` 에서 `new OAuthMetrics()` 를 생성해 `OAuthManager({ metrics })` + `createAdminRoutes(..., { oauthMetrics })` 양쪽에 주입.
 
-Metric 은 여전히 **process-memory only**. 영구 저장 / Prometheus export / cardinality cap 은 deferred (Codex R2 non-blocking — workspace 삭제 시 metric 정리 hook 후속 후보).
+Metric 은 여전히 **process-memory only**. 영구 저장 / Prometheus export 는 deferred. Cardinality cap + workspace-delete prune hook 은 Phase 11-6 에서 구현 완료. saturation telemetry (`stats()` + `GET /api/oauth/metrics/status`) 는 Phase 11-10 에서 추가 완료.
 
 ### 6-OBS.2b Refresh timeout + AbortController  ✅ **완료 — Phase 11-5 (2026-04-22, Codex R1 APPROVE)**
 
