@@ -86,6 +86,8 @@ config/
 - Phase 8 — Admin UI 확장 + usage/audit 집계
 - Phase 9 — 관측성 + (상세 `docs/PHASE9_PLAN.md`)
 - **Phase 10a** — OAuth Client Isolation (2026-04-22 완료, Codex R11 APPROVE)
-- **Phase 11** — Follow-ups (2026-04-22 완료): R10 regression test instrumentation, rotate-client helper consolidation (`_rotateClientAndInvalidate`), flat-field mirror 완전 제거 (Phase 10a §3.4 deprecation window close)
+- **Phase 11** — Follow-ups + 관측성 + hardening 수렴 (2026-04-22 완료, 10 sub-phases, 15 Codex rounds, 6 blockers closed, 0 open). 통합 로그: `docs/PHASE11_SELFREVIEW_LOG.md`
+  - 11-1 mutex acquisition-order instrumentation · 11-2 rotate-client helper consolidation · 11-3 flat-field mirror 제거 · 11-4 `OAuthMetrics` recorder · 11-5 refresh `AbortController` · 11-6 cardinality cap + prune · 11-7 cache-key `ws::`/`global::` schema · 11-8 watcher atomic-replace · 11-9 Admin wizard static-client UX · 11-10 cleanup batch
+- **운영 마이그레이션** (2026-04-23) — `scripts/migrate-oauth-clients.mjs --apply` 로컬 baseline 확정 (변경 0, backup 생성).
 
 다음 세션 시작 시 `docs/NEXT_SESSION.md` 참고.

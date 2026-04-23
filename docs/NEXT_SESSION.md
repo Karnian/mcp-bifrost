@@ -172,8 +172,9 @@ grep -n "agent_message" .ao/artifacts/ask/<jobId>.jsonl | tail -1
 | `CLAUDE.md` | 프로젝트 기본 가이드 (명령어, 아키텍처, 보안, Phase 이력) |
 | `README.md` | 사용자 관점 README (Status 섹션 최신) |
 | `docs/SPEC.md` | 전체 기획 (Phase 1~4 완료 상태, 5+ 는 각 PLAN 문서 참조) |
-| `docs/OAUTH_CLIENT_ISOLATION_PLAN.md` | Phase 10a 플랜 (완료 마크 포함, 651 lines) |
+| `docs/OAUTH_CLIENT_ISOLATION_PLAN.md` | Phase 10a 플랜 (완료 마크 포함, §6-OBS.2b Phase 11-5 노트 포함) |
 | `docs/PHASE10a_SELFREVIEW_LOG.md` | Phase 10a 리뷰 이력 (11 rounds, 17 blockers close) |
+| `docs/PHASE11_SELFREVIEW_LOG.md` | **Phase 11 통합 리뷰 이력** (10 sub-phases, 15 rounds, 6 blockers close, 0 open) |
 | `docs/PHASE9_PLAN.md` / `PHASE9_SELFREVIEW_LOG.md` | Phase 9 참고 |
 | `docs/PROVIDER_GUIDE.md` | 새 provider 추가 가이드 |
 | `docs/USAGE.md` | 운영 가이드 |
@@ -188,4 +189,4 @@ grep -n "agent_message" .ao/artifacts/ask/<jobId>.jsonl | tail -1
 
 ---
 
-**새 세션에서 바로 시작 가능.** Phase 11 후보 중 **1번 (R10 regression test 강화)** 이 가장 작고 독립적이라 아이스브레이커로 적합.
+**Phase 10a + 11 완결.** 2026-04-23 기준 운영 마이그레이션 apply 완료 (no-op + backup 생성). 새 세션에서 할 일은 로드맵 기반 — 신규 provider 추가, 사용량 대시보드, profile 엔드포인트, 또는 Phase 12 스펙 초안.

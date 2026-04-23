@@ -644,7 +644,7 @@ npm run tunnel
 
 ## Roadmap
 
-> **현재 상태 (2026-04-22)**: Phase 1~4 의 대부분 + Phase 5~10a 완료. 세부 이력은 `docs/PHASE{6,7,8,9,10a}_*.md` 참조. 다음 작업 후보는 `docs/NEXT_SESSION.md`.
+> **현재 상태 (2026-04-23)**: Phase 1~4 의 대부분 + Phase 5~11 완료. 세부 이력은 `docs/PHASE{6,7,8,9,10a,11}_*.md` 참조. 다음 작업 후보는 `docs/NEXT_SESSION.md`.
 >
 > **완료된 Phase 요약**:
 > - Phase 6 — OAuth 2.0 remote MCP (PKCE, DCR, refresh rotation)
@@ -652,6 +652,8 @@ npm run tunnel
 > - Phase 8 — Admin UI 확장 + usage/audit 집계
 > - Phase 9 — 관측성 강화
 > - **Phase 10a — OAuth Client Isolation** (2026-04-22, Codex R11 APPROVE) — workspace 단위 DCR client 격리, 401 fail-fast, `_workspaceMutex` + `_identityMutex` FIFO chain. 마이그레이션 스크립트 포함.
+> - **Phase 11 — Phase 10a 수렴 + 관측성 + hardening** (2026-04-22, 10 sub-phases, 15 Codex rounds, 6 blockers closed, 0 open). `OAuthMetrics` 본격 구현, refresh `AbortController` state/audit convergence, cache-key `ws::`/`global::` schema, watcher atomic-replace 지원, Admin static-client wizard 등. 통합 로그: `docs/PHASE11_SELFREVIEW_LOG.md`.
+> - **운영 마이그레이션** (2026-04-23) — `scripts/migrate-oauth-clients.mjs --apply` 로컬 baseline 확정.
 >
 > 아래 Phase 1~4 로드맵은 초기 기획 시점 기록. 세부 완료 여부는 `git log` + 각 Phase 문서 참조.
 
