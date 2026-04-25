@@ -658,71 +658,79 @@ npm run tunnel
 > 아래 Phase 1~4 로드맵은 초기 기획 시점 기록. 세부 완료 여부는 `git log` + 각 Phase 문서 참조.
 
 
-### Phase 1a — MCP Core (1~2주)
+### Phase 1a — MCP Core ✅ 완료
 Notion 1개로 MCP 프로토콜이 동작하는 최소 서버. Admin은 최소한.
 
-- [ ] MCP 프로토콜 핸들러 (Streamable HTTP 우선)
-- [ ] `initialize`, `tools/list`, `tools/call` 구현
-- [ ] Workspace manager + tool registry
-- [ ] Notion provider (search, read page, list databases) + healthCheck
-- [ ] 기본 설정 파일 로딩 (workspaces.json) + 원자적 쓰기
-- [ ] 불변 namespace + 가변 alias 분리
-- [ ] Tool description 자동 생성 (displayName + provider 컨텍스트 주입)
-- [ ] MCP 에러 응답 구조화 (isError + content.text + _meta.bifrost)
-- [ ] MCP 엔드포인트 인증 (BIFROST_MCP_TOKEN)
-- [ ] Admin REST API (CRUD + test connection)
-- [ ] Admin UI — Login + Dashboard (카드 그리드 + Add/Edit form) + 상태 3단계 (Healthy/Error/Disabled)
-- [ ] API 레벨 토큰 마스킹
+- [x] MCP 프로토콜 핸들러 (Streamable HTTP 우선) — `server/mcp-handler.js`
+- [x] `initialize`, `tools/list`, `tools/call` 구현 — `server/mcp-handler.js`
+- [x] Workspace manager + tool registry — `server/workspace-manager.js`, `server/tool-registry.js`
+- [x] Notion provider (search, read page, list databases) + healthCheck — `providers/notion.js`
+- [x] 기본 설정 파일 로딩 (workspaces.json) + 원자적 쓰기 — `WorkspaceManager._save()` (tmp + rename)
+- [x] 불변 namespace + 가변 alias 분리 — `workspace-schema.js` `namespacePattern`
+- [x] Tool description 자동 생성 (displayName + provider 컨텍스트 주입) — `tool-registry.js`
+- [x] MCP 에러 응답 구조화 (isError + content.text + _meta.bifrost) — `mcp-handler.js`
+- [x] MCP 엔드포인트 인증 (BIFROST_MCP_TOKEN) — `server/mcp-token-manager.js`
+- [x] Admin REST API (CRUD + test connection) — `admin/routes.js`
+- [x] Admin UI — Login + Dashboard + 상태 3단계 — `admin/public/index.html`, `app.js`
+- [x] API 레벨 토큰 마스킹 — `WorkspaceManager.maskCredentials()`
 
-### Phase 1b — 운영 품질 (1~2주)
+### Phase 1b — 운영 품질 ✅ 완료
 MCP 서버를 실제 운영 가능한 수준으로 보강.
 
-- [ ] SSE 트랜스포트 추가 (claude.ai remote connector 호환)
-- [ ] capabilityCheck 구현 (Notion) + 상태 5단계로 확장 (Healthy/Limited/Action Needed/Error/Disabled)
-- [ ] Bifrost 메타 도구 (bifrost__list_workspaces, bifrost__workspace_info)
-- [ ] `resources/list` 구현
-- [ ] toolsVersion + `notifications/tools/list_changed` (SSE)
-- [ ] toolFilter (워크스페이스별 도구 선택적 노출)
-- [ ] 에러 분류 체계 (Credential/Permission/Connectivity/Config Conflict/Internal)
-- [ ] Admin UI — Setup Wizard (4단계) + Workspace Detail (도구 토글, 삭제 확인)
-- [ ] Dashboard — Needs Attention 영역, 도구 수 경고 (20/30개)
-- [ ] 주기적 background healthCheck (5분)
+- [x] SSE 트랜스포트 추가 (claude.ai remote connector 호환) — `server/sse-manager.js`
+- [x] capabilityCheck 구현 + 상태 5단계 (Healthy/Limited/Action Needed/Error/Disabled) — `providers/*.js capabilityCheck()`
+- [x] Bifrost 메타 도구 (bifrost__list_workspaces, bifrost__workspace_info) — `tool-registry.js`
+- [x] `resources/list` 구현 — `mcp-handler.js`
+- [x] toolsVersion + `notifications/tools/list_changed` (SSE) — `tool-registry.bumpVersion()` + `sse.broadcastNotification()`
+- [x] toolFilter (워크스페이스별 도구 선택적 노출) — `workspace-schema.js` toolFilter
+- [x] 에러 분류 체계 (Credential/Permission/Connectivity/Config Conflict/Internal) — providers + `WorkspaceManager.logError`
+- [x] Admin UI — Setup Wizard + Workspace Detail — `admin/public/app.js initWizard()`
+- [x] Dashboard — Needs Attention 영역, 도구 수 경고 — `admin/public/app.js`
+- [x] 주기적 background healthCheck (5분) — `server/index.js HEALTH_CHECK_INTERVAL_MS`
 
-### Phase 1.5 — Slack + Diagnostics (1~2주)
+### Phase 1.5 — Slack + Diagnostics ✅ 완료
 두 번째 Provider 추가, 운영 진단 도구.
 
-- [ ] Slack provider (search messages, read channel, list channels)
-- [ ] Slack capabilityCheck (scope 파싱, Team ID 자동 추출)
-- [ ] Admin UI — Diagnostics 화면 (에러 로그, 상태 요약, 일괄 재검사)
-- [ ] Admin UI — Server Settings 화면
-- [ ] Rate Limit (429) 에러 처리 + countdown UI
-- [ ] Provider Outage 자동 감지 + 재시도 (backoff)
-- [ ] 최소 audit log (설정 변경 이력, 마지막 10건)
-- [ ] hot reload (workspaces.json 변경 감지)
+- [x] Slack provider (search messages, read channel, list channels) — `providers/slack.js`
+- [x] Slack capabilityCheck (scope 파싱, Team ID 자동 추출) — `providers/slack.js capabilityCheck()`
+- [x] Admin UI — Diagnostics 화면 — `admin/public/index.html` Diagnostics tab
+- [x] Admin UI — Server Settings 화면 — `admin/public/index.html` Settings
+- [x] Rate Limit (429) 에러 처리 — `mcp-handler.js _toolsCall` retry/backoff
+- [x] Provider Outage 자동 감지 + 재시도 (backoff) — `mcp-handler.js` (Retry-After 우선)
+- [x] 최소 audit log — `WorkspaceManager.auditLog` + `oauthAuditLog`
+- [x] hot reload (workspaces.json 변경 감지) — `WorkspaceManager._startFileWatcher` (Phase 11-8 에서 rename 이벤트도 수용)
 
-### Phase 2 — Auth & Connect Guide
+### Phase 2 — Auth & Connect Guide ✅ 완료
 외부 서비스 연동을 쉽게 만드는 단계.
 
-- [ ] OAuth flow 지원 (Notion — 토큰 수동 입력 대체)
-- [ ] OAuth flow 지원 (Slack — Bot Token 자동 발급)
-- [ ] Admin UI — Connect Guide 탭 (claude.ai, Claude Code 연동 안내)
-- [ ] Admin UI — Tools Overview (전체 도구 테이블 + 검색 + inputSchema)
-- [ ] Tunnel URL 변경 감지 + 전역 경고 배너
+- [x] OAuth flow 지원 (Notion) — Phase 6 (`server/oauth-manager.js`)
+- [x] OAuth flow 지원 (Slack — Bot Token 자동 발급) — `providers/slack.js`
+- [x] Admin UI — Connect Guide 탭 — `admin/public/index.html:335`, `app.js:1186`
+- [x] Admin UI — Tools Overview — `admin/public/index.html` `.tools-overview-content`
+- [x] Tunnel URL 변경 감지 + 전역 경고 배너 — `admin/public/app.js` tunnel banner
 
-### Phase 3 — Tunnel & Distribution
-- [ ] Cloudflare Tunnel 통합
-- [ ] Connect Guide에 Tunnel URL 자동 반영 + 원클릭 복사
-- [ ] Claude Code .mcp.json 자동 생성 기능
-- [ ] Palantir Console 연동 가이드
+### Phase 3 — Tunnel & Distribution ✅ 완료
+- [x] Cloudflare Tunnel 통합 — `scripts/tunnel.js` (`npm run tunnel`)
+- [x] Connect Guide에 Tunnel URL 자동 반영 + 원클릭 복사 — `admin/public/app.js` Connect Guide
+- [x] Claude Code .mcp.json 자동 생성 기능 — `scripts/tunnel.js` (`docs/USAGE.md:337`)
+- [x] Palantir Console 연동 가이드 — 본 문서 §Integration Points 의 Palantir Console 섹션 + `docs/USAGE.md`
 
-### Phase 4 — Advanced
-- [ ] 추가 provider (Google Drive, GitHub, Linear, ...)
-- [ ] 토큰 자동 갱신 (OAuth refresh)
-- [ ] 설정 export/import (환경 간 이동)
-- [ ] 워크스페이스 삭제 undo (soft delete + 30일 보관)
-- [ ] 사용량 대시보드 / 상세 audit trail
-- [ ] Profile 기반 엔드포인트 (`/mcp?profile=read-only` — 클라이언트별 도구셋 제한)
-- [ ] 다중 MCP 토큰 (클라이언트별 토큰 + 접근 가능 워크스페이스 제한)
+### Phase 4 — Advanced ✅ 완료
+- [x] 추가 provider (GitHub / Linear / Google Drive) — `admin/public/templates.js` 에 mcp-client transport 등록 (native API 직중계 대신 공식 MCP 서버 경유)
+- [x] 토큰 자동 갱신 (OAuth refresh) — Phase 6 (`oauth-manager.js _runRefresh`)
+- [x] 설정 export/import — `admin/routes.js GET /api/export`, `POST /api/import` (credentials 자동 strip)
+- [x] 워크스페이스 삭제 undo (soft delete + 30일 보관) — `WorkspaceManager.deleteWorkspace({ hard:false })` + `restoreWorkspace` + `purgeExpiredWorkspaces`
+- [x] 사용량 대시보드 / 상세 audit trail — Phase 8 (`server/usage-recorder.js`, `auditLog` / `oauthAuditLog`)
+- [x] Profile 기반 엔드포인트 (`/mcp?profile=read-only`) — Phase 7 profile 라우팅
+- [x] 다중 MCP 토큰 (클라이언트별 토큰 + 접근 가능 워크스페이스 제한) — Phase 7 (`server/mcp-token-manager.js`)
+
+### Phase 10a — OAuth Client Isolation ✅ 완료 (2026-04-22)
+같은 OAuth issuer 에 여러 workspace 연결 시 refresh-token supersede 로 발생하던 401 무한 루프 해소.
+플랜: `docs/OAUTH_CLIENT_ISOLATION_PLAN.md` · 리뷰 로그: `docs/PHASE10a_SELFREVIEW_LOG.md` (11 rounds, 17 blockers close).
+
+### Phase 11 — Phase 10a 수렴 + 관측성 + hardening ✅ 완료 (2026-04-22)
+10 sub-phases / 15 Codex review rounds / 6 blockers closed / 0 open.
+통합 로그: `docs/PHASE11_SELFREVIEW_LOG.md`.
 
 ## Integration Points
 
@@ -742,6 +750,58 @@ Settings → Connectors → Add Custom Connector → Bifrost URL 등록
 ```
 > MCP 토큰 사용 (Admin 토큰 아님). 로컬 stdio 연결 시 인증 불필요.
 
-### Palantir Console
-프로젝트/에이전트 설정에서 Bifrost 엔드포인트를 MCP 서버로 등록.
-PM/Worker가 `notion_personal__search_pages`, `slack_company__send_message` 등 네임스페이스된 도구를 자연스럽게 호출.
+### Palantir Console (AIP / Code Assistant)
+
+Palantir AIP / Code Assistant 의 MCP 연동 슬롯에 Bifrost 엔드포인트를 등록한다.
+같은 Tunnel URL + MCP 토큰을 claude.ai / Claude Code 와 공유 가능 — Bifrost 한 인스턴스가
+세 클라이언트를 동시 서빙한다. 절차는 Palantir 환경에 따라 약간 다르지만 본질은 동일:
+**(1) MCP server URL 등록 → (2) Bearer token 제공 → (3) 노출 도구셋 검토 + 활성화**.
+
+**1. Tunnel URL + MCP 토큰 준비**
+
+```bash
+# 터미널 1 — Bifrost 서버
+npm start
+
+# 터미널 2 — Cloudflare Tunnel (URL 발급 + .mcp.json 자동 생성)
+npm run tunnel
+# → https://bifrost-xxxx.trycloudflare.com 발급
+```
+
+```bash
+# MCP 토큰 (Admin 토큰과 분리)
+export BIFROST_MCP_TOKEN="$(openssl rand -hex 32)"
+# 서버 재시작 후 토큰 적용 확인
+curl -H "Authorization: Bearer $BIFROST_MCP_TOKEN" \
+     https://bifrost-xxxx.trycloudflare.com/mcp \
+     -X POST -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+# → 노출된 도구 목록이 반환되면 OK
+```
+
+**2. Palantir 콘솔에 등록**
+
+| 필드 | 값 |
+|------|------|
+| MCP Server URL | `https://bifrost-xxxx.trycloudflare.com/mcp` (Streamable HTTP) |
+| Authorization | `Bearer <BIFROST_MCP_TOKEN>` |
+| Transport | Streamable HTTP (SSE 지원도 가능) |
+
+> Profile 기반 도구셋 제한이 필요하면 `?profile=read-only` 같은 쿼리 파라미터로 엔드포인트 분기 (Phase 7).
+> 클라이언트별 token 분리가 필요하면 Bifrost Admin UI 에서 MCP 토큰을 추가 발급 후 token-별 workspace whitelist 설정.
+
+**3. 노출 도구 확인**
+
+Palantir 가 `tools/list` 를 호출해 받은 도구 이름이 `{provider}_{alias}__{tool}` 형식으로
+들어옴 (예: `notion_personal__search_pages`, `slack_company__send_message`). PM / Worker
+프롬프트에서는 자연어로 호출하면 자동으로 라우팅되며, 기본 namespace 충돌은 Bifrost 가
+이미 차단한다 (`workspace-schema.js` namespacePattern).
+
+**4. Tunnel URL 변경 대응**
+
+Cloudflare quick tunnel URL 은 재기동 시마다 바뀐다. 영구 도메인이 필요하면
+`config/workspaces.json` 의 `tunnel.fixedDomain` 또는 Cloudflare 계정의 Named Tunnel
+세팅을 사용. Bifrost Admin UI 는 Tunnel URL 변경 시 전역 배너로 경고하므로 Palantir
+쪽 등록 URL 도 갱신 필요.
+
+> 더 자세한 운영 절차는 [`docs/USAGE.md`](USAGE.md) §6 (클라이언트 연결) + §7 (운영) 참고.
