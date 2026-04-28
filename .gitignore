@@ -1,10 +1,30 @@
+## Dependencies
 node_modules/
+
+## Runtime config — contains real OAuth tokens
 config/workspaces.json
 config/workspaces.backup.json
-.ao/state/oauth-issuer-cache.json
-.ao/state/oauth-pending.json
-.ao/state/server-secret
+config/*.bak
+config/*.pre-*.bak
+config/*.tmp.json
+
+## Local secrets
 .env
-*.db
+.env.local
+.env.*.local
+
+## Bifrost runtime state (.ao/)
+# Whole .ao/ tree is local-only:
+#  - .ao/state/*       OAuth issuer cache, pending, server-secret, audit, ao-* metadata
+#  - .ao/sessions/*    Claude Code session transcripts
+#  - .ao/artifacts/*   Codex / Gemini ask-skill outputs (review prompts + responses)
+.ao/
+
+## Editor / OS
 .DS_Store
+*.swp
+*.swo
+
+## Database / generated
+*.db
 .mcp.json
