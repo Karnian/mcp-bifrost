@@ -711,7 +711,7 @@ BIFROST_TEST_NOTION_REFRESH_TOKEN=RT.xxx \
 
 ### 12.1 신규 등록은 자동으로 격리됨
 
-Wizard 또는 `/api/workspaces` POST 로 새 workspace 를 등록하면 **workspace 별로 별도 DCR 호출** 이 자동 발생합니다. 추가 설정 불필요. 같은 issuer 에 여러 workspace 를 만들어도 각자 다른 `clientId` 를 받습니다.
+Workspace 만 만드는 단계 (`POST /api/workspaces`) 에서는 OAuth 작업이 일어나지 않습니다. **OAuth authorize 단계** — Wizard 의 마지막 step 이나 `POST /api/workspaces/:id/authorize` REST 호출 — 에서 **workspace 별로 별도 DCR** 이 자동 실행됩니다. 추가 설정 불필요. 같은 issuer 에 여러 workspace 를 등록해도 각자 다른 `clientId` 를 받습니다.
 
 ### 12.2 기존 인스턴스 마이그레이션
 
@@ -727,18 +727,20 @@ node scripts/migrate-oauth-clients.mjs --dry-run
 #   "report": {
 #     "workspacesScanned": 3,
 #     "sharedClients": [
-#       { "clientId": "GN6tDPJbB40wd_ei", "issuer": "https://mcp.notion.com",
+#       { "groupKey": "https://mcp.notion.com::client_secret_basic::GN6tDPJbB40wd_ei",
 #         "workspaces": ["http-notion-aiproduct1", "http-notion-aiopstf"] }
 #     ],
 #     "flatToNested": [],
 #     "alreadyMigrated": [],
-#     "nonOAuth": [{ "id": "fs-local" }]
+#     "nonOAuth": [{ "id": "fs-local" }],
+#     "conflicts": []
 #   }
 # }
 ```
 
-- `sharedClients[].workspaces` 의 모든 workspace 는 마이그레이션 후 **재인증 필요** (refresh token 무효화 + `oauthActionNeeded=true` 플래그). 실행 전 운영자/팀에게 사전 공지하세요.
+- `sharedClients[]` 그룹의 **첫 번째** workspace 는 기존 client 를 그대로 유지하고, **나머지** workspace (`workspaces[1..]`) 만 `oauth.client = null` + `oauthActionNeeded = true` + access token null 처리됩니다 (refresh token 자체는 그대로 둡니다). 실행 전 영향받는 사용자에게 "Re-authorize 한 번 필요" 라고 사전 공지하세요.
 - `flatToNested` / `alreadyMigrated` 는 데이터 shape 만 정리되며 재인증 없음.
+- `conflicts` 는 nested ↔ flat 필드 drift 가 있는 workspace (Phase 11-3 이전 잔재). 일반적으로 비어 있습니다.
 
 ```bash
 # (2) 적용 — config/workspaces.json 갱신 + .pre-10a.bak 자동 생성 (0o600)
@@ -750,7 +752,10 @@ node scripts/migrate-oauth-clients.mjs --restore
 
 `--config=PATH` 로 다른 위치의 config 도 지정 가능 (테스트/멀티 인스턴스용). backup 파일은 같은 디렉토리에 생성됩니다.
 
-마이그레이션 후 영향받은 workspace 는 Admin UI Detail > OAuth 패널 > **Re-authorize** 로 한 번씩 다시 인증하면 끝.
+마이그레이션 후 절차:
+1. dry-run 의 `sharedClients[].workspaces[1..]` 에 해당하는 workspace 만 Admin UI Detail > OAuth 패널 > **Re-authorize** 로 다시 인증.
+2. Detail 의 **Test Connection** (또는 `POST /api/workspaces/:id/test`) 로 healthCheck 통과 확인.
+3. `GET /api/oauth/audit` 로 `oauth.threshold_trip` / `oauth.refresh_fail` 잔재가 없는지 확인.
 
 ### 12.3 401 fail-fast (action_needed)
 
@@ -760,13 +765,16 @@ node scripts/migrate-oauth-clients.mjs --restore
 
 ### 12.4 Workspace 별 OAuth client 직접 관리
 
-Admin UI Detail > OAuth 패널에 **OAuth Client** 영역이 있어 운영자가 workspace 의 client 를 직접 관리할 수 있습니다:
+Admin UI Detail > OAuth 패널에 두 가지 액션 버튼이 있습니다:
 
-- **Re-register (DCR)** — 새 clientId 발급. 토큰 무효화 + 강제 재인증.
-- **Set static client** — DCR 미지원 서버용. provider 별 가이드 (Notion / GitHub) 가 modal 로 함께 노출 (Phase 11-9).
-- **Rotate** — 기존 client 유지하되 새 발급 받기 (provider 가 client_secret 노출 변경한 경우 등).
+- **Re-register (DCR)** — DCR 을 다시 호출해 새 clientId 발급. 모든 identity 의 토큰 무효화 + 강제 재인증.
+- **Use Manual Client** — 운영자가 provider 콘솔에서 미리 발급한 static `clientId` / `clientSecret` / `authMethod` 를 입력해 등록하는 3-field 모달. (별도 "Rotate" 버튼은 없습니다 — fresh DCR 을 원하면 Re-register 를 사용.)
 
-REST 직접 호출도 가능 — `POST /api/workspaces/:id/oauth/register` (DCR) / `PUT /api/workspaces/:id/oauth/client` (manual).
+provider 별 step-by-step 가이드 (Notion / GitHub) 는 **DCR 미지원 서버에 대한 fallback 모달** 에서 자동 노출됩니다 (Wizard 의 OAuth authorize 단계에서 `DCR_UNSUPPORTED` 가 떴을 때, Phase 11-9). Detail 의 `Use Manual Client` 모달은 일반 3-field 입력입니다.
+
+REST 직접 호출도 가능:
+- `POST /api/workspaces/:id/oauth/register` — DCR 강제 재발급.
+- `PUT /api/workspaces/:id/oauth/client` — manual / static client 설정.
 
 ---
 
@@ -832,12 +840,13 @@ curl -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
      http://localhost:3100/api/oauth/audit
 ```
 
-`oauth.client_registered` / `oauth.threshold_trip` / `oauth.dcr_fallback` / `oauth.cache_purge` / `oauth.dcr_rate_limited` / `oauth.authorize_start|complete` / `oauth.refresh_success|fail` / `oauth.pending_purged` 등이 시간순으로 기록됩니다 (마지막 50건 ring buffer). `clientId` 는 `${first4}***${last4}` 마스킹, `tokenPrefix` 만 메타로 남고 실제 토큰 값은 절대 노출 안 됨.
+`oauth.client_registered` / `oauth.threshold_trip` / `oauth.cache_purge` / `oauth.dcr_rate_limited` / `oauth.authorize_start|complete` / `oauth.refresh_success|fail` / `oauth.pending_purged` 가 시간순으로 기록됩니다 (마지막 50건 ring buffer). `clientId` 는 `${first4}***${last4}` 마스킹, `tokenPrefix` 만 메타로 남고 실제 토큰 값은 절대 노출 안 됨.
 
 ### 13.4 파일 권한 경고
 
 ```bash
-curl http://localhost:3100/api/oauth/security
+curl -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
+     http://localhost:3100/api/oauth/security
 ```
 
 ```json
