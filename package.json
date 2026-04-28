@@ -19,8 +19,23 @@
     "multi-workspace",
     "bridge"
   ],
+  "author": "Karnian",
   "license": "MIT",
+  "homepage": "https://github.com/Karnian/mcp-bifrost#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Karnian/mcp-bifrost.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Karnian/mcp-bifrost/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "overrides": {
+    "hono": "^4.12.14"
   }
 }

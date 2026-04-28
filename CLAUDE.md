@@ -22,17 +22,30 @@ server/
   mcp-handler.js        — MCP 프로토콜 핸들러
   workspace-manager.js  — 워크스페이스 등록/상태/토큰 관리
   tool-registry.js      — 네임스페이스 기반 도구 레지스트리
+  sse-manager.js        — SSE 세션 + tools/list_changed broadcast
+  oauth-manager.js      — OAuth 2.0 (PKCE / DCR / refresh / mutex chain)
+  oauth-metrics.js      — OAuth 카운터 recorder (Phase 11-4 §6-OBS.2)
+  oauth-sanitize.js     — 로그/audit 토큰 마스킹
+  mcp-token-manager.js  — MCP 클라이언트 토큰 + ACL (Phase 7)
+  usage-recorder.js     — tool-call 사용량 집계 (Phase 8)
+  audit-logger.js       — 설정/OAuth audit log
+  workspace-schema.js   — Zod 기반 workspace payload 검증
+  rate-limiter.js · security-headers.js · http-utils.js · html-escape.js · logger.js · config-constants.js
 providers/
-  base.js               — Provider 인터페이스 (abstract)
-  notion.js             — Notion API 중계
-  slack.js              — Slack API 중계
+  base.js               — Provider 추상 인터페이스
+  mcp-client.js         — 범용 MCP 클라이언트 (stdio/http/sse) ★ 1등 시민
+  notion.js             — Notion REST 어댑터 (legacy)
+  slack.js              — Slack REST 어댑터 (legacy)
 admin/
-  index.js              — 관리 UI 서버
-  api.js                — 관리 REST API
-  public/               — 관리 UI 프론트엔드
+  auth.js               — Admin/MCP 토큰 검증, command whitelist
+  routes.js             — REST API + 정적 파일 서빙 (`/api/*`, `/admin/*`)
+  public/               — Vanilla SPA (Login, Wizard, Dashboard, Detail, Tools, Connect)
 config/
   workspaces.json       — 워크스페이스 설정 (gitignored, 토큰 포함)
   workspaces.example.json — 예시 설정
+scripts/
+  tunnel.js             — Cloudflare Tunnel 통합 + .mcp.json 자동 생성
+  migrate-oauth-clients.mjs — Phase 10a 1회성 마이그레이션 (--dry-run/--apply/--restore)
 ```
 
 ## Key Concepts

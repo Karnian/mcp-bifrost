@@ -25,7 +25,7 @@ npm start
 # → http://localhost:3100/admin/  (Setup Wizard 자동 진입)
 ```
 
-상세 사용법은 **[docs/USAGE.md](docs/USAGE.md)** 참고.
+5분 가이드: **[docs/QUICKSTART.md](docs/QUICKSTART.md)** · 상세 사용법: **[docs/USAGE.md](docs/USAGE.md)**.
 
 ## Architecture
 
@@ -53,7 +53,7 @@ scripts/
 
 tests/
   fixtures/mock-mcp-server.js — 테스트용 stdio MCP 서버
-  *.test.js                   — 60개 테스트 (node --test)
+  *.test.js                   — 41개 파일 / 426개 테스트 (node --test)
 ```
 
 ## 주요 개념
