@@ -17,6 +17,9 @@
 8. [보안 권장 설정](#8-보안-권장-설정)
 9. [테스트 시나리오](#9-테스트-시나리오)
 10. [트러블슈팅](#10-트러블슈팅)
+11. [OAuth 2.0 원격 MCP 서버 (Phase 6)](#11-oauth-20-원격-mcp-서버-phase-6)
+12. [OAuth Client Isolation 운영 (Phase 10a)](#12-oauth-client-isolation-운영-phase-10a)
+13. [OAuth 관측성 (Phase 11)](#13-oauth-관측성-phase-11)
 
 ---
 
@@ -697,6 +700,157 @@ BIFROST_TEST_NOTION_REFRESH_TOKEN=RT.xxx \
 ```
 
 환경변수가 없으면 integration 테스트는 자동 skip 됩니다.
+
+---
+
+## 12. OAuth Client Isolation 운영 (Phase 10a)
+
+같은 OAuth issuer (예: Notion 공식 MCP) 에 여러 workspace 를 연결할 때 이전엔 **shared clientId** 가 발급돼 refresh-token rotation 이 서로를 supersede 하면서 한쪽 workspace 가 401 무한 루프에 빠지는 버그가 있었습니다. Phase 10a 가 이를 닫고, Phase 11 이 후속 hardening 까지 마쳤습니다 (자세한 내용: [`PHASE10a_SELFREVIEW_LOG.md`](PHASE10a_SELFREVIEW_LOG.md), [`PHASE11_SELFREVIEW_LOG.md`](PHASE11_SELFREVIEW_LOG.md)).
+
+운영자 입장에서 알아야 할 것은 다음 4가지뿐입니다.
+
+### 12.1 신규 등록은 자동으로 격리됨
+
+Wizard 또는 `/api/workspaces` POST 로 새 workspace 를 등록하면 **workspace 별로 별도 DCR 호출** 이 자동 발생합니다. 추가 설정 불필요. 같은 issuer 에 여러 workspace 를 만들어도 각자 다른 `clientId` 를 받습니다.
+
+### 12.2 기존 인스턴스 마이그레이션
+
+Phase 10a 이전에 등록된 workspace 는 디스크에 shared clientId 가 남아있을 수 있습니다. **1회성 마이그레이션 스크립트** 로 정리합니다:
+
+```bash
+# (1) 검토 — 어떤 workspace 가 영향받는지 확인 (쓰기 없음)
+node scripts/migrate-oauth-clients.mjs --dry-run
+
+# 출력 예
+# {
+#   "action": "dry-run",
+#   "report": {
+#     "workspacesScanned": 3,
+#     "sharedClients": [
+#       { "clientId": "GN6tDPJbB40wd_ei", "issuer": "https://mcp.notion.com",
+#         "workspaces": ["http-notion-aiproduct1", "http-notion-aiopstf"] }
+#     ],
+#     "flatToNested": [],
+#     "alreadyMigrated": [],
+#     "nonOAuth": [{ "id": "fs-local" }]
+#   }
+# }
+```
+
+- `sharedClients[].workspaces` 의 모든 workspace 는 마이그레이션 후 **재인증 필요** (refresh token 무효화 + `oauthActionNeeded=true` 플래그). 실행 전 운영자/팀에게 사전 공지하세요.
+- `flatToNested` / `alreadyMigrated` 는 데이터 shape 만 정리되며 재인증 없음.
+
+```bash
+# (2) 적용 — config/workspaces.json 갱신 + .pre-10a.bak 자동 생성 (0o600)
+node scripts/migrate-oauth-clients.mjs --apply
+
+# (3) (선택) 롤백 — backup 파일에서 byte-for-byte 복원
+node scripts/migrate-oauth-clients.mjs --restore
+```
+
+`--config=PATH` 로 다른 위치의 config 도 지정 가능 (테스트/멀티 인스턴스용). backup 파일은 같은 디렉토리에 생성됩니다.
+
+마이그레이션 후 영향받은 workspace 는 Admin UI Detail > OAuth 패널 > **Re-authorize** 로 한 번씩 다시 인증하면 끝.
+
+### 12.3 401 fail-fast (action_needed)
+
+이전엔 refresh 가 401 을 받으면 무한 재시도했지만, Phase 10a 는 **3회 연속 401** 이면 즉시 `action_needed` 로 전환하고 더 이상 토큰 엔드포인트를 호출하지 않습니다 (`BIFROST_AUTH_FAIL_THRESHOLD` 로 임계 조정 가능, 기본 3). Admin UI 가 배너로 알리니 운영자가 **Re-authorize** 만 누르면 복구.
+
+> 이건 user 관점에서는 좋은 소식입니다 — 401 루프로 OAuth 서버에 압박을 가하지 않고, "재인증 필요" 가 빨리 surface 됩니다.
+
+### 12.4 Workspace 별 OAuth client 직접 관리
+
+Admin UI Detail > OAuth 패널에 **OAuth Client** 영역이 있어 운영자가 workspace 의 client 를 직접 관리할 수 있습니다:
+
+- **Re-register (DCR)** — 새 clientId 발급. 토큰 무효화 + 강제 재인증.
+- **Set static client** — DCR 미지원 서버용. provider 별 가이드 (Notion / GitHub) 가 modal 로 함께 노출 (Phase 11-9).
+- **Rotate** — 기존 client 유지하되 새 발급 받기 (provider 가 client_secret 노출 변경한 경우 등).
+
+REST 직접 호출도 가능 — `POST /api/workspaces/:id/oauth/register` (DCR) / `PUT /api/workspaces/:id/oauth/client` (manual).
+
+---
+
+## 13. OAuth 관측성 (Phase 11)
+
+Phase 11-4 부터 OAuth 라이프사이클 카운터를 in-memory 로 집계합니다. 운영 중 이상 징후 (401 spike, DCR rate-limit, refresh 실패율 등) 를 빠르게 식별하기 위함.
+
+### 13.1 카운터 snapshot
+
+```bash
+curl -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
+     http://localhost:3100/api/oauth/metrics
+```
+
+```json
+{
+  "ok": true,
+  "data": [
+    { "name": "oauth_dcr_total",          "labels": { "workspace": "http-notion-A", "issuer": "https://mcp.notion.com", "status": "200" }, "value": 1 },
+    { "name": "oauth_refresh_total",      "labels": { "workspace": "http-notion-A", "identity": "default", "status": "ok" }, "value": 42 },
+    { "name": "oauth_refresh_total",      "labels": { "workspace": "http-notion-A", "identity": "default", "status": "fail_4xx" }, "value": 1 },
+    { "name": "oauth_threshold_trip_total","labels": { "workspace": "http-notion-A", "identity": "default" }, "value": 1 },
+    { "name": "oauth_cache_hit_total",    "labels": { "workspace": "http-notion-A" }, "value": 8 },
+    { "name": "oauth_cache_miss_total",   "labels": { "workspace": "http-notion-A" }, "value": 2 }
+  ]
+}
+```
+
+| Counter | Labels | 의미 |
+|---|---|---|
+| `oauth_dcr_total` | `{workspace, issuer, status: 200\|4xx\|5xx\|429}` | DCR 호출 결과 (per attempt; 5xx 재시도 4회 모두 카운트) |
+| `oauth_refresh_total` | `{workspace, identity, status: ok\|fail_4xx\|fail_net}` | refresh 시도 결과. timeout/abort 이후 background 가 늦게 성공해도 `ok` 가 다시 카운트되지 않음 (Phase 11-4 R1 fix) |
+| `oauth_threshold_trip_total` | `{workspace, identity}` | 401 fail-fast 발동 횟수 |
+| `oauth_cache_hit_total` / `oauth_cache_miss_total` | `{workspace}` | DCR client cache 적중률 (TTL 만료는 miss 로 분류) |
+
+### 13.2 Saturation / cardinality
+
+```bash
+curl -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
+     http://localhost:3100/api/oauth/metrics/status
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "entries": 12,
+    "maxEntries": 10000,
+    "capped": true,
+    "evictionsTotal": 0,
+    "saturation": 0.0012
+  }
+}
+```
+
+- `entries` 가 `maxEntries` 에 가까워지거나 `evictionsTotal > 0` 이면 라벨 cardinality 가 폭증한 신호 (workspace/identity churn). soft cap 에 닿으면 가장 오래된 entry 부터 evict 됩니다.
+- 기본 cap 은 10_000. 변경하려면 `new OAuthMetrics({ maxEntries })` (코드 영역).
+
+### 13.3 OAuth audit 이벤트
+
+```bash
+curl -H "Authorization: Bearer $BIFROST_ADMIN_TOKEN" \
+     http://localhost:3100/api/oauth/audit
+```
+
+`oauth.client_registered` / `oauth.threshold_trip` / `oauth.dcr_fallback` / `oauth.cache_purge` / `oauth.dcr_rate_limited` / `oauth.authorize_start|complete` / `oauth.refresh_success|fail` / `oauth.pending_purged` 등이 시간순으로 기록됩니다 (마지막 50건 ring buffer). `clientId` 는 `${first4}***${last4}` 마스킹, `tokenPrefix` 만 메타로 남고 실제 토큰 값은 절대 노출 안 됨.
+
+### 13.4 파일 권한 경고
+
+```bash
+curl http://localhost:3100/api/oauth/security
+```
+
+```json
+{ "ok": true, "data": { "fileSecurityWarning": false, "platform": "darwin" } }
+```
+
+POSIX 에서 `chmod 0600` 적용에 실패했거나 Windows 처럼 OS 가 권한 보호를 보장하지 않으면 `fileSecurityWarning: true` 가 나오고 Admin UI 상단에 배너가 자동 노출됩니다.
+
+### 13.5 Recorder 가용성
+
+- 카운터는 process 메모리 only. 영구 저장 / Prometheus 형식 export 는 deferred.
+- Recorder 가 throw 해도 OAuth 본 흐름은 영향받지 않음 (`_metric` 내부에서 swallow). Admin endpoint 도 `wm.logError('oauth.metrics', ...)` 로 surface 한 후 빈 응답으로 degrade.
+- Workspace hard delete / TTL 만료 시 `OAuthMetrics.pruneWorkspace(wsId)` 가 자동 호출되어 stale 카운터 entry 가 정리됩니다 (Phase 11-6).
 
 ---
 

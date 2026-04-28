@@ -48,6 +48,7 @@ Claude Code 재시작 → `/mcp` 로 도구 목록 확인:
 상세 설명은 [USAGE.md](./USAGE.md) 참고.
 
 문제가 있으면:
-- `npm test` 로 60개 테스트 통과 확인
+- `npm test` 로 426개 테스트 통과 확인 (428 total / 2 skipped)
 - Admin UI **Tools** 탭에서 도구가 실제로 노출되는지 확인
 - Detail 화면의 **Test Connection** 으로 워크스페이스별 진단
+- OAuth 워크스페이스 운영 관련 (마이그레이션 / 관측성) 은 [USAGE.md §12-13](./USAGE.md#12-oauth-client-isolation-운영-phase-10a)
