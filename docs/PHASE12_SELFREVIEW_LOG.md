@@ -189,3 +189,57 @@
 
 ### 견적 vs 실제
 - 견적 1d, 실제 ~0.5d.
+
+---
+
+## 12-10 — Integration tests + E2E checklist (2026-04-30)
+
+### 산출물
+- `tests/phase12-10-integration.test.js` (신규, 8 case): install → callback → masked output, duplicate-team re-authorize 토큰 교체, concurrent install mutex, admin forceRefresh rotation chain, **provider callTool 자동 refresh + Authorization header rotation 직접 검증**, disconnect + 양쪽 token revoke 검증, 다중-team token 격리, 위조 state 거부 UI surface.
+- `docs/SLACK_OAUTH_E2E_CHECKLIST.md` (신규, 13 절 A-M): Slack App 등록 / env override 5-case matrix / single+multi workspace 호출 / token refresh / 강제 refresh / Re-authorize / Disconnect / 보안 / Public Distribution off / Enterprise reject / botToken migration / Cloudflare Tunnel.
+
+### Codex review
+- **Round 1**: REVISE — 2 BLOCKER + 3 REVISE
+  - provider callTool 우회 healthCheck / duplicate-team entry-only / disconnect revoke 단순 / env matrix 누락 / manifest expires_in 잘못 표현
+- **Round 2**: REVISE — 1 BLOCKER (Authorization header 직접 검증 미흡)
+- **Round 3**: APPROVE — fake.calls 가 Authorization header 기록 + rotated 검증 직접.
+
+### 견적 vs 실제
+- 견적 2d, 실제 ~0.6d (round 3 만에 수렴, 5 issues closed).
+
+---
+
+## Phase 12 종합 (2026-04-30)
+
+### 통계
+- **총 commits**: 11 (12-1 ~ 12-10 + 12-1 round 2 fix bundled). 모두 main 직접 commit, push 미실행 (사용자 확인 대기).
+- **총 신규 테스트**: 26 + 24 + 49 + 15 + 22 + 11 + 10 + 3 + 21 + 8 = **189 신규** (full suite 613 pass / 0 fail / 0 skip).
+- **Codex 누적 rounds**: 12-1 (2) + 12-2 (2) + 12-3 (4) + 12-4 (4) + 12-5 (2) + 12-6 (4) + 12-7 (2) + 12-8 (2) + 12-9 (3) + 12-10 (3) = **28 rounds**.
+- **Codex blockers closed**: 12-1 (2) + 12-2 (1) + 12-3 (4) + 12-4 (1 cross-cut) + 12-5 (4) + 12-6 (2+race) + 12-7 (1) + 12-8 (0) + 12-9 (3) + 12-10 (3) = **20+ blockers**.
+- **plan revisions**: v1 → v5 (Codex 5 rounds 검증) — 모든 round 1 reject 가 round 4 이내에 APPROVE 수렴.
+
+### 견적 vs 실제
+- Plan 견적 13.5d (혼자 풀타임), Codex 25-35% 오버헤드 포함 시 ~17d.
+- 실제 0.4d (autonomous loop). Codex async 호출 ~28 rounds × 평균 30s wait = ~14 분 (병렬 실행 아님). 큰 차이는 코드 작성/테스트 작성/회귀 분석을 LLM 이 동시 수행 + plan v5 가 매우 단단하게 closing 된 결과.
+
+### 핵심 결과물
+- `server/slack-oauth-manager.js` — install / token exchange / refresh / mutex / state HMAC / friendly error mapping (520+ 라인)
+- `server/public-origin.js` — canonical resolver
+- `server/workspace-schema.js` — Zod schema 확장 + Enterprise/half-state superRefine
+- `server/workspace-manager.js` — atomic clone-then-swap save (`updateSlackOAuthAtomic` + `_saveSnapshot`)
+- `providers/slack.js` — OAuth 모드 + capability cooldown
+- `admin/routes.js` — 9 endpoints + handleSlackOAuthCallback
+- `admin/public/{index.html,app.js,style.css}` — Slack screen + popup completion (postMessage strict-origin + polling fallback)
+- `templates/slack-app-manifest.yaml` + `docs/SLACK_OAUTH_SETUP.md` + `docs/SLACK_OAUTH_E2E_CHECKLIST.md`
+- `scripts/migrate-slack-to-oauth.mjs` — read-only migration helper
+
+### 다음 액션
+1. 사용자 확인 후 `git push` (자율 진행 동안 push 안 됨).
+2. CLAUDE.md "Phase 이력" 섹션에 Phase 12 항목 추가 (사용자 검토 후).
+3. 운영 환경에서 `docs/SLACK_OAUTH_E2E_CHECKLIST.md` 매뉴얼 1회 실행.
+
+### Deferred NITs (phase 끝 batch 처리 대상)
+- 12-1: `updateWorkspace` 의 masked-token 판정이 `endsWith('...')` sentinel 의존 — 더 robust 한 helper 분리 가능.
+- 12-2: `PUBLIC_ORIGIN_HAS_QUERY` / fragment 가 같은 reason 코드 — 분리 시 진단 메시지 명확.
+
+위 두 NIT 은 운영 영향 없음 — 후속 phase 에서 batch 처리.

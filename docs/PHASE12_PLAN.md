@@ -835,9 +835,9 @@ settings:
 - [x] 12-7 Refresh durable save + error mapping (2026-04-30, Codex round 2 APPROVE)
 - [x] 12-8 manifest 템플릿 + 운영 가이드 (2026-04-30, Codex round 2 APPROVE)
 - [x] 12-9 botToken → OAuth migration helper + Enterprise Grid reject (2026-04-30, Codex round 3 APPROVE)
-- [ ] 12-10 통합 테스트 + E2E checklist + self-review log
-- [ ] Codex review (목표: 3~5 rounds)
-- [ ] Phase 12 완료 보고 + CLAUDE.md "Phase 이력" 항목 추가
+- [x] 12-10 통합 테스트 + E2E checklist + self-review log (2026-04-30, Codex round 3 APPROVE)
+- [x] Codex review (목표: 3~5 rounds, 실제: 27 누적 rounds across 10 sub-phases)
+- [x] Phase 12 완료 보고 (2026-04-30) + CLAUDE.md "Phase 이력" 항목 추가 대기 (사용자 push 확인 후)
 
 ---
 
