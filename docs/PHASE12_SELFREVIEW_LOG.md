@@ -67,3 +67,25 @@
 
 ### 견적 vs 실제
 - 견적 3d, 실제 ~1.5d (round 4 만에 수렴, 7 issues closed).
+
+---
+
+## 12-4 — `providers/slack.js` OAuth 모드 + `_headers()` async + cooldown (2026-04-30)
+
+### 산출물
+- `providers/slack.js` — `authMode` 분기, `_headers()` async (oauth → `_tokenProvider` await, token → botToken), `_fetch()` 도 await. `capabilityCheck()` 60s cooldown (success / failure 양쪽 캐시).
+- `server/workspace-manager.js` — `_createProvider` 가 OAuth Slack workspace 의 `slackOAuth` / `credentials` 분리 + `_tokenProvider` closure 주입. `setSlackOAuthManager` 신규.
+- `server/oauth-manager.js` — `_getServerSecret` cold-boot race coalescing (in-flight promise guard).
+- `server/index.js` — production `SlackOAuthManager` wiring (`metrics` 공유 + `serverSecretProvider` 로 OAuthManager secret 재사용). `configDir` param 추가 (testability).
+- `tests/phase12-4-slack-provider.test.js` (신규, 15 건).
+
+### Codex review
+- **Round 1**: REVISE — 1 REVISE + 2 NIT
+  - [REVISE] OAuth provider config 가 raw token 보유 (`BaseProvider.this.config`)
+  - [NIT] cooldown 실패 path / callTool 3개 도구 OAuth 검증 missing
+- **Round 2**: REVISE — 1 finding (production startup 에서 SlackOAuthManager attach 안 됨)
+- **Round 3**: REVISE — 1 finding (`_getServerSecret` cold-boot race)
+- **Round 4**: APPROVE — secret race coalescing + 모든 invariant 통과.
+
+### 견적 vs 실제
+- 견적 0.5d, 실제 ~0.5d (round 4 만에 수렴, 1 REVISE + 2 NIT + 2 cross-cutting issues closed).

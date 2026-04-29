@@ -1,30 +1,67 @@
 import { BaseProvider } from './base.js';
 
 const SLACK_API = 'https://slack.com/api';
+// Phase 12-4 §4.2 — auth.test rate-limit cooldown. Multiple OAuth-mode
+// workspaces sharing one Slack App quickly hit Slack's per-team rate
+// budget if every healthCheck/refresh re-pings auth.test. 60 s matches
+// Slack's typical Tier 3 rate-limit window.
+const CAPABILITY_COOLDOWN_MS = 60_000;
 
 export class SlackProvider extends BaseProvider {
   constructor(workspaceConfig) {
     super(workspaceConfig);
+    this.authMode = workspaceConfig.authMode || 'token';
     this.botToken = workspaceConfig.credentials?.botToken;
     this.teamId = workspaceConfig.credentials?.teamId;
+    // Phase 12-4 §4.2 — _tokenProvider is injected by WorkspaceManager when
+    // authMode === 'oauth'. Closure over SlackOAuthManager.ensureValidAccessToken
+    // so token rotation is transparent to callTool().
+    this._tokenProvider = workspaceConfig._tokenProvider || null;
+    // Capability cooldown gate — last check timestamp.
+    this._lastCapabilityCheck = 0;
+    this._cachedCapability = null;
   }
 
-  _headers() {
+  // Phase 12-4 §4.2 — _headers() is async because OAuth mode pulls a
+  // freshly-validated access token via _tokenProvider on every request.
+  // Token-mode keeps backwards compatibility (no provider, returns
+  // botToken). Every fetch helper below awaits _headers() so a stale
+  // access_token can't slip past the refresh path.
+  async _headers() {
+    let token;
+    if (this.authMode === 'oauth') {
+      if (!this._tokenProvider) {
+        throw new Error(`SlackProvider OAuth mode requires _tokenProvider injection (workspace=${this.id})`);
+      }
+      token = await this._tokenProvider();
+      if (!token) {
+        const err = new Error(`SlackProvider _tokenProvider returned no token (workspace=${this.id}) — re-authorize required`);
+        err.code = 'SLACK_NO_TOKEN';
+        throw err;
+      }
+    } else {
+      token = this.botToken;
+      if (!token) {
+        const err = new Error(`SlackProvider token mode requires credentials.botToken (workspace=${this.id})`);
+        err.code = 'SLACK_NO_TOKEN';
+        throw err;
+      }
+    }
     return {
-      'Authorization': `Bearer ${this.botToken}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json; charset=utf-8',
     };
   }
 
   async _fetch(method, params = {}) {
     const url = `${SLACK_API}/${method}`;
+    const headers = await this._headers();
     const res = await fetch(url, {
       method: 'POST',
-      headers: this._headers(),
+      headers,
       body: JSON.stringify(params),
     });
     const body = await res.json();
-    // Capture scopes from response headers (x-oauth-scopes)
     const scopeHeader = res.headers.get('x-oauth-scopes');
     if (scopeHeader) {
       body._scopes = scopeHeader.split(',').map(s => s.trim());
@@ -175,6 +212,13 @@ export class SlackProvider extends BaseProvider {
   }
 
   async capabilityCheck() {
+    // Phase 12-4 §4.2 — cooldown gate so multi-workspace deployments
+    // don't pummel Slack's auth.test rate budget. Returns the cached
+    // capability snapshot when a check ran within COOLDOWN_MS.
+    const now = Date.now();
+    if (this._cachedCapability && (now - this._lastCapabilityCheck) < CAPABILITY_COOLDOWN_MS) {
+      return this._cachedCapability;
+    }
     const result = { scopes: [], resources: { count: 0, samples: [] }, tools: [] };
 
     let grantedScopes = [];
@@ -184,16 +228,19 @@ export class SlackProvider extends BaseProvider {
         this.teamId = auth.team_id;
       }
       result.scopes.push(`team: ${auth.team || auth.team_id}`);
-      // Parse scopes from x-oauth-scopes header (captured in _fetch)
       if (auth._scopes) {
         grantedScopes = auth._scopes;
         result.scopes.push(...grantedScopes.map(s => `scope: ${s}`));
       }
-    } catch {
+    } catch (err) {
+      // On auth.test failure cache the empty result briefly so we don't
+      // refire on every status poll. The cooldown applies whether the
+      // check succeeded or failed.
+      this._cachedCapability = result;
+      this._lastCapabilityCheck = now;
       return result;
     }
 
-    // Check channels access
     let hasChannelsRead = false;
     try {
       const channels = await this._fetch('conversations.list', { limit: 3 });
@@ -210,7 +257,6 @@ export class SlackProvider extends BaseProvider {
       }
     }
 
-    // Check search access
     let hasSearchAccess = false;
     try {
       await this._fetch('search.messages', { query: 'test', count: 1 });
@@ -238,6 +284,8 @@ export class SlackProvider extends BaseProvider {
       }
     }
 
+    this._cachedCapability = result;
+    this._lastCapabilityCheck = now;
     return result;
   }
 }

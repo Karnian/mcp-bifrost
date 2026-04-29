@@ -7,6 +7,7 @@ import { SseManager } from './sse-manager.js';
 import { createAdminRoutes } from '../admin/routes.js';
 import { OAuthManager } from './oauth-manager.js';
 import { OAuthMetrics } from './oauth-metrics.js';
+import { SlackOAuthManager } from './slack-oauth-manager.js';
 import { McpTokenManager } from './mcp-token-manager.js';
 import { UsageRecorder } from './usage-recorder.js';
 import { AuditLogger } from './audit-logger.js';
@@ -70,8 +71,11 @@ function oauthCspHeaders(nonce) {
  * auto-start — callers (CLI entry or tests) must invoke startServer() and are
  * responsible for tearing the returned server down via `server.close()`.
  */
-async function startServer({ port: portOverride, host: hostOverride } = {}) {
-  const wm = new WorkspaceManager();
+async function startServer({ port: portOverride, host: hostOverride, configDir } = {}) {
+  // Phase 12-4 §4.2 — configDir override so tests can boot a complete
+  // server (including SlackOAuthManager wiring) against a tmpdir without
+  // touching the real config/workspaces.json.
+  const wm = configDir ? new WorkspaceManager({ configDir }) : new WorkspaceManager();
   const tr = new ToolRegistry(wm);
   const usage = new UsageRecorder();
   const audit = new AuditLogger();
@@ -79,8 +83,19 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
   const sse = new SseManager();
   const oauthMetrics = new OAuthMetrics();
   const oauth = new OAuthManager(wm, { metrics: oauthMetrics });
+  // Phase 12-4 §4.2 — SlackOAuthManager production wiring. Reuses the
+  // same OAuthMetrics recorder so slack_install_total / slack_refresh_total
+  // counters emerge alongside the mcp-client OAuth counters. Server
+  // secret reuse is best-effort: if OAuthManager has not yet generated
+  // its secret, SlackOAuthManager falls back to a process-private one,
+  // which is fine because state HMAC verification is also process-local.
+  const slackOAuth = new SlackOAuthManager(wm, {
+    metrics: oauthMetrics,
+    serverSecretProvider: () => oauth._getServerSecret(),
+  });
   const tokenManager = new McpTokenManager(wm);
   wm.setOAuthManager(oauth);
+  wm.setSlackOAuthManager(slackOAuth);
   wm.setAuditLogger?.(audit);
 
   wm.onWorkspaceChange(() => {
@@ -393,7 +408,7 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
     try { await audit.flush?.(); } catch { /* best effort */ }
   }
 
-  return { wm, tr, mcp, sse, oauth, tokenManager, usage, audit, server, healthInterval, port: boundPort, host, stop };
+  return { wm, tr, mcp, sse, oauth, slackOAuth, tokenManager, usage, audit, server, healthInterval, port: boundPort, host, stop };
 }
 
 // Auto-start only when executed as the entry point (not when imported).

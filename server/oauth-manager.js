@@ -163,18 +163,35 @@ export class OAuthManager {
 
   async _getServerSecret() {
     if (this._serverSecret) return this._serverSecret;
-    const existing = existsSync(this._secretPath) ? await readFile(this._secretPath, 'utf-8').catch(() => null) : null;
-    if (existing && existing.length >= 32) {
-      this._serverSecret = existing.trim();
-      return this._serverSecret;
+    // Phase 12-4 (Codex 12-4 R3 REVISE): coalesce concurrent first-boot
+    // initialization. Without this guard two concurrent /authorize calls
+    // racing on the very first state HMAC could each generate a fresh
+    // random secret, write it to disk in turn, and assign different
+    // secrets to this._serverSecret — the slower writer's state would
+    // then validate but the faster writer's wouldn't. Sharing the same
+    // in-flight promise ensures both callers observe the same secret.
+    if (this._serverSecretInFlight) return this._serverSecretInFlight;
+    this._serverSecretInFlight = (async () => {
+      const existing = existsSync(this._secretPath) ? await readFile(this._secretPath, 'utf-8').catch(() => null) : null;
+      if (existing && existing.length >= 32) {
+        this._serverSecret = existing.trim();
+        return this._serverSecret;
+      }
+      const secret = b64url(randomBytes(32));
+      await ensureStateDir();
+      await writeFile(this._secretPath, secret, 'utf-8');
+      const { applied } = await chmod0600(this._secretPath, { platform: this.platform });
+      if (!applied) this._fileSecurityWarning = true;
+      this._serverSecret = secret;
+      return secret;
+    })();
+    try {
+      return await this._serverSecretInFlight;
+    } finally {
+      // Drop the in-flight promise once resolved so future cold caches
+      // (rotation, etc.) don't pin the resolved value here.
+      this._serverSecretInFlight = null;
     }
-    const secret = b64url(randomBytes(32));
-    await ensureStateDir();
-    await writeFile(this._secretPath, secret, 'utf-8');
-    const { applied } = await chmod0600(this._secretPath, { platform: this.platform });
-    if (!applied) this._fileSecurityWarning = true;
-    this._serverSecret = secret;
-    return secret;
   }
 
   // ────────────────────────────────────────────────────────────────────────

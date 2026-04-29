@@ -366,8 +366,42 @@ export class WorkspaceManager {
     // Native (default for backward compat)
     const ProviderClass = NATIVE_PROVIDERS[ws.provider];
     if (ProviderClass) {
-      this.providers.set(ws.id, new ProviderClass(ws));
+      // Phase 12-4 §4.2 — wire SlackOAuthManager into Slack OAuth-mode
+      // providers via _tokenProvider closure. The provider awaits this
+      // on every request so token rotation is transparent to callers.
+      // The closure binds late (this._slackOAuth) so a manager attached
+      // *after* providers are created (e.g. wm.setSlackOAuthManager)
+      // still feeds the provider correctly.
+      let workspaceForProvider = ws;
+      if (ws.provider === 'slack' && ws.authMode === 'oauth') {
+        // Codex 12-4 R1 REVISE: BaseProvider stores workspaceConfig as
+        // this.config, so slackOAuth.tokens would leak into the provider
+        // long-term. Strip slackOAuth (and credentials, just in case)
+        // from the config the provider sees — token fetches go through
+        // _tokenProvider on every call, not through provider.config.
+        const { slackOAuth: _stripped, credentials: _strippedCreds, ...safeConfig } = ws;
+        workspaceForProvider = {
+          ...safeConfig,
+          _tokenProvider: async () => {
+            if (!this._slackOAuth) {
+              throw new Error('SlackOAuthManager is not attached (wm.setSlackOAuthManager pending)');
+            }
+            return this._slackOAuth.ensureValidAccessToken(ws.id);
+          },
+        };
+      }
+      this.providers.set(ws.id, new ProviderClass(workspaceForProvider));
     }
+  }
+
+  /**
+   * Phase 12-4 §4.2 — attach the SlackOAuthManager so OAuth-mode Slack
+   * providers can resolve fresh access tokens. Call before _initProviders
+   * (or trigger a re-create afterwards). server/index.js wires this up
+   * during startup, mirroring setOAuthManager for the mcp-client path.
+   */
+  setSlackOAuthManager(slackOAuth) {
+    this._slackOAuth = slackOAuth;
   }
 
   async _save() {
