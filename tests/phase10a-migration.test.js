@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, stat, copyFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat, copyFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -115,11 +115,24 @@ test('§4.10a-6: --dry-run reports shared clients + flat-to-nested without writi
 
 test('§4.10a-6 (Codex R8): --apply purges pending auth states for disambiguated workspaces', async () => {
   await protectRealConfig(async () => {
-    // Also protect the pending state file
+    // Also protect the pending state file. CI checkouts don't carry the
+    // .ao/state/ directory (it's gitignored runtime state), so create it
+    // on demand and remember to remove it again so the test stays
+    // hermetic regardless of where it ran.
     const pendingPath = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
+    const stateDir = dirname(pendingPath);
     let savedPending = null;
+    let createdStateDir = false;
     const hadPending = await stat(pendingPath).then(() => true).catch(() => false);
-    if (hadPending) savedPending = await readFile(pendingPath, 'utf-8');
+    if (hadPending) {
+      savedPending = await readFile(pendingPath, 'utf-8');
+    } else {
+      const dirExisted = await stat(stateDir).then(() => true).catch(() => false);
+      if (!dirExisted) {
+        await mkdir(stateDir, { recursive: true });
+        createdStateDir = true;
+      }
+    }
     try {
       // Seed workspaces.json + pending state
       await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
@@ -136,9 +149,15 @@ test('§4.10a-6 (Codex R8): --apply purges pending auth states for disambiguated
       assert.equal(afterPending['state-stale-B'], undefined, 'pending for disambiguated workspace must be purged');
       assert.ok(afterPending['state-keep-A'], 'pending for retained workspace must be preserved');
     } finally {
-      // Restore pending state
-      if (savedPending !== null) await writeFile(pendingPath, savedPending, 'utf-8');
-      else await rm(pendingPath, { force: true });
+      // Restore pending state — and the directory if we created it.
+      if (savedPending !== null) {
+        await writeFile(pendingPath, savedPending, 'utf-8');
+      } else {
+        await rm(pendingPath, { force: true });
+        if (createdStateDir) {
+          await rm(stateDir, { recursive: true, force: true });
+        }
+      }
     }
   });
 });
