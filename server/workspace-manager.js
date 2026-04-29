@@ -698,31 +698,15 @@ export class WorkspaceManager {
         // For rename-style atomic writes the file may briefly disappear
         // between the unlink and the new file landing. Tolerate that by
         // giving the rename a short grace period before concluding the
-        // file really went away. On Linux + inotify the unlink/rename
-        // gap can occasionally outlast the original 50ms window — poll
-        // up to 500ms in 50ms ticks before giving up.
+        // file really went away.
         let fileExists = existsSync(this._configPath);
         if (!fileExists && event.eventType === 'rename') {
-          for (let i = 0; i < 10 && !fileExists; i++) {
-            await new Promise(r => setTimeout(r, 50));
-            fileExists = existsSync(this._configPath);
-          }
+          await new Promise(r => setTimeout(r, 50));
+          fileExists = existsSync(this._configPath);
         }
         if (!fileExists) {
-          // Make one best-effort rebind attempt after closing the
-          // stale watcher; longer absences remain treated as
-          // intentional removal. The rebind happens on the next tick
-          // and only succeeds if the file is back at that point —
-          // _startFileWatcher's own existsSync guard returns cleanly
-          // otherwise, so there is no polling loop for indefinite
-          // recreation (parent-dir watching is a separate follow-up).
-          if (event.eventType === 'rename') {
-            try { watcher.close(); } catch { /* already closed */ }
-            setImmediate(() => {
-              if (this._watcher === watcher) this._watcher = null;
-              this._startFileWatcher();
-            });
-          }
+          // File gone for good (operator removed it). Stop watching;
+          // nothing to reload from.
           break;
         }
         // Phase 11-8 §7 (Codex R1 blocker) — if the hot-reload triggers a
