@@ -149,6 +149,10 @@ test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays obse
     await writeFile(configPath, JSON.stringify(makeConfig([])), 'utf-8');
     const wm = new WorkspaceManager({ configDir: dir });
     await wm.load();
+    // Capture the original watcher so we can deterministically wait for
+    // the post-migration rebind below (sleep-based wait was flaky on
+    // Linux CI per Codex review of commit 09f8847).
+    const watcherBeforeLegacyRename = wm._watcher;
 
     // 1) External atomic write with a FLAT-FIELD legacy oauth entry.
     //    _migrateLegacy() promotes flat → nested + scrubs, returning
@@ -178,8 +182,18 @@ test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays obse
       return ws?.oauth?.client?.clientId === 'LEGACY_CID';
     });
     assert.ok(promoted, 'flat field must have been migrated into ws.oauth.client');
-    // Give _save's own atomic rename time to finalise.
-    await new Promise(r => setTimeout(r, 120));
+    // Wait deterministically for the watcher to rebind onto the post-
+    // migration inode rather than guessing a sleep duration. Codex
+    // pointed out that the in-memory `promoted` signal does not imply
+    // the rebind ran — `savePromise.finally(() => _startFileWatcher())`
+    // is the actual rebind point, and on Linux CI a fixed sleep race
+    // could land before that fires. Comparing `_watcher` reference
+    // before/after the migration captures it directly.
+    const rebound = await waitForCondition(
+      () => wm._watcher && wm._watcher !== watcherBeforeLegacyRename,
+      { timeoutMs: 5000 }
+    );
+    assert.ok(rebound, 'watcher must rebind after migration save');
 
     // 2) Second external atomic rename AFTER the migration save. If the
     //    rebind raced the save, this event is missed and the test fails
@@ -191,8 +205,11 @@ test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays obse
     ]), null, 2), 'utf-8');
     await rename(tmpPath2, configPath);
 
+    // 5s ceiling instead of the default 2s — Linux CI runners take
+    // longer to deliver the second rename event after a rebind.
     const observed = await waitForCondition(() =>
-      wm.getWorkspaces().length === 1 && wm.getWorkspaces()[0].id === 'native-fresh'
+      wm.getWorkspaces().length === 1 && wm.getWorkspaces()[0].id === 'native-fresh',
+      { timeoutMs: 5000 }
     );
     assert.ok(observed, 'second external rename after mutated hot-reload must still be hot-reloaded');
   } finally {

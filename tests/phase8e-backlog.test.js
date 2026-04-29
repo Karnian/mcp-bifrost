@@ -101,20 +101,31 @@ describe('meta tool usage recording', () => {
 describe('purgeExpiredWorkspaces uses Date comparison', () => {
   it('purges workspaces older than 30 days', async () => {
     const { WorkspaceManager } = await import('../server/workspace-manager.js');
-    const wm = new WorkspaceManager();
-    wm._loaded = true;
-    const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
-    wm.config = {
-      workspaces: [
-        { id: 'old-ws', displayName: 'Old', deletedAt: oldDate },
-        { id: 'recent-ws', displayName: 'Recent', deletedAt: new Date().toISOString() },
-      ],
-      server: {},
-    };
-    const count = await wm.purgeExpiredWorkspaces();
-    assert.equal(count, 1);
-    assert.equal(wm.config.workspaces.length, 1);
-    assert.equal(wm.config.workspaces[0].id, 'recent-ws');
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    // Isolate to a tmpdir so purgeExpiredWorkspaces' internal _save() does
+    // not write into the repo's real config/ on a CI checkout (which
+    // doesn't have a writable workspaces.json by default).
+    const dir = await mkdtemp(join(tmpdir(), 'phase8e-purge-'));
+    try {
+      const wm = new WorkspaceManager({ configDir: dir });
+      wm._loaded = true;
+      const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+      wm.config = {
+        workspaces: [
+          { id: 'old-ws', displayName: 'Old', deletedAt: oldDate },
+          { id: 'recent-ws', displayName: 'Recent', deletedAt: new Date().toISOString() },
+        ],
+        server: {},
+      };
+      const count = await wm.purgeExpiredWorkspaces();
+      assert.equal(count, 1);
+      assert.equal(wm.config.workspaces.length, 1);
+      assert.equal(wm.config.workspaces[0].id, 'recent-ws');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
