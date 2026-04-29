@@ -20,7 +20,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, rename, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkspaceManager } from '../server/workspace-manager.js';
@@ -149,10 +149,12 @@ test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays obse
     await writeFile(configPath, JSON.stringify(makeConfig([])), 'utf-8');
     const wm = new WorkspaceManager({ configDir: dir });
     await wm.load();
-    // Capture the original watcher so we can deterministically wait for
-    // the post-migration rebind below (sleep-based wait was flaky on
-    // Linux CI per Codex review of commit 09f8847).
-    const watcherBeforeLegacyRename = wm._watcher;
+    // Phase 11-9 (post-OSS-publish) — the watcher is now bound to the
+    // PARENT DIRECTORY, so it survives every atomic rename without a
+    // rebind. We capture the original watcher reference as a sanity
+    // check that the same watcher instance keeps working through the
+    // migration save AND the second external rename.
+    const originalWatcher = wm._watcher;
 
     // 1) External atomic write with a FLAT-FIELD legacy oauth entry.
     //    _migrateLegacy() promotes flat → nested + scrubs, returning
@@ -182,18 +184,27 @@ test('Codex R1 blocker: mutated hot-reload ＋ second external rename stays obse
       return ws?.oauth?.client?.clientId === 'LEGACY_CID';
     });
     assert.ok(promoted, 'flat field must have been migrated into ws.oauth.client');
-    // Wait deterministically for the watcher to rebind onto the post-
-    // migration inode rather than guessing a sleep duration. Codex
-    // pointed out that the in-memory `promoted` signal does not imply
-    // the rebind ran — `savePromise.finally(() => _startFileWatcher())`
-    // is the actual rebind point, and on Linux CI a fixed sleep race
-    // could land before that fires. Comparing `_watcher` reference
-    // before/after the migration captures it directly.
-    const rebound = await waitForCondition(
-      () => wm._watcher && wm._watcher !== watcherBeforeLegacyRename,
-      { timeoutMs: 5000 }
-    );
-    assert.ok(rebound, 'watcher must rebind after migration save');
+    // The parent-dir watcher must NOT be replaced (no rebind needed)
+    // — same instance survives the migration save's atomic rename.
+    assert.equal(wm._watcher, originalWatcher, 'parent-dir watcher must survive migration save without rebind');
+    // Wait until the migration `_save()` has actually flushed to disk
+    // (Codex R1 blocker — `_saving === false` polling is too weak;
+    // `_saving` starts false so the wait can return before the save is
+    // even enqueued). Read the file back and confirm the scrubbed,
+    // nested form is on disk before we trigger the second external
+    // rename, otherwise the save's atomic rename can race with that
+    // rename and overwrite it.
+    const flushed = await waitForCondition(async () => {
+      try {
+        const disk = JSON.parse(await readFile(configPath, 'utf-8'));
+        const oauth = disk.workspaces?.find(w => w.id === 'http-legacy')?.oauth;
+        return !!oauth?.client?.clientId
+          && !Object.hasOwn(oauth, 'clientId');
+      } catch {
+        return false;
+      }
+    }, { timeoutMs: 5000 });
+    assert.ok(flushed, 'migration save must flush scrubbed config to disk before second external rename');
 
     // 2) Second external atomic rename AFTER the migration save. If the
     //    rebind raced the save, this event is missed and the test fails

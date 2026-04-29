@@ -1,6 +1,6 @@
 import { readFile, writeFile, rename, copyFile, watch, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NotionProvider } from '../providers/notion.js';
 import { SlackProvider } from '../providers/slack.js';
@@ -111,6 +111,11 @@ export class WorkspaceManager {
     this._configPath = join(configDir, 'workspaces.json');
     this._backupPath = join(configDir, 'workspaces.backup.json');
     this._tmpPath = join(configDir, 'workspaces.tmp.json');
+    // Phase 11-9 (post-OSS-publish) — graceful watcher lifecycle. close()
+    // sets `_stopped` so any in-flight reload debounce or watcher loop
+    // exits without throwing into an uninstrumented unhandledRejection.
+    this._stopped = false;
+    this._reloadTimer = null;
   }
 
   async load() {
@@ -677,89 +682,116 @@ export class WorkspaceManager {
   }
 
   _startFileWatcher() {
-    if (!existsSync(this._configPath)) return;
+    // Phase 11-9 (post-OSS-publish) — watch the PARENT DIRECTORY rather
+    // than the config file itself. fs.watch on the file is bound to the
+    // file's inode on Linux/macOS; an atomic rename (tmp + rename, used
+    // by editors AND our own `_save()`) flips the inode and the file
+    // watcher is forever stale. fs.watch on the parent directory tracks
+    // the directory's own inode, which doesn't change when contents are
+    // rewritten — a single watcher survives any number of atomic
+    // replaces. We filter events by basename and debounce so the typical
+    // unlink+create burst yields one reload, not two.
+    //
+    // Codex consultation referenced:
+    //   - https://nodejs.org/api/fs.html#inodes  (fs.watch caveats)
+    //   - chokidar normalises this but adds a runtime dependency
+    //     unnecessary for a single-file watch.
+    if (this._stopped) return;
+    if (!existsSync(this._configDir)) return;
     let watcher;
     try {
-      watcher = watch(this._configPath, { persistent: false });
-    } catch { /* fs.watch not supported or file gone */
+      watcher = watch(this._configDir, { persistent: false });
+    } catch { /* fs.watch not supported on this platform */
       return;
     }
     this._watcher = watcher;
+    const target = basename(this._configPath);
+    const DEBOUNCE_MS = 50;
     (async () => {
       for await (const event of watcher) {
-        // Phase 11-8 §7 — accept `rename` alongside `change`. Editors that
-        // save atomically (VSCode, vim, sed -i, our own _save()) publish
-        // `rename` because the written file is a temp + renamed over the
-        // path, so the inode flips. With only `change` we missed these
-        // hot-reloads entirely.
+        if (this._stopped) break;
         if (event.eventType !== 'change' && event.eventType !== 'rename') continue;
-        // Skip reload if we triggered this write ourselves
+        // event.filename can be null on some Linux variants; fall through
+        // and reload conservatively in that case.
+        if (event.filename && event.filename !== target) continue;
+        // Skip self-save burst — both the tmp write and the rename
+        // surface here as parent-directory events.
         if (this._saving) continue;
-        // For rename-style atomic writes the file may briefly disappear
-        // between the unlink and the new file landing. Tolerate that by
-        // giving the rename a short grace period before concluding the
-        // file really went away.
-        let fileExists = existsSync(this._configPath);
-        if (!fileExists && event.eventType === 'rename') {
-          await new Promise(r => setTimeout(r, 50));
-          fileExists = existsSync(this._configPath);
-        }
-        if (!fileExists) {
-          // File gone for good (operator removed it). Stop watching;
-          // nothing to reload from.
-          break;
-        }
-        // Phase 11-8 §7 (Codex R1 blocker) — if the hot-reload triggers a
-        // migration `_save()`, the rebind below MUST wait for that save
-        // to finish. Otherwise the rebind can arm a new watcher on the
-        // old inode, and the subsequent `_save()`-driven atomic rename
-        // (flipping to a fresh inode) is silently skipped by the
-        // `_saving` guard — after which the new watcher is stale. The
-        // second external write would then be missed entirely.
-        let savePromise = Promise.resolve();
-        try {
-          const raw = await readFile(this._configPath, 'utf-8');
-          const newConfig = JSON.parse(raw);
-          this.config = newConfig;
-          if (!this.config.workspaces) this.config.workspaces = [];
-          // Phase 11 §3 — apply legacy→nested migration on hot-reload too.
-          // Without this, an externally-edited config carrying flat
-          // ws.oauth.{clientId,clientSecret,authMethod} would bypass the
-          // Phase 11 scrub and reach runtime unnormalized — causing
-          // mis-resolved client fields (reads are nested-only now) and
-          // leaking flat clientSecret through masked admin views (maskOAuth
-          // no longer masks flat fields).
-          const mutated = this._migrateLegacy();
-          await this._initProviders();
-          if (mutated) {
-            // Persist the scrubbed form so disk converges on single source.
-            // Codex Phase 11-3 R2: log failures so operators notice.
-            savePromise = this._save().catch((err) => {
-              logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
-            });
-          }
-          this._notifyChange();
-          logger.info('[WorkspaceManager] Config hot-reloaded');
-        } catch { /* ignore parse errors during write */ }
-        // Phase 11-8 §7 — after a rename the underlying watcher is now
-        // bound to the OLD inode and will stop delivering events for the
-        // replacement file. Close the old watcher and re-arm on the new
-        // inode. `change` events keep the existing watcher valid so we
-        // don't rebind on every write.
-        if (event.eventType === 'rename') {
-          try { watcher.close(); } catch { /* already closed */ }
-          // Phase 11-8 §7 Codex R1 blocker fix — wait for any in-flight
-          // migration `_save()` to finish before rearming, so the new
-          // watcher binds to the post-save inode rather than racing with
-          // the save's own rename.
-          savePromise.finally(() => {
-            if (this._watcher === watcher) this._watcher = null;
-            this._startFileWatcher();
-          });
-          break;
-        }
+        // Coalesce the unlink+create pair (or any rapid burst) into one
+        // reload. Reset the timer on every event so we always read the
+        // LATEST disk state.
+        if (this._reloadTimer) clearTimeout(this._reloadTimer);
+        this._reloadTimer = setTimeout(() => {
+          this._reloadTimer = null;
+          if (this._stopped) return;
+          this._reloadConfigFromDisk().catch(() => { /* logged inside */ });
+        }, DEBOUNCE_MS);
       }
-    })().catch(() => {}); // watcher closed
+    })().catch(() => { /* watcher closed during stop() */ });
+  }
+
+  async _reloadConfigFromDisk() {
+    if (this._stopped) return;
+    if (!existsSync(this._configPath)) return; // file removed; nothing to do
+    if (this._saving) return;
+    try {
+      const raw = await readFile(this._configPath, 'utf-8');
+      // Phase 11-9 (Codex R1 blocker) — re-check `_stopped` after every
+      // await yield so a concurrent `close()` can stop us cleanly
+      // without the rest of the reload (config mutation, _save,
+      // notifyChange) leaking through.
+      if (this._stopped) return;
+      const newConfig = JSON.parse(raw);
+      // Phase 11-9 — equality short-circuit. If disk state equals our
+      // in-memory state, this event is almost certainly our own
+      // self-save bouncing back through the parent-dir watcher (the
+      // `_saving` guard window is wider than the 50ms debounce, but
+      // race timing can occasionally let a stale event through after
+      // `_saving` has been cleared). Skip the reload so callers don't
+      // see a spurious onWorkspaceChange notification.
+      try {
+        if (JSON.stringify(newConfig) === JSON.stringify(this.config)) return;
+      } catch { /* fall through to full reload */ }
+      this.config = newConfig;
+      if (!this.config.workspaces) this.config.workspaces = [];
+      // Phase 11 §3 — apply legacy→nested migration on hot-reload too.
+      // Without this, an externally-edited config carrying flat
+      // ws.oauth.{clientId,clientSecret,authMethod} would bypass the
+      // Phase 11 scrub and reach runtime unnormalized — causing
+      // mis-resolved client fields (reads are nested-only now) and
+      // leaking flat clientSecret through masked admin views (maskOAuth
+      // no longer masks flat fields).
+      const mutated = this._migrateLegacy();
+      await this._initProviders();
+      if (this._stopped) return;
+      if (mutated) {
+        // Persist the scrubbed form so disk converges on single source.
+        // Codex Phase 11-3 R2: log failures so operators notice. The
+        // parent-dir watcher stays alive across this self-rename and
+        // the `_saving` guard ensures we don't reload our own write.
+        this._save().catch((err) => {
+          logger.warn(`[WorkspaceManager] Phase 11 §3: hot-reload migration could not persist scrubbed config: ${err?.message || err}`);
+        });
+      }
+      this._notifyChange();
+      logger.info('[WorkspaceManager] Config hot-reloaded');
+    } catch { /* ignore parse errors during write */ }
+  }
+
+  /**
+   * Phase 11-9 (post-OSS-publish) — graceful watcher lifecycle. Called by
+   * `server/index.js stop()` so the file watcher and any pending reload
+   * timer don't survive past process shutdown. One-off scripts and
+   * non-server tests don't need to call this.
+   */
+  async close() {
+    this._stopped = true;
+    if (this._reloadTimer) {
+      clearTimeout(this._reloadTimer);
+      this._reloadTimer = null;
+    }
+    try { this._watcher?.close(); } catch { /* already closed */ }
+    this._watcher = null;
   }
 
   onWorkspaceChange(callback) {

@@ -360,8 +360,9 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
     });
   } catch (err) {
     // listen() failed — clean up partially-built state so we don't leak
-    // the healthInterval timer or provider handles.
+    // the healthInterval timer, file watcher, or provider handles.
     clearInterval(healthInterval);
+    try { await wm.close?.(); } catch { /* best effort */ }
     for (const [, provider] of wm.providers ?? []) {
       try { await provider.shutdown?.(); } catch { /* best effort */ }
     }
@@ -370,10 +371,18 @@ async function startServer({ port: portOverride, host: hostOverride } = {}) {
 
   server.on('close', () => {
     clearInterval(healthInterval);
+    // Phase 11-9 (Codex R1 blocker) — direct server.close() callers
+    // (anyone using the returned `server` handle without going through
+    // `stop()`) still need the watcher + reload timer torn down.
+    Promise.resolve(wm.close?.()).catch(() => { /* best effort */ });
   });
 
   async function stop() {
     clearInterval(healthInterval);
+    // Phase 11-9 (post-OSS-publish) — close the file watcher BEFORE
+    // tearing down providers so any pending hot-reload debounce timer
+    // can't fire into a half-shut-down state. wm.close() is idempotent.
+    try { await wm.close?.(); } catch { /* best effort */ }
     if (server.listening) {
       await new Promise((resolve) => server.close(() => resolve()));
     }
