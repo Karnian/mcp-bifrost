@@ -453,24 +453,22 @@ settings:
 
 ---
 
-## 12. 합의해야 할 결정 사항 (실행 전)
+## 12. 확정 사항 (2026-04-29 합의 완료)
 
-1. **Slack App credential 위치** — `config/workspaces.json` top-level vs 별도 `config/slack-app.json` vs env-only
-   - 추천: `workspaces.json` top-level 의 `slackApp` 필드 + env override (단순, 기존 watcher 인프라 재사용)
-2. **OAuth 모드 default** — 신규 Slack workspace 생성 시 default 가 OAuth 인가 token 인가
-   - 추천: OAuth (Slack App 미등록이면 wizard 가 자동으로 setup 페이지로 안내)
-3. **Bot-token 동시 발급 옵션** — user-token 위주이지만 일부 도구 (Slack 에 messages 보내기 등) 는 bot-token 이 자연스러움. Phase 12 에서 같이 받을지 후속으로 분리할지
-   - 추천: Phase 12 는 user-token only, bot-token 은 Phase 12.1 후속 (write 도구가 추가될 때 같이)
-4. **Slack hosted MCP 경로 (`mcp.slack.com/mcp`)** 은 Internal-only Slack App 사용자 위한 별도 흐름으로 유지할지
-   - 추천: 유지. mcp-client kind 로 이미 동작 가능. Phase 12 는 hosted MCP 와 직교하는 신규 native 경로
-5. **Slack manifest 다운로드 endpoint 의 인증** — 누구나 다운로드 vs Admin 전용
-   - 추천: Admin 전용 (Bifrost host URL 노출 방지)
+| # | 결정 |
+|---|------|
+| 12-D1 | **Slack App credential 보관**: `config/workspaces.json` top-level `slackApp` 필드 + env override (`BIFROST_SLACK_CLIENT_ID` / `BIFROST_SLACK_CLIENT_SECRET`). env 우선, 없으면 file 사용. 기존 file watcher 인프라 그대로 재사용 |
+| 12-D2 | **신규 Slack workspace default mode**: `oauth`. App credential 미등록 상태에서 wizard 진입 시 자동으로 `/admin/slack` setup 페이지로 redirect |
+| 12-D3 | **Bot-token 발급**: Phase 12 는 **user-token only**. Bot-token 은 Phase 12.1 후속 (write 도구 추가 시 같이) |
+| 12-D4 | **hosted MCP (`mcp.slack.com/mcp`) 경로 유지**: `mcp-client` kind 로 이미 동작. Phase 12 는 hosted MCP 와 직교한 신규 native 경로. 두 경로 공존, 사용자가 워크스페이스 생성 시 선택 |
+| 12-D5 | **manifest 다운로드 endpoint 인증**: Admin 전용 (`BIFROST_ADMIN_TOKEN` 보호). Bifrost host URL 외부 노출 방지 |
 
 ---
 
 ## 13. 진행 체크리스트
 
-- [ ] §12 결정 사항 합의
+- [x] §12 결정 사항 합의 (2026-04-29)
+- [ ] Codex peer review (목표: 1~2 rounds)
 - [ ] 12-1 schema 확장 + 단위 테스트
 - [ ] 12-2 `slack-oauth-manager.js` 코어 + 단위 테스트
 - [ ] 12-3 `providers/slack.js` OAuth 모드
@@ -484,4 +482,4 @@ settings:
 
 ---
 
-**다음 단계**: §12 의 5 가지 결정 사항부터 합의 후 12-1 부터 순차 진행.
+**다음 단계**: Codex peer review 완료 후 12-1 부터 순차 진행.
