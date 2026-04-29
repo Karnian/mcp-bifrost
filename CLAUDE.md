@@ -102,5 +102,10 @@ scripts/
 - **Phase 11** — Follow-ups + 관측성 + hardening 수렴 (2026-04-22 완료, 10 sub-phases, 15 Codex rounds, 6 blockers closed, 0 open). 통합 로그: `docs/PHASE11_SELFREVIEW_LOG.md`
   - 11-1 mutex acquisition-order instrumentation · 11-2 rotate-client helper consolidation · 11-3 flat-field mirror 제거 · 11-4 `OAuthMetrics` recorder · 11-5 refresh `AbortController` · 11-6 cardinality cap + prune · 11-7 cache-key `ws::`/`global::` schema · 11-8 watcher atomic-replace · 11-9 Admin wizard static-client UX · 11-10 cleanup batch
 - **운영 마이그레이션** (2026-04-23) — `scripts/migrate-oauth-clients.mjs --apply` 로컬 baseline 확정 (변경 0, backup 생성).
+- **Phase 12** — Native Slack OAuth (multi-workspace) (2026-04-30 완료, 10 sub-phases, 28 Codex rounds, 20+ blockers closed, 0 open). 통합 로그: `docs/PHASE12_SELFREVIEW_LOG.md`
+  - 12-1 workspace schema (`slackApp` + `slackOAuth`) + masking · 12-2 `BIFROST_PUBLIC_URL` canonical resolver · 12-3 `SlackOAuthManager` + atomic clone-then-swap (`updateSlackOAuthAtomic` + `_saveSnapshot`) · 12-4 `providers/slack.js` OAuth 모드 + `_headers()` async + capability cooldown · 12-5 Admin REST endpoints (`/api/slack/*` + `/oauth/slack/callback`) · 12-6 Admin UI Slack screen + popup completion (postMessage strict-origin + polling fallback) · 12-7 refresh hardening 통합 · 12-8 manifest 템플릿 + `docs/SLACK_OAUTH_SETUP.md` · 12-9 botToken→OAuth migration helper + Enterprise Grid silent-break reject · 12-10 integration tests (8) + `docs/SLACK_OAUTH_E2E_CHECKLIST.md`
+  - 핵심 신규 모듈: `server/slack-oauth-manager.js`, `server/public-origin.js`, `scripts/migrate-slack-to-oauth.mjs`, `templates/slack-app-manifest.yaml`
+  - 누적 테스트: 428 (Phase 11 종료 시점) → 613 (+ 189 신규, 0 fail / 0 skip)
+  - 운영 활성화 절차: `BIFROST_PUBLIC_URL` 환경변수 + `/admin/slack` 에 client_id/secret 등록 → "Connect Slack workspace" → manual E2E 는 `docs/SLACK_OAUTH_E2E_CHECKLIST.md` 13 절 참고
 
 > Maintainer scratchpads (`docs/NEXT_SESSION.md`) are gitignored.
