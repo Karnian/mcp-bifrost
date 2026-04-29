@@ -256,8 +256,15 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         }
 
         if (method === 'DELETE') {
-          await wm.deleteWorkspace(id);
-          sendJson(res, 200, { ok: true });
+          // Phase 12-9 (Codex R1 BLOCKER 1): expose ?hard=true so the
+          // botToken → OAuth migration helper's hard-delete guidance
+          // matches an actual API path. soft-delete leaves the alias
+          // in the namespace conflict check, which would force the
+          // OAuth re-add to take a suffix and break tool naming
+          // continuity (Phase 12-D9 invariant).
+          const hard = url.searchParams.get('hard') === 'true';
+          await wm.deleteWorkspace(id, { hard });
+          sendJson(res, 200, { ok: true, data: { hard } });
           return;
         }
       }

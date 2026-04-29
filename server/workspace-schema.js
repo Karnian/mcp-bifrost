@@ -36,8 +36,34 @@ const slackOAuthSchema = z.object({
   }).optional(),
   tokens: slackOAuthTokensSchema,
   status: z.enum(['active', 'action_needed']).default('active').optional(),
+  actionNeededReason: z.string().optional(),
   lastRefreshedAt: z.string().optional(),
   issuedAt: z.string().optional(),
+}).superRefine((data, ctx) => {
+  // Phase 12-9 §10 R9: Enterprise Grid silent-break defense at the schema
+  // layer. Slack team ids start with 'T'; an Enterprise org id starts
+  // with 'E'. If a leak past the parser somehow stamps an E-prefixed id
+  // here, the schema rejects it on write rather than letting the
+  // workspace persist in a state Phase 12 doesn't support.
+  if (data.team?.id && /^E/.test(data.team.id)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['team', 'id'],
+      message: 'Enterprise Grid org id (E-prefix) is out of scope for Phase 12',
+    });
+  }
+  // Half-state defense (mirrors parseTokenResponse / parseRefreshResponse):
+  // expiresAt and refreshToken must be both-present or both-absent.
+  const t = data.tokens || {};
+  const hasExp = !!t.expiresAt;
+  const hasRefresh = !!t.refreshToken;
+  if (hasExp !== hasRefresh) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['tokens'],
+      message: `slackOAuth.tokens half-state: expiresAt=${hasExp}, refreshToken=${hasRefresh} (must be both-present or both-absent)`,
+    });
+  }
 });
 
 const nativeWorkspaceSchema = baseWorkspaceSchema.extend({

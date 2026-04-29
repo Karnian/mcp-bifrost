@@ -170,3 +170,22 @@
 
 ### 견적 vs 실제
 - 견적 0.5d, 실제 ~0.3d.
+
+---
+
+## 12-9 — botToken → OAuth migration helper + Enterprise Grid silent-break (2026-04-30)
+
+### 산출물
+- `scripts/migrate-slack-to-oauth.mjs` (신규) — `--report` / `--json` / `--apply` (refused, exit 64) / `--config`. `buildMigrationReport` export. violations: SOFT_DELETED_BLOCKING_NAMESPACE / ENTERPRISE_TEAM_LEAKED / ENTERPRISE_INSTALL_LEAKED / ENTERPRISE_ID_LEAKED / TOKEN_TYPE_NOT_USER / TOKEN_TYPE_MISSING / ROTATION_HALF_STATE / OAUTH_STATE_MISSING. exit codes 0/1/2/64.
+- `server/workspace-schema.js` — slackOAuthSchema superRefine: team.id E-prefix reject + tokens half-state 양방향 reject.
+- `admin/routes.js` — DELETE `/api/workspaces/:id?hard=true` 받음 (Phase 12-D9 hard-delete invariant).
+- `tests/phase12-9-migration.test.js` (신규, 21 건) — buildMigrationReport / schema superRefine / CLI exit codes / `--apply` arg-order 우회 차단 / `--help` + `--apply` 우회 차단.
+
+### Codex review
+- **Round 1**: BLOCKER — 2 BLOCKER + 2 REVISE
+  - hard-delete API 부재 / `--apply` arg 순서 우회 / Enterprise leak 추가 검출 / half-state 양방향
+- **Round 2**: REVISE — `--apply` + `--help` 우회 1건
+- **Round 3**: APPROVE — parseArgs 가 종료 없이 flag 수집 후 main() 이 우선순위 적용.
+
+### 견적 vs 실제
+- 견적 1d, 실제 ~0.5d.
