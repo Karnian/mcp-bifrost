@@ -421,3 +421,12 @@ body {
   .provider-cards { grid-template-columns: 1fr; }
   .bifrost-modal { min-width: auto; margin: 0 1rem; }
 }
+
+/* Phase 12-6 — Slack screen */
+.form-grid { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #cbd5e1; }
+.form-grid input[type="text"], .form-grid input[type="password"] {
+  background: #0f172a; color: #e2e8f0; border: 1px solid #334155;
+  border-radius: 6px; padding: 8px 10px; font-size: 14px;
+}
+.form-grid input:focus { outline: none; border-color: var(--green); }

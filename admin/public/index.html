@@ -36,6 +36,7 @@
           <button id="btn-nav-profiles" class="btn btn-sm btn-outline">Profiles</button>
           <button id="btn-nav-usage" class="btn btn-sm btn-outline">Usage</button>
           <button id="btn-nav-audit" class="btn btn-sm btn-outline">Audit</button>
+          <button id="btn-nav-slack" class="btn btn-sm btn-outline">Slack</button>
           <button id="btn-nav-connect" class="btn btn-sm btn-outline">Connect</button>
           <button id="btn-test-all" class="btn btn-sm">Test All</button>
           <button id="btn-logout" class="btn btn-sm btn-outline">Logout</button>
@@ -324,6 +325,64 @@
           </thead>
           <tbody id="audit-tbody"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Slack App + Workspaces (Phase 12-6) -->
+    <div id="slack-screen" class="screen hidden">
+      <nav class="topbar">
+        <div class="topbar-left">
+          <button id="btn-back-from-slack" class="btn btn-sm btn-outline">&larr; Back</button>
+          <h2>Slack App</h2>
+        </div>
+        <div class="topbar-right">
+          <button id="btn-slack-manifest" class="btn btn-sm btn-outline">manifest.yaml 다운로드</button>
+        </div>
+      </nav>
+      <div class="tools-overview-content" id="slack-content">
+        <section class="detail-section">
+          <h4>Public Origin</h4>
+          <div id="slack-origin-status" class="health-info"></div>
+          <p class="connect-note">
+            <code>BIFROST_PUBLIC_URL</code> 환경변수가 설정되어 있어야 OAuth 가 작동합니다.
+            (예: <code>https://bifrost.example.com</code>)
+          </p>
+        </section>
+        <section class="detail-section">
+          <h4>Slack App Credentials</h4>
+          <div id="slack-app-source" class="health-info" style="margin-bottom:12px"></div>
+          <form id="slack-app-form" class="form-grid">
+            <label for="slack-client-id">Client ID
+              <input type="text" id="slack-client-id" placeholder="1234567890.1234567890" autocomplete="off">
+            </label>
+            <label for="slack-client-secret">Client Secret
+              <input type="password" id="slack-client-secret" placeholder="••••••••" autocomplete="new-password">
+            </label>
+            <label class="toggle-label">
+              <input type="checkbox" id="slack-rotation" checked>
+              <span>Token rotation enabled (manifest 와 일치해야 함)</span>
+            </label>
+            <div id="slack-app-error" class="error-msg hidden"></div>
+            <div class="drawer-actions">
+              <button type="submit" class="btn btn-primary">저장</button>
+              <button type="button" id="btn-slack-app-delete" class="btn btn-danger">삭제</button>
+            </div>
+          </form>
+          <small>Slack App 등록 가이드는 <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → Create New App → From manifest.</small>
+        </section>
+        <section class="detail-section">
+          <h4>Slack Workspace 추가</h4>
+          <p class="connect-note">
+            아래 버튼을 누르면 Slack 인증 창이 열립니다. workspace 를 선택하고 권한을 승인하면 자동으로 등록됩니다.
+          </p>
+          <div id="slack-install-error" class="error-msg hidden"></div>
+          <div id="slack-install-progress" class="health-info hidden"></div>
+          <button id="btn-slack-install" class="btn btn-primary">+ Connect Slack workspace</button>
+        </section>
+        <section class="detail-section">
+          <h4>연결된 Slack Workspaces</h4>
+          <div id="slack-workspaces-list" class="health-info"></div>
+        </section>
       </div>
     </div>
 

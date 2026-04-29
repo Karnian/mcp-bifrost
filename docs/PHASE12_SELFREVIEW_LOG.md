@@ -107,3 +107,23 @@
 
 ### 견적 vs 실제
 - 견적 1.5d, 실제 ~0.7d (round 2 만에 수렴, 7 issues closed).
+
+---
+
+## 12-6 — Admin UI: Slack screen + popup completion (2026-04-30)
+
+### 산출물
+- `admin/public/index.html` — 신규 `#slack-screen` + `#btn-nav-slack` topbar entry. Slack App credential form + public origin diag + manifest download + Connect button + workspace list section.
+- `admin/public/app.js` — `loadSlack` / `renderSlackOrigin` / `renderSlackAppForm`. Credential 저장 / 강제 삭제 (dependents code 분기) / manifest admin-token 다운로드. install start + popup + 1.5s/5min polling. postMessage strict-origin (BIFROST_PUBLIC_URL match). workspace list (status / reason / re-authorize / disconnect). install-start sequence guard + ticket-id polling guard + popup teardown helper.
+- `admin/public/style.css` — `.form-grid` 추가.
+- `tests/phase12-6-admin-ui.test.js` (신규, 11 건).
+
+### Codex review
+- **Round 1**: REVISE — 2 BLOCKER + 2 REVISE + 1 NIT
+  - postMessage origin 미할당 / dependents UX message-regex 의존 / install timeout cleanup 부족 / action_needed UX 부족 / clientId stale
+- **Round 2**: REVISE — install A→B race
+- **Round 3**: REVISE — install-start in-flight race (응답 reorder)
+- **Round 4**: APPROVE — sequence guard + ticket id polling guard + endSlackInstall single source of truth.
+
+### 견적 vs 실제
+- 견적 2d, 실제 ~1d (round 4 만에 수렴, 6 issues closed).

@@ -1183,6 +1183,309 @@ async function loadAudit() {
   } catch (err) { console.error('Audit load failed:', err); }
 }
 
+// --- Slack App + OAuth (Phase 12-6) ---
+
+let slackPollTimer = null;
+let slackInstallId = null;
+let slackInstallPopup = null; // Phase 12-6 (Codex R1 REVISE 3): module-scope so timeout can close.
+// Phase 12-6 (Codex R3): monotonically-increasing sequence so a slow
+// install-start response from a superseded click can't overwrite a
+// later install's state.
+let slackInstallStartSeq = 0;
+
+$('#btn-nav-slack').addEventListener('click', async () => {
+  showScreen('slack');
+  await loadSlack();
+});
+$('#btn-back-from-slack').addEventListener('click', async () => await enterDashboard());
+
+async function loadSlack() {
+  try {
+    const res = await api('GET', '/api/slack/app');
+    if (!res.ok) throw new Error(res.error?.message || 'load failed');
+    renderSlackOrigin(res.data.publicOrigin);
+    renderSlackAppForm(res.data);
+    // Phase 12-6 (Codex R1 BLOCKER 1): cache the canonical origin for
+    // postMessage origin validation. Without this _slackPostMessageOrigin
+    // stays null and the strict-origin check is bypassed.
+    _slackPostMessageOrigin = res.data.publicOrigin?.valid ? res.data.publicOrigin.origin : null;
+  } catch (err) {
+    $('#slack-content').innerHTML = `<div class="error-msg">Slack App 정보를 불러오지 못했습니다: ${esc(err.message)}</div>`;
+    return;
+  }
+  await loadSlackWorkspaces();
+}
+
+function renderSlackOrigin(po) {
+  const el = $('#slack-origin-status');
+  if (!po) { el.textContent = ''; return; }
+  if (po.valid) {
+    el.innerHTML = `<span class="status-dot" style="background:var(--green)"></span><strong>${esc(po.origin)}</strong> · 정상`;
+  } else if (po.configured) {
+    el.innerHTML = `<span class="status-dot" style="background:var(--red)"></span>설정 오류: <code>${esc(po.reason || '')}</code> — <small>${esc(po.message || '')}</small>`;
+  } else {
+    el.innerHTML = `<span class="status-dot" style="background:var(--orange)"></span><code>BIFROST_PUBLIC_URL</code> 미설정 — install 전에 환경변수를 지정해주세요.`;
+  }
+}
+
+function renderSlackAppForm(data) {
+  // Phase 12-6 (Codex R1 NIT 5): always sync — empty data.clientId
+  // (after delete) must clear the input rather than leaving stale text.
+  $('#slack-client-id').value = data.clientId || '';
+  $('#slack-rotation').checked = data.tokenRotationEnabled !== false;
+  const src = data.sources || {};
+  const badges = [];
+  if (src.clientId === 'env') badges.push('<span class="badge badge-warn">Client ID: env override</span>');
+  if (src.clientSecret === 'env') badges.push('<span class="badge badge-warn">Client Secret: env override (file ignored)</span>');
+  if (src.clientId === 'file') badges.push('<span class="badge badge-ok">Client ID: file</span>');
+  if (src.clientSecret === 'file') badges.push('<span class="badge badge-ok">Client Secret: file</span>');
+  if (src.clientId === 'none' && src.clientSecret === 'none') badges.push('<span class="badge">미설정</span>');
+  $('#slack-app-source').innerHTML = badges.join(' ');
+}
+
+$('#slack-app-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const clientId = $('#slack-client-id').value.trim();
+  const clientSecret = $('#slack-client-secret').value;
+  const tokenRotationEnabled = $('#slack-rotation').checked;
+  const errEl = $('#slack-app-error');
+  errEl.classList.add('hidden');
+  if (!clientId || !clientSecret) {
+    errEl.textContent = 'Client ID 와 Client Secret 모두 입력해주세요.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  try {
+    const res = await api('POST', '/api/slack/app', { clientId, clientSecret, tokenRotationEnabled });
+    if (!res.ok) throw new Error(res.error?.message || 'save failed');
+    $('#slack-client-secret').value = '';
+    await loadSlack();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+$('#btn-slack-app-delete').addEventListener('click', async () => {
+  if (!confirm('Slack App credential 을 삭제하시겠습니까? 의존하는 OAuth workspace 가 있으면 거부됩니다.')) return;
+  // Phase 12-6 (Codex R1 BLOCKER 2): branch on server error CODE not on
+  // free-form message text. The server returns
+  //   { ok:false, error:{ code:'SLACK_APP_HAS_DEPENDENTS', dependentCount, ... } }
+  // so we can offer the force-delete confirm reliably.
+  const res = await api('DELETE', '/api/slack/app');
+  if (res.ok) { await loadSlack(); return; }
+  if (res.error?.code === 'SLACK_APP_HAS_DEPENDENTS') {
+    const n = res.error.dependentCount ?? '여러 개';
+    if (confirm(`${n} 개의 OAuth workspace 가 이 App credential 에 의존합니다.\n\n그래도 강제 삭제하시겠습니까? 해당 workspace 는 action_needed 상태로 전환됩니다.`)) {
+      const forceRes = await api('DELETE', '/api/slack/app?force=true');
+      if (!forceRes.ok) {
+        alert(forceRes.error?.message || '강제 삭제 실패');
+        return;
+      }
+      await loadSlack();
+      await loadDashboard();
+    }
+    return;
+  }
+  alert(res.error?.message || '삭제 실패');
+});
+
+$('#btn-slack-manifest').addEventListener('click', () => {
+  // Trigger an admin-token authenticated fetch via XHR + blob so the
+  // browser can hand the operator a downloaded YAML.
+  const headers = { 'Authorization': `Bearer ${state.token}` };
+  fetch('/api/slack/manifest.yaml', { headers })
+    .then(r => {
+      if (!r.ok) return r.json().then(b => { throw new Error(b.error?.message || `HTTP ${r.status}`); });
+      return r.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'bifrost-slack-app-manifest.yaml';
+      document.body.appendChild(a); a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    })
+    .catch(err => alert(`manifest 다운로드 실패: ${err.message}`));
+});
+
+$('#btn-slack-install').addEventListener('click', async () => {
+  const errEl = $('#slack-install-error');
+  const progress = $('#slack-install-progress');
+  errEl.classList.add('hidden');
+  progress.classList.add('hidden');
+  // Phase 12-6 (Codex R2 + R3): re-entry guard. Re-authorize and double-
+  // clicks both reach this handler — abandon any prior install before
+  // starting. seq id then fences the asynchronous response: a stale
+  // install-start response from a superseded click is dropped, so it
+  // can't overwrite the current install's state mid-flight.
+  if (slackInstallId) {
+    endSlackInstall();
+  }
+  const mySeq = ++slackInstallStartSeq;
+  try {
+    const res = await api('POST', '/api/slack/install/start', {});
+    if (mySeq !== slackInstallStartSeq) {
+      // A newer click superseded this one — drop the response.
+      return;
+    }
+    if (!res.ok) throw new Error(res.error?.message || 'install start failed');
+    slackInstallId = res.data.installId;
+    progress.textContent = '인증 창에서 workspace 선택 + 권한 승인을 진행하세요...';
+    progress.classList.remove('hidden');
+    slackInstallPopup = window.open(res.data.authorizationUrl, 'slack-install', 'width=720,height=820');
+    if (!slackInstallPopup) {
+      progress.textContent = 'Popup 이 차단되었습니다. URL 을 직접 열어주세요.';
+      progress.innerHTML += `<br><a href="${esc(res.data.authorizationUrl)}" target="_blank">${esc(res.data.authorizationUrl)}</a>`;
+    }
+    startSlackInstallPolling();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+function endSlackInstall(message) {
+  // Phase 12-6 (Codex R1 REVISE 3): single source of truth for install
+  // teardown so timeout / completed / failed / postMessage all reach a
+  // clean state — clear timer, clear ID (so stale postMessage is ignored),
+  // close popup if still open.
+  if (slackPollTimer) clearInterval(slackPollTimer);
+  slackPollTimer = null;
+  slackInstallId = null;
+  if (slackInstallPopup && !slackInstallPopup.closed) {
+    try { slackInstallPopup.close(); } catch {}
+  }
+  slackInstallPopup = null;
+  if (message) $('#slack-install-progress').textContent = message;
+}
+
+function startSlackInstallPolling() {
+  if (slackPollTimer) clearInterval(slackPollTimer);
+  const startedAt = Date.now();
+  const TIMEOUT_MS = 5 * 60 * 1000;
+  // Phase 12-6 (Codex R2): pin installId per tick — a slow status response
+  // for install A must NOT call endSlackInstall when install B is already
+  // running (Re-authorize race). Capture before await; verify still-current
+  // before mutating state.
+  slackPollTimer = setInterval(async () => {
+    const ticketId = slackInstallId;
+    if (!ticketId) { endSlackInstall(); return; }
+    if (Date.now() - startedAt > TIMEOUT_MS) {
+      if (ticketId === slackInstallId) endSlackInstall('install timeout — 다시 시도해주세요.');
+      return;
+    }
+    try {
+      const res = await api('GET', `/api/slack/install/status?installId=${encodeURIComponent(ticketId)}`);
+      // Re-check after the network round-trip: if a new install (B)
+      // replaced this one (A) while we were awaiting, drop A's result.
+      if (ticketId !== slackInstallId) return;
+      if (!res.ok) return;
+      const status = res.data;
+      if (status.status === 'completed') {
+        endSlackInstall(`✓ 연결 완료: ${status.teamId || ''} (${status.mode})`);
+        await loadSlack();
+        await loadDashboard();
+      } else if (status.status === 'failed') {
+        endSlackInstall(`✗ 연결 실패: ${status.error || 'unknown'}`);
+      }
+    } catch { /* transient */ }
+  }, 1500);
+}
+
+// Phase 12-6 (D8) — postMessage primary path. Validates origin against
+// the canonical BIFROST_PUBLIC_URL we received from /api/slack/app.
+let _slackPostMessageOrigin = null;
+window.addEventListener('message', (ev) => {
+  if (!ev.data || ev.data.type !== 'bifrost-slack-install') return;
+  // Phase 12-6 (Codex R1 BLOCKER 1): strict-origin enforcement. We only
+  // accept messages when we have a known canonical origin AND the event
+  // origin matches it. If we don't know the origin (BIFROST_PUBLIC_URL
+  // unset / invalid), drop the message and rely on polling.
+  if (!_slackPostMessageOrigin) return;
+  if (ev.origin !== _slackPostMessageOrigin) return;
+  if (slackInstallId && ev.data.installId === slackInstallId) {
+    loadSlack().catch(() => {});
+    loadDashboard().catch(() => {});
+    if (ev.data.status === 'completed') {
+      endSlackInstall(`✓ 연결 완료: ${ev.data.teamName || ev.data.teamId || ''}`);
+    } else if (ev.data.status === 'failed') {
+      endSlackInstall(`✗ 연결 실패: ${ev.data.error || 'unknown'}`);
+    } else {
+      endSlackInstall();
+    }
+  }
+});
+
+async function loadSlackWorkspaces() {
+  const list = $('#slack-workspaces-list');
+  list.innerHTML = '...';
+  try {
+    const res = await api('GET', '/api/workspaces');
+    const wsList = (res.data || []).filter(w => w.provider === 'slack' && w.authMode === 'oauth');
+    if (!wsList.length) {
+      list.innerHTML = '<small>아직 연결된 Slack workspace 가 없습니다.</small>';
+      return;
+    }
+    list.innerHTML = wsList.map(ws => {
+      const team = ws.slackOAuth?.team || {};
+      const status = ws.slackOAuth?.status || 'unknown';
+      const reason = ws.slackOAuth?.actionNeededReason;
+      const expiresAt = ws.slackOAuth?.tokens?.expiresAt;
+      const dot = status === 'active' ? 'green' : 'orange';
+      // Phase 12-6 (Codex R1 REVISE 4): explicit action_needed surface
+      // with reason + re-authorize button. Plain dot-only doesn't tell
+      // operators why the workspace is degraded or how to recover.
+      const statusLabel = status === 'active'
+        ? '<small style="color:var(--green);font-weight:500">active</small>'
+        : `<small style="color:var(--orange);font-weight:500">action_needed${reason ? ` (${esc(reason)})` : ''}</small>`;
+      const reauthorizeBtn = status === 'active' ? '' : `<button class="btn btn-sm btn-primary" data-act="reauthorize" data-id="${esc(ws.id)}">Re-authorize</button>`;
+      return `<div class="attention-item" data-id="${esc(ws.id)}" style="cursor:default">
+        <span class="status-dot" style="background:var(--${dot})"></span>
+        <div style="flex:1">
+          <strong>${esc(team.name || ws.displayName)}</strong>
+          <small style="margin-left:8px;color:#64748b">${esc(team.id || '')}</small>
+          ${statusLabel ? `<div>${statusLabel}${expiresAt ? ` <small style="color:#64748b">· expires: ${esc(expiresAt)}</small>` : ''}</div>` : ''}
+        </div>
+        ${reauthorizeBtn}
+        <button class="btn btn-sm btn-outline" data-act="refresh" data-id="${esc(ws.id)}">Refresh</button>
+        <button class="btn btn-sm btn-danger" data-act="disconnect" data-id="${esc(ws.id)}">Disconnect</button>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('[data-act="refresh"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          const r = await api('POST', `/api/workspaces/${encodeURIComponent(btn.dataset.id)}/slack/refresh`);
+          if (!r.ok) throw new Error(r.error?.message || 'refresh failed');
+          await loadSlackWorkspaces();
+        } catch (err) { alert(err.message); }
+      });
+    });
+    list.querySelectorAll('[data-act="reauthorize"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        // Re-authorize is just kicking the install flow again — the
+        // server's duplicate-team detection in completeInstall will
+        // re-bind tokens onto the existing workspace entry.
+        $('#btn-slack-install').click();
+      });
+    });
+    list.querySelectorAll('[data-act="disconnect"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('이 Slack 워크스페이스 연결을 해제하시겠습니까?')) return;
+        try {
+          const r = await api('POST', `/api/workspaces/${encodeURIComponent(btn.dataset.id)}/slack/disconnect`);
+          if (!r.ok) throw new Error(r.error?.message || 'disconnect failed');
+          await loadSlackWorkspaces();
+          await loadDashboard();
+        } catch (err) { alert(err.message); }
+      });
+    });
+  } catch (err) {
+    list.innerHTML = `<div class="error-msg">${esc(err.message)}</div>`;
+  }
+}
+
 // --- Connect Guide ---
 $('#btn-nav-connect').addEventListener('click', async () => {
   showScreen('connect');

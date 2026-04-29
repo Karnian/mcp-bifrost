@@ -831,7 +831,7 @@ settings:
 - [x] 12-3 `slack-oauth-manager.js` 코어 (PKCE 미사용, state schema) + 단위 테스트 (2026-04-30, Codex round 4 APPROVE)
 - [x] 12-4 `providers/slack.js` OAuth 모드 + `_headers()` async + cooldown (2026-04-30, Codex round 4 APPROVE)
 - [x] 12-5 Admin REST endpoints + install status polling (2026-04-30, Codex round 2 APPROVE)
-- [ ] 12-6 Admin UI + popup completion (postMessage + polling)
+- [x] 12-6 Admin UI + popup completion (postMessage + polling) (2026-04-30, Codex round 4 APPROVE)
 - [ ] 12-7 Refresh durable save + error mapping
 - [ ] 12-8 manifest 템플릿 + 운영 가이드
 - [ ] 12-9 botToken → OAuth migration helper + Enterprise Grid reject
