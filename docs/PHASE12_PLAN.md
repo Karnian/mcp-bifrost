@@ -826,7 +826,7 @@ settings:
 - [x] Codex peer review v4 — P1/P2 CLOSED, P3 PARTIAL (테스트 매트릭스 4 vs 5 mismatch + helper 시그니처 잔재) (2026-04-29)
 - [x] Plan v5 작성 — 5 케이스 매트릭스 명시 + redundant helper 블록 통합 (2026-04-29)
 - [x] **Codex peer review v5 — APPROVE** (2026-04-29). Phase 12 구현 착수 가능한 수준
-- [ ] 12-1 schema 확장 + Zod batch + masking 룰 + 단위 테스트
+- [x] 12-1 schema 확장 + Zod batch + masking 룰 + 단위 테스트 (2026-04-29, Codex round 2 APPROVE)
 - [ ] 12-2 `BIFROST_PUBLIC_URL` resolver + 단위 테스트
 - [ ] 12-3 `slack-oauth-manager.js` 코어 (PKCE 미사용, state schema) + 단위 테스트
 - [ ] 12-4 `providers/slack.js` OAuth 모드 + `_headers()` async + cooldown

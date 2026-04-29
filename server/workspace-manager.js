@@ -7,6 +7,7 @@ import { SlackProvider } from '../providers/slack.js';
 import { McpClientProvider } from '../providers/mcp-client.js';
 import { sanitize } from './oauth-sanitize.js';
 import { logger } from './logger.js';
+import { validateSlackAppPayload } from './workspace-schema.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -80,6 +81,53 @@ function maskCredentials(credentials) {
     }
   }
   return masked;
+}
+
+// Phase 12 §3.4 (B5) — strip raw Slack OAuth tokens from masked workspace
+// responses. Token bodies (xoxe.xoxp- / xoxe-) must never appear in
+// /api/workspaces output; admin UI surfaces only a short prefix + boolean
+// hasRefreshToken flag. expiresAt is ISO 8601 (no masking needed — it's a
+// timestamp, not a secret).
+export function maskSlackOAuth(slackOAuth) {
+  if (!slackOAuth || typeof slackOAuth !== 'object') return slackOAuth;
+  const t = slackOAuth.tokens;
+  if (!t || typeof t !== 'object') return slackOAuth;
+  return {
+    ...slackOAuth,
+    tokens: {
+      accessToken: t.accessToken && typeof t.accessToken === 'string'
+        ? `${t.accessToken.slice(0, 12)}...`
+        : null,
+      refreshToken: t.refreshToken && typeof t.refreshToken === 'string'
+        ? `${t.refreshToken.slice(0, 8)}...`
+        : null,
+      hasRefreshToken: !!t.refreshToken,
+      expiresAt: t.expiresAt || null,
+      tokenType: t.tokenType || null,
+    },
+  };
+}
+
+// Phase 12 §3.4 (v4) — masking for the top-level slackApp config block.
+// Tracks two separate sources (clientId / clientSecret) so the Admin UI
+// can render distinct badges when env-var override is partially in effect.
+export function maskSlackApp(slackApp) {
+  if (!slackApp || typeof slackApp !== 'object') return null;
+  return {
+    clientId: slackApp.clientId || null,
+    hasSecret: !!slackApp.clientSecret,
+    tokenRotationEnabled: slackApp.tokenRotationEnabled !== false,
+    sources: {
+      clientId: process.env.BIFROST_SLACK_CLIENT_ID
+        ? 'env'
+        : (slackApp.clientId ? 'file' : 'none'),
+      clientSecret: process.env.BIFROST_SLACK_CLIENT_SECRET
+        ? 'env'
+        : (slackApp.clientSecret ? 'file' : 'none'),
+    },
+    createdAt: slackApp.createdAt || null,
+    updatedAt: slackApp.updatedAt || null,
+  };
 }
 
 export class WorkspaceManager {
@@ -376,6 +424,103 @@ export class WorkspaceManager {
     if (ws.env) result.env = maskCredentials(ws.env);
     if (ws.headers) result.headers = maskCredentials(ws.headers);
     if (ws.oauth) result.oauth = maskOAuth(ws.oauth);
+    // Phase 12 §3.4 (B5) — slackOAuth raw tokens must never reach masked output.
+    if (ws.slackOAuth) result.slackOAuth = maskSlackOAuth(ws.slackOAuth);
+  }
+
+  // Phase 12 §3.1 — top-level Slack App credential accessor. env vars override
+  // file values per source; sources object is the canonical truth fed back to
+  // the Admin UI. Unlike per-workspace credentials, slackApp lives at the same
+  // level as workspaces[] in config/workspaces.json.
+  getSlackAppRaw() {
+    const file = this.config.slackApp || null;
+    const envClientId = process.env.BIFROST_SLACK_CLIENT_ID;
+    const envClientSecret = process.env.BIFROST_SLACK_CLIENT_SECRET;
+    return {
+      clientId: envClientId || file?.clientId || null,
+      clientSecret: envClientSecret || file?.clientSecret || null,
+      tokenRotationEnabled: file?.tokenRotationEnabled !== false,
+      sources: {
+        clientId: envClientId ? 'env' : (file?.clientId ? 'file' : 'none'),
+        clientSecret: envClientSecret ? 'env' : (file?.clientSecret ? 'file' : 'none'),
+      },
+      createdAt: file?.createdAt || null,
+      updatedAt: file?.updatedAt || null,
+    };
+  }
+
+  getSlackApp() {
+    // Masked view for /api/slack/app — never returns clientSecret. Calls
+    // getSlackAppRaw() so the env-vs-file source determination stays single-
+    // sourced.
+    const raw = this.getSlackAppRaw();
+    return {
+      clientId: raw.clientId,
+      hasSecret: !!raw.clientSecret,
+      tokenRotationEnabled: raw.tokenRotationEnabled,
+      sources: raw.sources,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+    };
+  }
+
+  async setSlackApp({ clientId, clientSecret, tokenRotationEnabled }) {
+    // Phase 12-1 (Codex R1 REVISE): validate at the storage boundary so any
+    // caller (admin route, migration script, test) is held to the same Slack
+    // App format check as the public POST /api/slack/app endpoint.
+    const v = validateSlackAppPayload({ clientId, clientSecret, tokenRotationEnabled });
+    if (!v.valid) {
+      const err = new Error(`slackApp payload invalid: ${v.errors.join('; ')}`);
+      err.code = 'SLACK_APP_INVALID';
+      err.errors = v.errors;
+      throw err;
+    }
+    const now = new Date().toISOString();
+    const prev = this.config.slackApp || null;
+    this.config.slackApp = {
+      clientId,
+      clientSecret,
+      tokenRotationEnabled: tokenRotationEnabled !== false,
+      createdAt: prev?.createdAt || now,
+      updatedAt: now,
+    };
+    await this._save();
+    this.logAudit('slack.app_credential_set', null, JSON.stringify({
+      clientIdMasked: clientId.length > 8 ? `${clientId.slice(0, 4)}***${clientId.slice(-4)}` : '***',
+      hadPrevious: !!prev,
+      tokenRotationEnabled: this.config.slackApp.tokenRotationEnabled,
+    }));
+    this._notifyChange();
+    return this.getSlackApp();
+  }
+
+  async deleteSlackApp({ force = false } = {}) {
+    const slackOAuthDeps = this.config.workspaces.filter(
+      w => w.provider === 'slack' && w.authMode === 'oauth' && !w.deletedAt
+    );
+    if (slackOAuthDeps.length > 0 && !force) {
+      const err = new Error(`slackApp delete refused: ${slackOAuthDeps.length} OAuth workspace(s) depend on it. Pass force=true to override.`);
+      err.code = 'SLACK_APP_HAS_DEPENDENTS';
+      err.dependentCount = slackOAuthDeps.length;
+      throw err;
+    }
+    delete this.config.slackApp;
+    if (force) {
+      // Force delete — flip dependent workspaces to action_needed so the user
+      // knows to re-authorize after registering a new App credential.
+      for (const ws of slackOAuthDeps) {
+        if (!ws.slackOAuth) continue;
+        ws.slackOAuth.status = 'action_needed';
+      }
+    }
+    await this._save();
+    this.logAudit(
+      force ? 'slack.app_credential_deleted_force' : 'slack.app_credential_deleted',
+      null,
+      JSON.stringify({ dependentsTouched: force ? slackOAuthDeps.length : 0 })
+    );
+    this._notifyChange();
+    return { deleted: true, dependentsTouched: force ? slackOAuthDeps.length : 0 };
   }
 
   getRawWorkspace(id) {
@@ -430,6 +575,11 @@ export class WorkspaceManager {
 
     if (kind === 'native') {
       ws.credentials = data.credentials || {};
+      // Phase 12-1 (Codex R1 BLOCKER): persist authMode + slackOAuth for OAuth-mode
+      // Slack workspaces. Without this, a valid OAuth payload (validated upstream
+      // by validateWorkspacePayload) silently drops to token mode + loses tokens.
+      if (data.authMode) ws.authMode = data.authMode;
+      if (data.slackOAuth) ws.slackOAuth = data.slackOAuth;
     } else if (kind === 'mcp-client') {
       ws.transport = data.transport;
       if (data.transport === 'stdio') {
@@ -496,6 +646,19 @@ export class WorkspaceManager {
           ws.credentials[key] = value;
         }
       }
+    }
+
+    // Phase 12-1 (Codex R1 BLOCKER): allow updateWorkspace to flip authMode and
+    // refresh slackOAuth for Slack OAuth workspaces. Skipping any field that
+    // looks masked so a round-trip GET → PUT can't replay token prefixes.
+    if (data.authMode !== undefined) ws.authMode = data.authMode;
+    if (data.slackOAuth !== undefined) {
+      const t = data.slackOAuth?.tokens;
+      const looksMasked = t && (
+        (typeof t.accessToken === 'string' && t.accessToken.endsWith('...')) ||
+        (typeof t.refreshToken === 'string' && t.refreshToken.endsWith('...'))
+      );
+      if (!looksMasked) ws.slackOAuth = data.slackOAuth;
     }
 
     // MCP-client fields (mutable except transport)
@@ -571,9 +734,17 @@ export class WorkspaceManager {
   }
 
   getDeletedWorkspaces() {
+    // Phase 12-1 (Codex R1 BLOCKER): pipe through _maskSecrets so soft-deleted
+    // Slack OAuth workspaces don't leak raw tokens via /api/workspaces/deleted.
+    // The original (R8) credentials-only mask predates ws.slackOAuth and ws.oauth
+    // nested tokens — both must be redacted on this surface too.
     return this.config.workspaces
       .filter(w => w.deletedAt)
-      .map(ws => ({ ...ws, credentials: maskCredentials(ws.credentials || {}) }));
+      .map(ws => {
+        const result = { ...ws };
+        this._maskSecrets(result, ws);
+        return result;
+      });
   }
 
   async purgeExpiredWorkspaces({ now = Date.now() } = {}) {
