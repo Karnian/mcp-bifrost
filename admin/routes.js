@@ -5,7 +5,7 @@ import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompa
 import { RateLimiter, getClientIp } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
 import { validateWorkspacePayload, validateSlackAppPayload } from '../server/workspace-schema.js';
-import { describePublicOrigin, getPublicOriginOrNull, getSlackRedirectUri } from '../server/public-origin.js';
+import { describePublicOrigin, getPublicOriginOrNull, getSlackRedirectUri, getSlackManifestRedirect } from '../server/public-origin.js';
 import { describeSlackError } from '../server/slack-oauth-manager.js';
 import { escapeHtml } from '../server/html-escape.js';
 import { randomBytes } from 'node:crypto';
@@ -1008,12 +1008,19 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
           sendJson(res, 412, { ok: false, error: { code: 'PUBLIC_ORIGIN_MISSING', message: 'BIFROST_PUBLIC_URL must be configured before downloading the manifest.' } });
           return;
         }
-        const yaml = renderSlackManifestYaml(`${origin}/oauth/slack/callback`);
-        res.writeHead(200, {
-          'Content-Type': 'text/yaml; charset=utf-8',
-          'Content-Disposition': 'attachment; filename="bifrost-slack-app-manifest.yaml"',
-        });
-        res.end(yaml);
+        try {
+          // Phase 12-8 (Codex R1 REVISE 1): use the canonical resolver so
+          // manifest download and runtime redirect_uri come from the same
+          // source — plan §6 "같은 resolver" invariant.
+          const yaml = await renderSlackManifestYaml(getSlackManifestRedirect());
+          res.writeHead(200, {
+            'Content-Type': 'text/yaml; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="bifrost-slack-app-manifest.yaml"',
+          });
+          res.end(yaml);
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: { code: 'MANIFEST_TEMPLATE_MISSING', message: err.message } });
+        }
         return;
       }
 
@@ -1174,37 +1181,26 @@ p{margin:.5rem 0;color:#94a3b8;line-height:1.6}
   }
 }
 
-function renderSlackManifestYaml(redirectUrl) {
-  const escaped = redirectUrl.replace(/"/g, '\\"');
-  // Phase 12-5 — minimal manifest. The full template ships with 12-8.
-  // Inlining a copy here keeps the download endpoint self-contained for
-  // operators who haven't checked out the templates dir.
-  return `display_information:
-  name: Bifrost
-  description: MCP Bifrost — multi-workspace MCP edge
-  background_color: "#1d1d1f"
-oauth_config:
-  redirect_urls:
-    - "${escaped}"
-  pkce_enabled: false
-  scopes:
-    user:
-      - search:read
-      - channels:history
-      - channels:read
-      - groups:history
-      - groups:read
-      - im:history
-      - im:read
-      - mpim:history
-      - mpim:read
-      - users:read
-      - users:read.email
-settings:
-  token_rotation_enabled: true
-  org_deploy_enabled: false
-  socket_mode_enabled: false
-`;
+// Phase 12-8 — manifest template loader. Loads templates/slack-app-manifest.yaml
+// once and substitutes the redirect URL placeholder so the file under
+// version control is the single source of truth (the admin route + the
+// docs reference the same payload).
+let _slackManifestCache = null;
+async function _loadSlackManifestTemplate() {
+  if (_slackManifestCache) return _slackManifestCache;
+  const path = join(__dirname, '..', 'templates', 'slack-app-manifest.yaml');
+  _slackManifestCache = await readFile(path, 'utf-8');
+  return _slackManifestCache;
+}
+
+async function renderSlackManifestYaml(redirectUrl) {
+  const template = await _loadSlackManifestTemplate();
+  // The template ships with `https://your-bifrost-host/oauth/slack/callback`
+  // as the placeholder. Replace it with the live canonical redirect URL.
+  return template.replace(
+    /https:\/\/your-bifrost-host\/oauth\/slack\/callback/g,
+    redirectUrl
+  );
 }
 
 function _checkExposure(req, res) {

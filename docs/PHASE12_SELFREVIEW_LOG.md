@@ -152,3 +152,21 @@
 
 ### 견적 vs 실제
 - 견적 1.5d, 실제 ~0.4d (round 2 만에 수렴, 4 issues closed). 12-3/12-5 가 이미 핵심 기능을 다뤘기에 hardening 통합 테스트만으로 충분.
+
+---
+
+## 12-8 — Slack manifest 템플릿 + 운영 가이드 (2026-04-30)
+
+### 산출물
+- `templates/slack-app-manifest.yaml` (신규) — Phase 12 invariants (pkce_enabled: false, token_rotation_enabled: true, org_deploy_enabled: false, user-token only). placeholder 가 manifest endpoint 의 `getSlackManifestRedirect()` 출력으로 치환.
+- `docs/SLACK_OAUTH_SETUP.md` (신규) — 8 절 (사전 조건 / Slack App 생성 / Bifrost 등록 / Workspace 연결 / 운영 시나리오 / 보안 / Cloudflare Tunnel / 트러블슈팅). 보안 표는 plan §6 invariants 모두 행. 트러블슈팅은 SLACK_ERROR_MAP 8 codes 모두 행.
+- `admin/routes.js` — `renderSlackManifestYaml` 가 `templates/slack-app-manifest.yaml` 로드 + 캐시 + `getSlackManifestRedirect()` 통과 (plan §6 "같은 resolver" invariant).
+- `tests/phase12-8-manifest-template.test.js` (신규, 3 case — line-anchored manifest invariants, setup guide section/security/troubleshooting coverage, manifest endpoint E2E).
+
+### Codex review
+- **Round 1**: REVISE — 3 REVISE + 1 NIT
+  - manifest endpoint 가 redirect helper 우회 / 보안 섹션 invariants 누락 / 트러블슈팅 누락 코드 / invariant 테스트 주석 매칭
+- **Round 2**: APPROVE — 모두 fix.
+
+### 견적 vs 실제
+- 견적 0.5d, 실제 ~0.3d.

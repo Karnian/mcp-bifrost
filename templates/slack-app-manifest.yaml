@@ -1,0 +1,53 @@
+# Bifrost Phase 12 — Slack App manifest template
+#
+# Replace `https://your-bifrost-host` with your canonical BIFROST_PUBLIC_URL
+# and paste this YAML into Slack's "Create App from manifest" form.
+#
+# Phase 12 invariants:
+#   - user-token only (no bot scopes / bot user)
+#   - confidential web-app mode → pkce_enabled: false + client_secret_post
+#   - token rotation enabled (Slack issues 12h access + xoxe-1- refresh)
+#   - org_deploy_enabled: false (Phase 12 비범위 — Enterprise Grid org-wide install
+#     은 명시적으로 reject 됨, is_enterprise_install: true 응답 차단)
+#
+# 등재 결정:
+#   - Marketplace 등재 (Listed): 심사 통과 비현실적, 불필요
+#   - Public Distribution (Unlisted distributed): 외부 워크스페이스 install
+#     받기 위해 활성화 필요. https://api.slack.com/apps/<app-id>/distribute 에서
+#     "Activate Public Distribution" 토글.
+
+display_information:
+  name: Bifrost
+  description: MCP Bifrost — multi-workspace MCP edge
+  background_color: "#1d1d1f"
+  long_description: |-
+    Bifrost connects multiple Slack workspaces (and other services) into a
+    single MCP endpoint, so AI assistants can read/search messages across
+    your team's organizations through a single configuration.
+
+oauth_config:
+  redirect_urls:
+    # 운영 환경의 BIFROST_PUBLIC_URL + /oauth/slack/callback 으로 교체.
+    # 개발: http://localhost:3100/oauth/slack/callback (Slack 은 localhost
+    # redirect 를 받음).
+    - https://your-bifrost-host/oauth/slack/callback
+  pkce_enabled: false
+  scopes:
+    user:
+      - search:read
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - users:read
+      - users:read.email
+
+settings:
+  token_rotation_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  is_hosted: false

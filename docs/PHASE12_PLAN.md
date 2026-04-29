@@ -833,7 +833,7 @@ settings:
 - [x] 12-5 Admin REST endpoints + install status polling (2026-04-30, Codex round 2 APPROVE)
 - [x] 12-6 Admin UI + popup completion (postMessage + polling) (2026-04-30, Codex round 4 APPROVE)
 - [x] 12-7 Refresh durable save + error mapping (2026-04-30, Codex round 2 APPROVE)
-- [ ] 12-8 manifest 템플릿 + 운영 가이드
+- [x] 12-8 manifest 템플릿 + 운영 가이드 (2026-04-30, Codex round 2 APPROVE)
 - [ ] 12-9 botToken → OAuth migration helper + Enterprise Grid reject
 - [ ] 12-10 통합 테스트 + E2E checklist + self-review log
 - [ ] Codex review (목표: 3~5 rounds)
