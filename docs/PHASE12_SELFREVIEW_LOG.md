@@ -127,3 +127,28 @@
 
 ### 견적 vs 실제
 - 견적 2d, 실제 ~1d (round 4 만에 수렴, 6 issues closed).
+
+---
+
+## 12-7 — Refresh hardening + token rotation crash recovery (2026-04-30)
+
+### 산출물
+- 코드 변경 없음 — 12-3 / 12-5 의 atomic save / mutex / forceRefresh / parseRefreshResponse / friendly error mapping 을 결합 검증.
+- `tests/phase12-7-refresh-hardening.test.js` (신규, 10 건):
+  1. concurrent forceRefresh — mutex re-read 가 rotated refresh_token 사용 검증 (mock 이 OLD 재사용 시 invalid_grant 반환)
+  2. HTTP 5xx → 토큰 변경 없음
+  3. network error → 토큰 변경 없음
+  4. invalid_grant → action_needed → re-authorize 회복 흐름 (duplicate-team)
+  5. markActionNeeded 가 accessToken 유지
+  6. disconnect blocks until in-flight refresh — mutex 검증
+  7. describeSlackError full coverage (8 documented codes, Korean fragment strict assert)
+  8. invalid_client (R7 — clientSecret rotation) → action_needed + accessToken 보존
+  9-10. unknown / null code fallback
+
+### Codex review
+- **Round 1**: BLOCKER — 1 BLOCKER + 2 REVISE + 1 NIT
+  - friendly error mapping false-positive / mutex 검증 약함 / R7 누락 / 429 NIT
+- **Round 2**: APPROVE — 모든 지적 fix 됨.
+
+### 견적 vs 실제
+- 견적 1.5d, 실제 ~0.4d (round 2 만에 수렴, 4 issues closed). 12-3/12-5 가 이미 핵심 기능을 다뤘기에 hardening 통합 테스트만으로 충분.
