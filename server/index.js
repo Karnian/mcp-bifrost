@@ -4,7 +4,7 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { ToolRegistry } from './tool-registry.js';
 import { McpHandler } from './mcp-handler.js';
 import { SseManager } from './sse-manager.js';
-import { createAdminRoutes } from '../admin/routes.js';
+import { createAdminRoutes, handleSlackOAuthCallback } from '../admin/routes.js';
 import { OAuthManager } from './oauth-manager.js';
 import { OAuthMetrics } from './oauth-metrics.js';
 import { SlackOAuthManager } from './slack-oauth-manager.js';
@@ -116,7 +116,7 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   // server handle is the one that holds the process open in production.
   healthInterval.unref?.();
 
-  const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit, oauthMetrics });
+  const adminRoutes = createAdminRoutes(wm, tr, sse, oauth, tokenManager, { usage, audit, oauthMetrics, slackOAuth });
 
   async function authenticateMcp(req, res, url) {
     if (!tokenManager.isConfigured()) {
@@ -312,6 +312,13 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
 
     if (path === '/oauth/callback' && req.method === 'GET') {
       return handleOAuthCallback(req, res, url);
+    }
+
+    // Phase 12-5 — Slack OAuth install callback. Path is canonical
+    // (must match BIFROST_PUBLIC_URL + SLACK_OAUTH_CALLBACK_PATH from
+    // public-origin.js); we never auto-derive from Host.
+    if (path === '/oauth/slack/callback' && req.method === 'GET') {
+      return handleSlackOAuthCallback(req, res, url, { slackOAuth, sse, tr });
     }
 
     if (path.startsWith('/api/') || path.startsWith('/admin')) {

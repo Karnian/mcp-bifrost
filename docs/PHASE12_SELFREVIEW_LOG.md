@@ -89,3 +89,21 @@
 
 ### 견적 vs 실제
 - 견적 0.5d, 실제 ~0.5d (round 4 만에 수렴, 1 REVISE + 2 NIT + 2 cross-cutting issues closed).
+
+---
+
+## 12-5 — Admin REST endpoints + install status polling (2026-04-30)
+
+### 산출물
+- `admin/routes.js` — 9 신규 endpoints (`GET/POST/DELETE /api/slack/app`, `POST /api/slack/install/start`, `GET /api/slack/install/status`, `GET /api/slack/manifest.yaml`, `POST /api/workspaces/:id/slack/refresh` (forceRefresh), `POST /api/workspaces/:id/slack/disconnect`). `handleSlackOAuthCallback` export — 4초 auto-close, strict-CSP nonce'd inline script, postMessage `bifrost-slack-install` (canonical-origin only, '*' fallback 제거).
+- `server/index.js` — `/oauth/slack/callback` 라우트 + `extras.slackOAuth` 전달.
+- `server/slack-oauth-manager.js` — `forceRefresh`, `_runRefresh({ bypassFreshCheck })`, `revoke({ mode })` 가 hard-delete / keep-entry 까지 mutex 안에서 처리. errorParam 처리 순서 수정 (state 검증 → installId 얻어 failed 마킹).
+- `tests/phase12-5-admin-rest.test.js` (신규, 20 건). `tests/phase12-3-slack-oauth-manager.test.js` 1 update + 1 add (errorParam state 순서).
+
+### Codex review
+- **Round 1**: BLOCKER — 4 BLOCKER + 2 REVISE + 1 NIT
+  - errorParam polling 안 됨 / in_progress 노출 / refresh 가 fresh 면 no-op / PUBLIC_ORIGIN_* 412 누락 / postMessage '*' fallback / disconnect mutex 누락 / popup auto-close 시간 불일치
+- **Round 2**: APPROVE — 7건 모두 닫힘. mutex 순서 (Slack → wm writeLock) 일관성 검증됨.
+
+### 견적 vs 실제
+- 견적 1.5d, 실제 ~0.7d (round 2 만에 수렴, 7 issues closed).

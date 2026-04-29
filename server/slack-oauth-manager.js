@@ -275,8 +275,13 @@ export class SlackOAuthManager {
   getInstallStatus(installId) {
     const entry = this._installPending.get(installId);
     if (!entry) return { status: 'unknown' };
+    // Phase 12-5 (Codex R1 BLOCKER 2): plan §4.3 contract is
+    // pending|completed|failed only. The internal 'in_progress' marker
+    // (set when callback enters processing) collapses to 'pending' for
+    // external consumers so the UI polling state machine stays simple.
+    const externalStatus = entry.status === 'in_progress' ? 'pending' : entry.status;
     return {
-      status: entry.status,
+      status: externalStatus,
       workspaceId: entry.workspaceId || null,
       error: entry.error || null,
       mode: entry.mode || null,
@@ -477,14 +482,10 @@ export class SlackOAuthManager {
    *   create-or-update + atomic save.
    */
   async completeInstall({ code, state, errorParam } = {}) {
-    if (errorParam) {
-      // Slack appended ?error=... on the redirect — short-circuit.
-      const err = new Error(describeSlackError(errorParam));
-      err.code = 'SLACK_AUTHORIZE_ERROR';
-      err.slackError = errorParam;
-      this._metric('slack_install_total', { result: 'failed' });
-      throw err;
-    }
+    // Phase 12-5 (Codex R1 BLOCKER 1): verify state FIRST so an
+    // ?error=… query still gets attributed to the installId. Without
+    // this, polling status stays 'pending' forever and the UI can't
+    // notify the user.
     const verified = await this._verifyState(state);
     if (!verified) {
       const err = new Error('state_invalid (HMAC / aud / typ / iat / exp 검증 실패)');
@@ -493,6 +494,23 @@ export class SlackOAuthManager {
       throw err;
     }
     const installId = verified.installId;
+    if (errorParam) {
+      // Slack appended ?error=… — mark the install failed before throwing
+      // so polling clients converge.
+      this._markPending(installId, { status: 'failed', error: errorParam });
+      if (this.wm.logAudit) {
+        this.wm.logAudit('slack.install_failed', null, JSON.stringify({
+          installId,
+          stage: 'authorize_redirect',
+          slackError: errorParam,
+        }));
+      }
+      const err = new Error(describeSlackError(errorParam));
+      err.code = 'SLACK_AUTHORIZE_ERROR';
+      err.slackError = errorParam;
+      this._metric('slack_install_total', { result: 'failed' });
+      throw err;
+    }
 
     // Mark pending entry for status polling. We continue even if installId
     // wasn't tracked (e.g. server restart in between) — the state HMAC is
@@ -712,11 +730,40 @@ export class SlackOAuthManager {
     return this._refreshWithMutex(workspaceId);
   }
 
-  _refreshWithMutex(workspaceId) {
-    return this._withWorkspaceMutex(workspaceId, () => this._runRefresh(workspaceId));
+  _refreshWithMutex(workspaceId, opts = {}) {
+    return this._withWorkspaceMutex(workspaceId, () => this._runRefresh(workspaceId, opts));
   }
 
-  async _runRefresh(workspaceId) {
+  /**
+   * Phase 12-5 (Codex R1 BLOCKER 3): operator-initiated force refresh.
+   * Bypasses the leeway check in ensureValidAccessToken so admin "Refresh
+   * tokens" UI/curl actually exercises the rotation endpoint, even when
+   * the current access_token still has 60+ minutes remaining. Validates
+   * preconditions (workspace exists, OAuth mode, refresh_token present)
+   * but otherwise reuses the same _runRefresh path so durable-save
+   * semantics are identical.
+   */
+  async forceRefresh(workspaceId) {
+    const ws = this.wm.getRawWorkspace(workspaceId);
+    if (!ws) {
+      const err = new Error(`workspace_not_found: ${workspaceId}`);
+      err.code = 'WORKSPACE_NOT_FOUND';
+      throw err;
+    }
+    if (ws.provider !== 'slack' || ws.authMode !== 'oauth') {
+      const err = new Error(`not_a_slack_oauth_workspace: ${workspaceId}`);
+      err.code = 'NOT_SLACK_OAUTH';
+      throw err;
+    }
+    if (!ws.slackOAuth?.tokens?.refreshToken) {
+      const err = new Error('refresh_token absent — re-authorize required');
+      err.code = 'NO_REFRESH_TOKEN';
+      throw err;
+    }
+    return this._refreshWithMutex(workspaceId, { bypassFreshCheck: true });
+  }
+
+  async _runRefresh(workspaceId, { bypassFreshCheck = false } = {}) {
     // Re-read inside lock — another caller may have already refreshed.
     const ws = this.wm.getRawWorkspace(workspaceId);
     if (!ws || !ws.slackOAuth?.tokens?.refreshToken) {
@@ -730,10 +777,15 @@ export class SlackOAuthManager {
       throw err;
     }
     const oldRefresh = ws.slackOAuth.tokens.refreshToken;
-    // If another refresh raced and already updated the token, return early.
-    const expiresAt = ws.slackOAuth.tokens.expiresAt;
-    if (expiresAt && (Date.parse(expiresAt) - Date.now()) > REFRESH_LEEWAY_MS) {
-      return ws.slackOAuth.tokens.accessToken;
+    // Phase 12-5 (Codex R1 BLOCKER 3): the bypassFreshCheck flag lets
+    // forceRefresh exercise the rotation endpoint even on a still-fresh
+    // token. Default path keeps the coalesce-after-mutex behavior so
+    // concurrent ensureValidAccessToken callers don't double-refresh.
+    if (!bypassFreshCheck) {
+      const expiresAt = ws.slackOAuth.tokens.expiresAt;
+      if (expiresAt && (Date.parse(expiresAt) - Date.now()) > REFRESH_LEEWAY_MS) {
+        return ws.slackOAuth.tokens.accessToken;
+      }
     }
 
     const app = await this.getAppCredentials();
@@ -884,10 +936,19 @@ export class SlackOAuthManager {
   }
 
   // ─── Disconnect ──────────────────────────────────────────────────────
-  async revoke(workspaceId, { revokeRefresh = true } = {}) {
+  /**
+   * Phase 12-5 (Codex R1 REVISE 6): the disconnect path holds the workspace
+   * mutex for the ENTIRE sequence — token revoke, slackOAuth strip, and
+   * (if requested) workspace deletion — so an in-flight ensureValidAccessToken
+   * (which only takes the mutex when actually refreshing) can't observe a
+   * partially-disconnected state. Callers pass `mode: 'hard-delete'` to
+   * have the workspace removed atomically, or `mode: 'keep-entry'` to
+   * strip just the slackOAuth field.
+   */
+  async revoke(workspaceId, { revokeRefresh = true, mode = 'noop' } = {}) {
     return this._withWorkspaceMutex(workspaceId, async () => {
       const ws = this.wm.getRawWorkspace(workspaceId);
-      if (!ws || !ws.slackOAuth) return { revoked: false, reason: 'no_oauth_state' };
+      if (!ws || !ws.slackOAuth) return { revoked: false, reason: 'no_oauth_state', mode };
       const accessToken = ws.slackOAuth.tokens?.accessToken;
       const refreshToken = ws.slackOAuth.tokens?.refreshToken;
       let accessRevoked = false;
@@ -914,13 +975,26 @@ export class SlackOAuthManager {
           return false;
         });
       }
+      if (mode === 'hard-delete') {
+        // Hard delete inside the same lock so no other caller can observe
+        // a workspace whose tokens were just revoked.
+        if (this.wm.deleteWorkspace) {
+          await this.wm.deleteWorkspace(workspaceId, { hard: true }).catch(() => {});
+        }
+      } else if (mode === 'keep-entry') {
+        // Strip slackOAuth from the live config so subsequent reads see
+        // an entry without OAuth state. _save persists the change.
+        if (ws.slackOAuth) delete ws.slackOAuth;
+        if (this.wm._save) await this.wm._save().catch(() => {});
+      }
       if (this.wm.logAudit) {
         this.wm.logAudit('slack.disconnect', workspaceId, JSON.stringify({
+          mode,
           accessRevoked: !!accessRevoked,
           refreshRevoked: !!refreshRevoked,
         }));
       }
-      return { revoked: true, accessRevoked: !!accessRevoked, refreshRevoked: !!refreshRevoked };
+      return { revoked: true, accessRevoked: !!accessRevoked, refreshRevoked: !!refreshRevoked, mode };
     });
   }
 

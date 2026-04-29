@@ -4,7 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars } from './auth.js';
 import { RateLimiter, getClientIp } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
-import { validateWorkspacePayload } from '../server/workspace-schema.js';
+import { validateWorkspacePayload, validateSlackAppPayload } from '../server/workspace-schema.js';
+import { describePublicOrigin, getPublicOriginOrNull, getSlackRedirectUri } from '../server/public-origin.js';
+import { describeSlackError } from '../server/slack-oauth-manager.js';
+import { escapeHtml } from '../server/html-escape.js';
+import { randomBytes } from 'node:crypto';
 
 const adminRateLimiter = new RateLimiter({ max: 10, windowMs: 60_000 });
 
@@ -22,7 +26,7 @@ const MIME_TYPES = {
 };
 
 export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extras = {}) {
-  const { usage = null, audit = null } = extras;
+  const { usage = null, audit = null, slackOAuth = null } = extras;
 
   // Phase 11 §2 — Consolidated client-rotation helper.
   //
@@ -895,6 +899,167 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // ─────────────────────────────────────────────────────────────
+      // Phase 12-5 — Slack App + OAuth install endpoints
+      // ─────────────────────────────────────────────────────────────
+
+      // GET /api/slack/app — Slack App credential view (masked)
+      if (path === '/api/slack/app' && method === 'GET') {
+        const view = wm.getSlackApp();
+        const origin = describePublicOrigin();
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            ...view,
+            publicOrigin: origin,
+            redirectUri: origin.valid ? `${origin.origin}/oauth/slack/callback` : null,
+          },
+        });
+        return;
+      }
+
+      // POST /api/slack/app — register / update Slack App credentials
+      if (path === '/api/slack/app' && method === 'POST') {
+        const body = await readBody(req);
+        const validation = validateSlackAppPayload(body);
+        if (!validation.valid) {
+          sendJson(res, 400, { ok: false, error: { code: 'VALIDATION_ERROR', message: validation.errors.join('; ') } });
+          return;
+        }
+        try {
+          const view = await wm.setSlackApp(body);
+          sendJson(res, 200, { ok: true, data: view });
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: { code: err.code || 'SLACK_APP_INVALID', message: err.message } });
+        }
+        return;
+      }
+
+      // DELETE /api/slack/app — remove credentials (force=true to override dependents)
+      if (path === '/api/slack/app' && method === 'DELETE') {
+        const force = url.searchParams.get('force') === 'true';
+        try {
+          const r = await wm.deleteSlackApp({ force });
+          sendJson(res, 200, { ok: true, data: r });
+        } catch (err) {
+          if (err.code === 'SLACK_APP_HAS_DEPENDENTS') {
+            sendJson(res, 409, {
+              ok: false,
+              error: {
+                code: err.code,
+                message: err.message,
+                dependentCount: err.dependentCount,
+              },
+            });
+          } else {
+            sendJson(res, 500, { ok: false, error: { code: 'SLACK_APP_DELETE_FAILED', message: err.message } });
+          }
+        }
+        return;
+      }
+
+      // POST /api/slack/install/start — initialize Slack OAuth install flow
+      if (path === '/api/slack/install/start' && method === 'POST') {
+        if (!slackOAuth) {
+          sendJson(res, 500, { ok: false, error: { code: 'SLACK_OAUTH_UNAVAILABLE', message: 'SlackOAuthManager not attached' } });
+          return;
+        }
+        try {
+          const body = (await readBody(req).catch(() => null)) || {};
+          const init = await slackOAuth.initializeInstall({
+            scopes: Array.isArray(body.scopes) ? body.scopes : undefined,
+            identityHint: typeof body.identityHint === 'string' ? body.identityHint : null,
+          });
+          sendJson(res, 200, { ok: true, data: init });
+        } catch (err) {
+          // Map well-known codes to friendly HTTP statuses. All
+          // PUBLIC_ORIGIN_* codes share the same 412 (precondition)
+          // bucket so admin UI can surface a single setup-required path
+          // (Codex 12-5 R1 BLOCKER 4).
+          const status = err.code === 'SLACK_APP_NOT_CONFIGURED' ? 412
+            : (err.code && err.code.startsWith('PUBLIC_ORIGIN_')) ? 412
+            : 500;
+          sendJson(res, status, { ok: false, error: { code: err.code || 'SLACK_INSTALL_START_FAILED', message: err.message } });
+        }
+        return;
+      }
+
+      // GET /api/slack/install/status?installId=...
+      if (path === '/api/slack/install/status' && method === 'GET') {
+        if (!slackOAuth) {
+          sendJson(res, 500, { ok: false, error: { code: 'SLACK_OAUTH_UNAVAILABLE' } });
+          return;
+        }
+        const installId = url.searchParams.get('installId');
+        if (!installId) {
+          sendJson(res, 400, { ok: false, error: { code: 'MISSING_INSTALL_ID' } });
+          return;
+        }
+        const status = slackOAuth.getInstallStatus(installId);
+        sendJson(res, 200, { ok: true, data: status });
+        return;
+      }
+
+      // GET /api/slack/manifest.yaml — operator-facing manifest template with
+      // BIFROST_PUBLIC_URL stamped redirect_url. Admin token already required.
+      if (path === '/api/slack/manifest.yaml' && method === 'GET') {
+        const origin = getPublicOriginOrNull();
+        if (!origin) {
+          sendJson(res, 412, { ok: false, error: { code: 'PUBLIC_ORIGIN_MISSING', message: 'BIFROST_PUBLIC_URL must be configured before downloading the manifest.' } });
+          return;
+        }
+        const yaml = renderSlackManifestYaml(`${origin}/oauth/slack/callback`);
+        res.writeHead(200, {
+          'Content-Type': 'text/yaml; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="bifrost-slack-app-manifest.yaml"',
+        });
+        res.end(yaml);
+        return;
+      }
+
+      // POST /api/workspaces/:id/slack/refresh — admin force refresh
+      // (Codex 12-5 R1 BLOCKER 3): bypass leeway check via forceRefresh
+      // so this endpoint actually exercises the Slack rotation path,
+      // not just returning the cached access token.
+      const slackRefreshMatch = path.match(/^\/api\/workspaces\/([^/]+)\/slack\/refresh$/);
+      if (slackRefreshMatch && method === 'POST') {
+        if (!slackOAuth) {
+          sendJson(res, 500, { ok: false, error: { code: 'SLACK_OAUTH_UNAVAILABLE' } });
+          return;
+        }
+        const id = decodeURIComponent(slackRefreshMatch[1]);
+        try {
+          const tok = await slackOAuth.forceRefresh(id);
+          sendJson(res, 200, { ok: true, data: { tokenPrefix: tok ? `${tok.slice(0, 12)}...` : null } });
+        } catch (err) {
+          const status = err.code === 'WORKSPACE_NOT_FOUND' ? 404 : 400;
+          sendJson(res, status, { ok: false, error: { code: err.code || 'REFRESH_FAILED', message: err.message } });
+        }
+        return;
+      }
+
+      // POST /api/workspaces/:id/slack/disconnect[?keepEntry=true]
+      // (Codex 12-5 R1 REVISE 6): mutex-held disconnect — revoke +
+      // workspace mutation happen in the same critical section so a
+      // concurrent ensureValidAccessToken can't observe a half-state.
+      const slackDisconnectMatch = path.match(/^\/api\/workspaces\/([^/]+)\/slack\/disconnect$/);
+      if (slackDisconnectMatch && method === 'POST') {
+        if (!slackOAuth) {
+          sendJson(res, 500, { ok: false, error: { code: 'SLACK_OAUTH_UNAVAILABLE' } });
+          return;
+        }
+        const id = decodeURIComponent(slackDisconnectMatch[1]);
+        const keepEntry = url.searchParams.get('keepEntry') === 'true';
+        try {
+          const mode = keepEntry ? 'keep-entry' : 'hard-delete';
+          const result = await slackOAuth.revoke(id, { mode });
+          sendJson(res, 200, { ok: true, data: { ...result, keepEntry } });
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: { code: err.code || 'DISCONNECT_FAILED', message: err.message } });
+        }
+        return;
+      }
+
       sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'API endpoint not found' } });
     } catch (err) {
       const code = err.message.includes('not found') ? 'NOT_FOUND'
@@ -905,6 +1070,141 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
       sendJson(res, status, { ok: false, error: { code, message: err.message } });
     }
   };
+}
+
+/**
+ * Phase 12-5 — Slack OAuth callback handler. Used by server/index.js to
+ * service GET /oauth/slack/callback. Renders an HTML page that
+ * postMessages the result to the popup opener (strict targetOrigin) and
+ * also drives the install-status polling fallback by setting the
+ * SlackOAuthManager._installPending entry.
+ */
+export async function handleSlackOAuthCallback(req, res, url, { slackOAuth, sse, tr }) {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const errorParam = url.searchParams.get('error');
+  const nonce = randomBytes(16).toString('base64');
+  const origin = getPublicOriginOrNull();
+
+  function renderResultPage({ ok, title, message, payload }) {
+    const safeTitle = escapeHtml(title);
+    const safeMessage = escapeHtml(message);
+    const safePayload = JSON.stringify(payload).replace(/</g, '\\u003c');
+    // Phase 12-5 (Codex R1 REVISE 5): only postMessage when we have a
+    // canonical origin to target. Wildcard '*' would let any frame
+    // observe install state — explicitly skip the call when origin is
+    // missing so the polling fallback (GET /api/slack/install/status)
+    // is the only completion path.
+    const safeTargetOrigin = origin ? JSON.stringify(origin) : 'null';
+    return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${safeTitle}</title>
+<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+.card{background:#1e293b;border-radius:12px;padding:2rem 2.5rem;max-width:480px;text-align:center}
+h1{margin:0 0 .5rem;color:${ok ? '#16a34a' : '#dc2626'};font-size:1.5rem}
+p{margin:.5rem 0;color:#94a3b8;line-height:1.6}
+.hint{margin-top:1rem;font-size:.875rem;color:#64748b}</style></head>
+<body><div class="card"><h1>${safeTitle}</h1><p>${safeMessage}</p>
+<p class="hint">이 창은 자동으로 닫힙니다.</p></div>
+<script nonce="${nonce}">
+(function(){
+  var payload = ${safePayload};
+  var target = ${safeTargetOrigin};
+  try {
+    if (target && window.opener) {
+      window.opener.postMessage({ type: 'bifrost-slack-install', ...payload }, target);
+    }
+  } catch (e) {}
+  // Auto-close after 4 seconds (Codex 12-5 R1 NIT).
+  setTimeout(function(){ try { window.close(); } catch (e) {} }, 4000);
+})();
+</script></body></html>`;
+  }
+
+  function cspHeaders() {
+    return {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'`,
+    };
+  }
+
+  if (!slackOAuth) {
+    res.writeHead(500, cspHeaders());
+    res.end(renderResultPage({
+      ok: false,
+      title: 'Slack 연결 실패',
+      message: 'SlackOAuthManager 가 attach 되지 않았습니다 — server 가 정상 부팅됐는지 확인.',
+      payload: { status: 'failed', error: 'SLACK_OAUTH_UNAVAILABLE' },
+    }));
+    return;
+  }
+
+  try {
+    const result = await slackOAuth.completeInstall({ code, state, errorParam });
+    if (tr?.bumpVersion) tr.bumpVersion();
+    if (sse?.broadcastNotification) sse.broadcastNotification('notifications/tools/list_changed');
+    res.writeHead(200, cspHeaders());
+    res.end(renderResultPage({
+      ok: true,
+      title: '✓ Slack 연결 완료',
+      message: `${result.team?.name || result.team?.id} 워크스페이스 연결 (${result.mode === 'create' ? '신규' : '재인증'})`,
+      payload: {
+        status: 'completed',
+        installId: result.installId,
+        workspaceId: result.workspaceId,
+        mode: result.mode,
+        teamId: result.team?.id,
+        teamName: result.team?.name,
+      },
+    }));
+  } catch (err) {
+    res.writeHead(400, cspHeaders());
+    res.end(renderResultPage({
+      ok: false,
+      title: 'Slack 연결 실패',
+      message: err.code === 'STATE_INVALID' ? 'state 검증 실패 — 다시 시도해주세요.'
+        : err.code === 'SLACK_AUTHORIZE_ERROR' ? describeSlackError(err.slackError)
+        : err.code === 'SLACK_ENTERPRISE_INSTALL_REJECTED' ? describeSlackError('org_login_required')
+        : err.code === 'PUBLIC_ORIGIN_MISSING' ? 'BIFROST_PUBLIC_URL 환경변수가 설정되어 있지 않습니다.'
+        : (err.message || 'Slack 인증 도중 알 수 없는 오류가 발생했습니다.'),
+      payload: {
+        status: 'failed',
+        error: err.code || 'SLACK_INSTALL_FAILED',
+        slackError: err.slackError || null,
+      },
+    }));
+  }
+}
+
+function renderSlackManifestYaml(redirectUrl) {
+  const escaped = redirectUrl.replace(/"/g, '\\"');
+  // Phase 12-5 — minimal manifest. The full template ships with 12-8.
+  // Inlining a copy here keeps the download endpoint self-contained for
+  // operators who haven't checked out the templates dir.
+  return `display_information:
+  name: Bifrost
+  description: MCP Bifrost — multi-workspace MCP edge
+  background_color: "#1d1d1f"
+oauth_config:
+  redirect_urls:
+    - "${escaped}"
+  pkce_enabled: false
+  scopes:
+    user:
+      - search:read
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - users:read
+      - users:read.email
+settings:
+  token_rotation_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+`;
 }
 
 function _checkExposure(req, res) {

@@ -372,12 +372,31 @@ test('completeInstall: state_invalid before mutex (no entry created)', async () 
   }
 });
 
-test('completeInstall: errorParam short-circuits with mapped message', async () => {
+test('completeInstall: errorParam (with valid state) flips status to failed (Codex 12-5 R1 BLOCKER 1)', async () => {
+  const { wm, mgr, dir } = await makeManager({ installResponse: validResponse() });
+  try {
+    const start = await mgr.initializeInstall({});
+    const st = await makeStateFor(mgr, start.installId);
+    await assert.rejects(
+      () => mgr.completeInstall({ errorParam: 'access_denied', state: st }),
+      err => err.code === 'SLACK_AUTHORIZE_ERROR' && err.slackError === 'access_denied'
+    );
+    // Polling status now reflects the failure.
+    const status = mgr.getInstallStatus(start.installId);
+    assert.equal(status.status, 'failed');
+    assert.equal(status.error, 'access_denied');
+  } finally {
+    await wm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('completeInstall: errorParam with bad state rejects as STATE_INVALID (precedence)', async () => {
   const { wm, mgr, dir } = await makeManager({ installResponse: validResponse() });
   try {
     await assert.rejects(
-      () => mgr.completeInstall({ errorParam: 'access_denied', state: 'whatever' }),
-      err => err.code === 'SLACK_AUTHORIZE_ERROR' && err.slackError === 'access_denied'
+      () => mgr.completeInstall({ errorParam: 'access_denied', state: 'bogus.state' }),
+      err => err.code === 'STATE_INVALID'
     );
   } finally {
     await wm.close();
