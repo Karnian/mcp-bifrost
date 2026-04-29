@@ -43,3 +43,27 @@
 
 ### 견적 vs 실제
 - 견적 0.5d, 실제 ~0.3d (round 2 만에 수렴).
+
+---
+
+## 12-3 — `SlackOAuthManager` 코어 (2026-04-30)
+
+### 산출물
+- `server/slack-oauth-manager.js` (신규, 약 600 라인) — install / token exchange / refresh / state HMAC / mutex (workspace + teamInstall) / parseTokenResponse / parseRefreshResponse / Slack error mapping / revoke / purgeStaleInstalls / aliasForTeam.
+- `server/workspace-manager.js` — `updateSlackOAuthAtomic(workspaceId, mergeFn)` 신규 (clone-then-swap atomic save). `_saveSnapshot(snapshot)` + `_saveImpl(getConfig)` helpers (R10 atomic 보장).
+- `tests/phase12-3-slack-oauth-manager.test.js` (신규, 48 건) — state HMAC 9, parseTokenResponse 9, parseRefreshResponse 5, completeInstall 9, ensureValidAccessToken 5, refresh paths 5, atomic save 3 (disk fail / in-flight reader / concurrent mutation 보존), markActionNeeded 1, revoke 1, aliasForTeam / describeSlackError / purgeStaleInstalls 3.
+
+### Codex review
+- **Round 1**: REVISE — 3 BLOCKER + 3 REVISE
+  - [BLOCKER] Durable save 원자성 미구현
+  - [BLOCKER] Refresh response shape (top-level vs authed_user nested)
+  - [BLOCKER] half-state (refresh 만 있는 케이스) 통과
+  - [REVISE] state schema 약함 / parse-failure cleanup 일부 누락 / token_type missing 통과
+- **Round 2**: REVISE — 1 BLOCKER (R10 atomic 의 `this.config` 즉시 swap → in-flight 노출)
+  - → `_saveSnapshot` 분리 + swap-after-disk-write 적용
+- **Round 3**: REVISE — 1 BLOCKER (whole-config swap 이 concurrent mutation 덮어씀)
+  - → in-place slackOAuth commit (다른 필드는 건드리지 않음)
+- **Round 4**: APPROVE — 모든 invariant 검증됨. `deleteWorkspace` 동시 실행은 R10 범위 밖으로 합의.
+
+### 견적 vs 실제
+- 견적 3d, 실제 ~1.5d (round 4 만에 수렴, 7 issues closed).

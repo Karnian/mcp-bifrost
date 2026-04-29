@@ -371,7 +371,26 @@ export class WorkspaceManager {
   }
 
   async _save() {
+    return this._saveImpl(() => this.config);
+  }
+
+  /**
+   * Phase 12-3 (Codex R2 BLOCKER): write a *passed* snapshot to disk
+   * without mutating this.config. Used by updateSlackOAuthAtomic to
+   * achieve true clone-then-swap — the in-memory swap only happens if
+   * _saveSnapshot resolves successfully. Concurrent reads during the
+   * write window observe the OLD token; concurrent writes go through
+   * the same _writeLock chain so they sequence after this snapshot
+   * write completes (the swap-or-rollback in updateSlackOAuthAtomic
+   * still acquires this.config exclusively).
+   */
+  async _saveSnapshot(snapshot) {
     if (!this._loaded) return; // skip disk I/O if not loaded from file
+    return this._saveImpl(() => snapshot);
+  }
+
+  _saveImpl(getConfig) {
+    if (!this._loaded) return Promise.resolve();
     this._writeLock = this._writeLock.then(async () => {
       this._saving = true;
       try {
@@ -379,7 +398,7 @@ export class WorkspaceManager {
           await copyFile(this._configPath, this._backupPath);
           await this._chmod0600(this._backupPath);
         }
-        await writeFile(this._tmpPath, JSON.stringify(this.config, null, 2), 'utf-8');
+        await writeFile(this._tmpPath, JSON.stringify(getConfig(), null, 2), 'utf-8');
         await this._chmod0600(this._tmpPath);
         await rename(this._tmpPath, this._configPath);
         await this._chmod0600(this._configPath);
@@ -462,6 +481,67 @@ export class WorkspaceManager {
       createdAt: raw.createdAt,
       updatedAt: raw.updatedAt,
     };
+  }
+
+  /**
+   * Phase 12-3 (Codex R1 BLOCKER): atomic Slack OAuth token rotation via
+   * clone-then-swap. Required by SlackOAuthManager._runRefresh so a save
+   * failure leaves both disk AND in-memory state on the *previous* token,
+   * never the partial new one. Without this helper the standard
+   * updateWorkspace mutates ws.slackOAuth and re-creates the provider
+   * BEFORE _save runs — a writeFile failure leaves the in-memory token
+   * desync from disk and the subsequent action_needed flip can't undo it.
+   *
+   * Contract:
+   *   1) read raw ws (must be slack/oauth)
+   *   2) build a *new* slackOAuth object using mergeFn(currentSlackOAuth)
+   *   3) build a snapshot of `this.config` with that object swapped in
+   *   4) write the snapshot to tmp + atomic rename via _save (clone path)
+   *   5) on success, swap this.config = snapshot, re-create provider
+   *   6) on failure, throw — this.config and provider are untouched
+   *
+   * The snapshot is a structuredClone of this.config so concurrent mutations
+   * to other workspaces during the disk write don't bleed into the swap.
+   * (Phase 11 _save uses _writeLock to serialize disk I/O, so by the time
+   * we write our snapshot it represents a coherent moment-in-time view of
+   * other workspaces; the lock is FIFO so a concurrent updateWorkspace will
+   * sequence after us.)
+   */
+  async updateSlackOAuthAtomic(workspaceId, mergeFn) {
+    const idx = this.config.workspaces.findIndex(w => w.id === workspaceId);
+    if (idx === -1) throw new Error(`Workspace '${workspaceId}' not found`);
+    const ws = this.config.workspaces[idx];
+    if (ws.provider !== 'slack' || ws.authMode !== 'oauth') {
+      throw new Error(`Workspace '${workspaceId}' is not a Slack OAuth workspace`);
+    }
+    if (typeof mergeFn !== 'function') throw new Error('mergeFn must be a function');
+    const nextSlackOAuth = mergeFn(ws.slackOAuth ? structuredClone(ws.slackOAuth) : null);
+    if (!nextSlackOAuth) throw new Error('mergeFn must return the next slackOAuth payload');
+
+    // Phase 12-3 (Codex R3 BLOCKER): build a snapshot for the disk write
+    // ONLY — never publish via wholesale this.config replacement.
+    // Replacement would discard any concurrent updateWorkspace mutation
+    // (e.g. displayName change) that happened during the async save
+    // window. Instead, after the disk write succeeds, mutate just the
+    // slackOAuth field in place. _writeLock serializes disk I/O, so a
+    // queued _save from updateWorkspace will sequence after us and
+    // re-write disk with the merged state.
+    const snapshot = structuredClone(this.config);
+    snapshot.workspaces[idx].slackOAuth = nextSlackOAuth;
+
+    await this._saveSnapshot(snapshot);
+
+    // Disk write succeeded — commit the slackOAuth field IN PLACE so
+    // concurrent mutations to other fields (displayName, enabled, etc.)
+    // are preserved. structuredClone the next payload so callers can't
+    // hold a reference and mutate our internal state through aliasing.
+    this.config.workspaces[idx].slackOAuth = structuredClone(nextSlackOAuth);
+
+    // Re-create provider — capability cache (etc.) should refresh on
+    // rotation. _createProvider is sync apart from internal warm-up
+    // calls that handle their own errors.
+    this._createProvider(this.config.workspaces[idx]);
+    return this.config.workspaces[idx];
   }
 
   async setSlackApp({ clientId, clientSecret, tokenRotationEnabled }) {
