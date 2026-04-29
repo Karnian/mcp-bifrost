@@ -20,6 +20,10 @@ config/*.tmp.json
 #  - .ao/artifacts/*   Codex / Gemini ask-skill outputs (review prompts + responses)
 .ao/
 
+## Internal handoff / scratchpad — kept locally for the maintainer,
+##  intentionally not part of the public repo (Codex OSS-readiness review).
+docs/NEXT_SESSION.md
+
 ## Editor / OS
 .DS_Store
 *.swp

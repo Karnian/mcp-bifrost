@@ -103,4 +103,4 @@ scripts/
   - 11-1 mutex acquisition-order instrumentation · 11-2 rotate-client helper consolidation · 11-3 flat-field mirror 제거 · 11-4 `OAuthMetrics` recorder · 11-5 refresh `AbortController` · 11-6 cardinality cap + prune · 11-7 cache-key `ws::`/`global::` schema · 11-8 watcher atomic-replace · 11-9 Admin wizard static-client UX · 11-10 cleanup batch
 - **운영 마이그레이션** (2026-04-23) — `scripts/migrate-oauth-clients.mjs --apply` 로컬 baseline 확정 (변경 0, backup 생성).
 
-다음 세션 시작 시 `docs/NEXT_SESSION.md` 참고.
+> Maintainer scratchpads (`docs/NEXT_SESSION.md`) are gitignored.

@@ -10,7 +10,7 @@
 > - Codex 리뷰 11 rounds, 17 blockers 전부 close
 > - 테스트: 327 / pass 325 / fail 0 / skip 2 (Phase 10a 신규 47건; Phase 11 까지 누적은 428 / 426 / 2 skip)
 > - 주요 커밋: `535ddaf` (기반) → `f038134` (R10) → `1fbd1ff` (R11 APPROVE)
-> - **Phase 11 후속 (완료)** — Phase 10a 수렴 + 관측성 + hardening 10 sub-phases. 자세한 내용: [`PHASE11_SELFREVIEW_LOG.md`](PHASE11_SELFREVIEW_LOG.md). 다음 작업 후보: [`NEXT_SESSION.md`](NEXT_SESSION.md)
+> - **Phase 11 후속 (완료)** — Phase 10a 수렴 + 관측성 + hardening 10 sub-phases. 자세한 내용: [`PHASE11_SELFREVIEW_LOG.md`](PHASE11_SELFREVIEW_LOG.md)
 > - **운영 마이그레이션** — `scripts/migrate-oauth-clients.mjs` 사용법은 [`USAGE.md` §12.2](USAGE.md#122-기존-인스턴스-마이그레이션) 참고
 
 ---

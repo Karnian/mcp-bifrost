@@ -1,5 +1,14 @@
 # MCP Bifrost
 
+> **Multi-workspace MCP bridge.** Aggregate any number of MCP servers
+> (stdio / Streamable HTTP / SSE) behind one endpoint, register the same
+> upstream service multiple times with different tokens, and expose them
+> to claude.ai / Claude Code / Palantir as namespaced tools
+> (`github_personal__create_issue`). OAuth 2.0 with workspace-scoped DCR
+> isolation, multi-tenant MCP tokens with profiles, and a built-in admin
+> SPA. English docs are limited — Korean docs and the REST/MCP route
+> names below are the current reference.
+
 Multi-workspace MCP bridge — 임의의 MCP 서버(stdio/HTTP/SSE)를 단일 엔드포인트로 통합하는 범용 허브.
 
 ```

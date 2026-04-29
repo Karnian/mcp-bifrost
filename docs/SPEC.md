@@ -644,7 +644,7 @@ npm run tunnel
 
 ## Roadmap
 
-> **현재 상태 (2026-04-23)**: Phase 1~4 의 대부분 + Phase 5~11 완료. 세부 이력은 `docs/PHASE{6,7,8,9,10a,11}_*.md` 참조. 다음 작업 후보는 `docs/NEXT_SESSION.md`.
+> **현재 상태 (2026-04-23)**: Phase 1~4 의 대부분 + Phase 5~11 완료. 세부 이력은 `docs/PHASE{6,7,8,9,10a,11}_*.md` 참조.
 >
 > **완료된 Phase 요약**:
 > - Phase 6 — OAuth 2.0 remote MCP (PKCE, DCR, refresh rotation)

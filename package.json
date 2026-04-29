@@ -30,7 +30,7 @@
     "url": "https://github.com/Karnian/mcp-bifrost/issues"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
