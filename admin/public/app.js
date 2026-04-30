@@ -575,15 +575,22 @@ function renderTemplates(filter = '') {
     const q = filter.toLowerCase();
     return t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.id.toLowerCase().includes(q);
   });
-  grid.innerHTML = list.map(t => `
-    <div class="template-card ${t.legacy ? 'legacy' : ''}" data-id="${t.id}">
+  grid.innerHTML = list.map(t => {
+    const classes = ['template-card'];
+    if (t.legacy) classes.push('legacy');
+    if (t.recommended) classes.push('recommended');
+    const recommendedBadge = t.recommended
+      ? `<span class="tpl-badge tpl-badge-recommended">추천</span>` : '';
+    return `
+    <div class="${classes.join(' ')}" data-id="${t.id}">
       <div class="tpl-head">
         <span class="tpl-icon">${t.icon}</span>
         <span class="tpl-name">${esc(t.name)}</span>
+        ${recommendedBadge}
       </div>
       <div class="tpl-desc">${esc(t.description)}</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
   grid.querySelectorAll('.template-card').forEach(c => {
     c.addEventListener('click', () => selectTemplate(c.dataset.id));
   });
@@ -592,9 +599,88 @@ function renderTemplates(filter = '') {
 $('#wiz-search').addEventListener('input', (e) => renderTemplates(e.target.value));
 
 function selectTemplate(id) {
-  wizardState.template = TEMPLATES.find(t => t.id === id);
+  const tpl = TEMPLATES.find(t => t.id === id);
+  if (!tpl) return;
+  // Phase 12-6 (wizard 통합 후속): Slack OAuth 는 wizard step 2 가 아니라
+  // showScreen('slack') 으로 SPA Slack 화면으로 hand-off. 그쪽이 install flow
+  // 의 정식 진입점이며 App credential 미등록 / PUBLIC_ORIGIN 미설정 등
+  // prerequisite 도 한 곳에서 안내한다. (URL deep-link 아님 — SPA 라우터 없음.)
+  if (tpl.flow === 'slack-oauth') {
+    openSlackInstallFromWizard();
+    return;
+  }
+  wizardState.template = tpl;
   wizardState.customTransport = null;
   showStep2ForTemplate();
+}
+
+async function openSlackInstallFromWizard() {
+  // Wizard hand-off: switch the SPA to the Slack screen and run the
+  // install flow there. (Note: this is a SPA screen swap via showScreen,
+  // not a URL deep-link — the SPA has no router. Functionally identical
+  // to clicking the topbar "Slack" button.) Three prerequisite states:
+  //   1) App credential (clientId + hasSecret) + valid PUBLIC_ORIGIN
+  //      → auto-fire the install popup
+  //   2) PUBLIC_ORIGIN missing/invalid → banner: operator action
+  //   3) clientId or clientSecret missing → banner + focus credential form
+  showScreen('slack');
+  await loadSlack();
+  let banner = '';
+  let action = null;
+  try {
+    const res = await api('GET', '/api/slack/app');
+    if (res.ok) {
+      const d = res.data || {};
+      if (!d.publicOrigin?.valid) {
+        banner = `<strong>BIFROST_PUBLIC_URL 설정이 필요합니다.</strong>${d.publicOrigin?.message ? ` (${esc(d.publicOrigin.message)})` : ''} 운영자가 환경변수를 설정 후 서버 재기동 시 install 가능합니다.`;
+      } else if (!d.clientId || !d.hasSecret) {
+        // Codex R1 REVISE 1: server demands BOTH clientId AND clientSecret —
+        // env override may set only one half. Check both, not just hasSecret.
+        const missing = [];
+        if (!d.clientId) missing.push('client_id');
+        if (!d.hasSecret) missing.push('client_secret');
+        banner = `<strong>먼저 Slack App 의 ${missing.join(' / ')} 를 등록하세요.</strong> 등록 후 자동으로 install 단계로 진입합니다.`;
+        action = () => $('#slack-client-id')?.focus();
+      } else {
+        // All set — auto-fire the install popup.
+        action = () => $('#btn-slack-install')?.click();
+      }
+    }
+  } catch { /* best-effort */ }
+  if (banner) {
+    showSlackBanner(banner);
+  }
+  if (action) {
+    // Yield once so loadSlack's renders settle before we trigger the click.
+    setTimeout(() => { try { action(); } catch {} }, 50);
+  }
+}
+
+let _slackBannerDismissTimer = null;
+function showSlackBanner(html) {
+  const content = $('#slack-content');
+  if (!content) return;
+  // Single ephemeral banner — replace any previous one to avoid stacks.
+  let banner = $('#slack-wizard-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'slack-wizard-banner';
+    banner.className = 'security-banner';
+    banner.style.cssText = 'margin:0 0 12px;padding:10px 14px;border-radius:8px;background:#1e3a8a;color:#dbeafe;border:1px solid #3b82f6;font-size:13px';
+    content.insertBefore(banner, content.firstChild);
+  }
+  banner.innerHTML = html;
+  // Codex R1 NIT: cancel any prior dismiss timer so the new message gets
+  // the full 12s window — without this, a re-shown banner could be
+  // dismissed by the previous banner's expiring timer.
+  if (_slackBannerDismissTimer) {
+    clearTimeout(_slackBannerDismissTimer);
+    _slackBannerDismissTimer = null;
+  }
+  _slackBannerDismissTimer = setTimeout(() => {
+    try { banner.remove(); } catch {}
+    _slackBannerDismissTimer = null;
+  }, 12_000);
 }
 
 function showStep2ForTemplate() {

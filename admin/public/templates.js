@@ -159,6 +159,24 @@ export const TEMPLATES = [
     ],
   },
 
+  // --- Native (Phase 12 OAuth) ---
+  // Phase 12-6 (wizard 통합): Slack OAuth flow 는 `flow: 'slack-oauth'`
+  // 플래그로 wizard step 2 를 우회하고 SPA 의 Slack 화면으로 hand-off
+  // (showScreen 기반 — SPA 라우터 없음). Slack App credential 등록 +
+  // popup install 은 그쪽에서 처리.
+  {
+    id: 'slack-oauth',
+    name: 'Slack (OAuth)',
+    icon: 'S',
+    category: 'communication',
+    description: 'Slack OAuth 2.0 install — 다수 외부 workspace 지원 (권장)',
+    recommended: true,
+    flow: 'slack-oauth',
+    kind: 'native',
+    provider: 'slack',
+    fields: [],
+  },
+
   // --- Native (legacy) providers ---
   {
     id: 'notion-native',

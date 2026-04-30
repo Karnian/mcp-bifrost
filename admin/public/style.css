@@ -430,3 +430,15 @@ body {
   border-radius: 6px; padding: 8px 10px; font-size: 14px;
 }
 .form-grid input:focus { outline: none; border-color: var(--green); }
+
+/* Phase 12-6 (wizard 통합) — recommended badge + 강조 테두리 */
+.template-card.recommended { border-color: var(--green); }
+.template-card .tpl-badge {
+  display: inline-block; margin-left: auto;
+  padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+}
+.template-card .tpl-badge-recommended {
+  background: rgba(22, 163, 74, 0.18); color: var(--green);
+  border: 1px solid rgba(22, 163, 74, 0.45);
+}

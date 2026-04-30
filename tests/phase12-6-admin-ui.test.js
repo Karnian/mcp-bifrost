@@ -83,6 +83,40 @@ test('app.js: install polling guards against ticket id swap (Codex R2)', async (
   assert.match(js, /if \(slackInstallId\) {[\s\S]*?endSlackInstall\(\)/);
 });
 
+test('templates.js: slack-oauth template exists with flow + recommended flag (wizard 통합)', async () => {
+  const tpl = await readFile(join(PUBLIC_DIR, 'templates.js'), 'utf-8');
+  assert.match(tpl, /id:\s*'slack-oauth'/);
+  assert.match(tpl, /flow:\s*'slack-oauth'/);
+  assert.match(tpl, /recommended:\s*true/);
+  // Legacy slack-native still present (opt-in, not removed)
+  assert.match(tpl, /id:\s*'slack-native'/);
+});
+
+test('app.js: selectTemplate branches to Slack screen for slack-oauth flow (wizard 통합)', async () => {
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  // selectTemplate must pivot, not fall through to step 2
+  assert.match(js, /tpl\.flow === 'slack-oauth'/);
+  assert.match(js, /openSlackInstallFromWizard/);
+  // Prereq inspection covers PUBLIC_ORIGIN + BOTH clientId and hasSecret
+  // (Codex R1 REVISE 1 — env override may set only half of the credential
+  // pair; server still rejects with SLACK_APP_NOT_CONFIGURED).
+  assert.match(js, /publicOrigin\?\.valid/);
+  assert.match(js, /!d\.clientId \|\| !d\.hasSecret/);
+  assert.match(js, /btn-slack-install/);
+});
+
+test('app.js: showSlackBanner clears prior dismiss timer on re-show (Codex R1 NIT)', async () => {
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  assert.match(js, /_slackBannerDismissTimer/);
+  assert.match(js, /clearTimeout\(_slackBannerDismissTimer\)/);
+});
+
+test('app.js: renderTemplates emits "추천" badge for recommended flag', async () => {
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  assert.match(js, /tpl-badge-recommended/);
+  assert.match(js, /추천</);
+});
+
 test('app.js: install-start sequence guard prevents stale response overwrite (Codex R3)', async () => {
   const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
   // Monotonic sequence
