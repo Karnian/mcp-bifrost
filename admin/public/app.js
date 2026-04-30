@@ -1279,10 +1279,9 @@ let slackInstallPopup = null; // Phase 12-6 (Codex R1 REVISE 3): module-scope so
 // later install's state.
 let slackInstallStartSeq = 0;
 
-$('#btn-nav-slack').addEventListener('click', async () => {
-  showScreen('slack');
-  await loadSlack();
-});
+// Phase 12-6 후속 (wizard 통합): topbar 의 단독 Slack 버튼은 제거됨 —
+// wizard 의 "Slack (OAuth)" 카드가 정식 진입점. 기존 #btn-back-from-slack
+// 만 남아있어 SPA 의 Back 동작을 보존한다.
 $('#btn-back-from-slack').addEventListener('click', async () => await enterDashboard());
 
 async function loadSlack() {
@@ -1355,13 +1354,19 @@ function renderSlackAppForm(data) {
   $('#slack-client-id').value = data.clientId || '';
   $('#slack-rotation').checked = data.tokenRotationEnabled !== false;
   const src = data.sources || {};
+  const out = $('#slack-app-source');
+  // 미설정 케이스는 외로운 "미설정" badge 대신 form 안에 안내 hint 형태로
+  // (스크린샷에서 어색했던 부분). 등록 후엔 source 별 badge 가 표시됨.
+  if (src.clientId === 'none' && src.clientSecret === 'none') {
+    out.innerHTML = '<small style="color:#94a3b8">아직 등록되지 않았습니다 — 아래 폼을 작성한 뒤 저장하세요.</small>';
+    return;
+  }
   const badges = [];
-  if (src.clientId === 'env') badges.push('<span class="badge badge-warn">Client ID: env override</span>');
-  if (src.clientSecret === 'env') badges.push('<span class="badge badge-warn">Client Secret: env override (file ignored)</span>');
-  if (src.clientId === 'file') badges.push('<span class="badge badge-ok">Client ID: file</span>');
-  if (src.clientSecret === 'file') badges.push('<span class="badge badge-ok">Client Secret: file</span>');
-  if (src.clientId === 'none' && src.clientSecret === 'none') badges.push('<span class="badge">미설정</span>');
-  $('#slack-app-source').innerHTML = badges.join(' ');
+  if (src.clientId === 'env') badges.push('<span class="badge badge-warn">Client ID · env override</span>');
+  if (src.clientSecret === 'env') badges.push('<span class="badge badge-warn">Client Secret · env override (file ignored)</span>');
+  if (src.clientId === 'file') badges.push('<span class="badge badge-ok">Client ID · file</span>');
+  if (src.clientSecret === 'file') badges.push('<span class="badge badge-ok">Client Secret · file</span>');
+  out.innerHTML = badges.join(' ');
 }
 
 $('#slack-origin-form').addEventListener('submit', async (e) => {

@@ -3,7 +3,9 @@
  *
  * The Admin UI is a vanilla SPA — full E2E browser tests live in 12-10.
  * Here we cover what we can verify without a DOM:
- *   - /admin/ index.html ships the new Slack nav button + screen
+ *   - /admin/ index.html ships the Slack screen markup (topbar entry was
+ *     removed during the wizard 통합 follow-up — wizard's "Slack (OAuth)"
+ *     card is the canonical entry)
  *   - app.js wires the postMessage listener with origin validation
  *   - app.js exposes the polling loop logic for installs
  *   - manifest download path requires admin token (covered in 12-5)
@@ -23,9 +25,12 @@ import { startServer } from '../server/index.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'admin', 'public');
 
-test('index.html: includes Slack nav button + screen markup', async () => {
+test('index.html: includes Slack screen + key controls (topbar entry removed — wizard 통합)', async () => {
+  // wizard 통합 후 topbar 의 단독 Slack 버튼은 제거됨. screen 자체와 install /
+  // manifest / credential 폼은 그대로 유지 — wizard 의 'Slack (OAuth)' 카드가
+  // showScreen('slack') 으로 진입.
   const html = await readFile(join(PUBLIC_DIR, 'index.html'), 'utf-8');
-  assert.match(html, /id="btn-nav-slack"/);
+  assert.ok(!/id="btn-nav-slack"/.test(html), 'topbar Slack button must be gone');
   assert.match(html, /id="slack-screen"/);
   assert.match(html, /id="btn-slack-install"/);
   assert.match(html, /id="btn-slack-manifest"/);
@@ -189,7 +194,7 @@ test('SPA admin route still serves index.html through admin static path', async 
     const r = await fetch(`http://127.0.0.1:${srv.port}/admin/`);
     assert.equal(r.status, 200);
     const html = await r.text();
-    assert.match(html, /id="btn-nav-slack"/);
+    assert.ok(!/id="btn-nav-slack"/.test(html));
     assert.match(html, /id="slack-screen"/);
   } finally {
     await srv.stop();

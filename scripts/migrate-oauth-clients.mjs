@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, '..', 'config', 'workspaces.json');
-const PENDING_PATH = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
+const DEFAULT_PENDING_PATH = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
 
 function backupPathFor(configPath) {
   // Phase 10a (Codex R2 cleanup): backup file must be a sibling of the actual
@@ -40,14 +40,18 @@ function backupPathFor(configPath) {
 }
 
 function parseArgs(argv) {
-  const args = { dryRun: true, apply: false, restore: false, configPath: CONFIG_PATH };
+  // 2026-05-01 사고 후속 — `--pending=<path>` 옵션 추가. 기존엔 PENDING path
+  // 가 하드코딩이라 테스트가 실제 .ao/state/oauth-pending.json 을 save+restore
+  // 하던 sticky 위험이 있었음. sandboxed test 가 pending 도 tmp 로 가도록.
+  const args = { dryRun: true, apply: false, restore: false, configPath: CONFIG_PATH, pendingPath: DEFAULT_PENDING_PATH };
   for (const a of argv.slice(2)) {
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--apply') { args.apply = true; args.dryRun = false; }
     else if (a === '--restore') { args.restore = true; args.dryRun = false; }
     else if (a.startsWith('--config=')) args.configPath = a.slice('--config='.length);
+    else if (a.startsWith('--pending=')) args.pendingPath = a.slice('--pending='.length);
     else if (a === '--help' || a === '-h') {
-      console.log('Usage: node scripts/migrate-oauth-clients.mjs [--dry-run|--apply|--restore] [--config=path]');
+      console.log('Usage: node scripts/migrate-oauth-clients.mjs [--dry-run|--apply|--restore] [--config=path] [--pending=path]');
       process.exit(0);
     }
   }
@@ -153,7 +157,7 @@ function applyMigration(config) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const { configPath, backupPath } = args;
+  const { configPath, backupPath, pendingPath } = args;
   if (args.restore) {
     if (!existsSync(backupPath)) {
       console.error(`[migrate-oauth-clients] backup not found: ${backupPath}`);
@@ -193,9 +197,9 @@ async function main() {
   // The OAuthManager rotation check also protects against this at runtime
   // (null-inclusive), but purging here is defense-in-depth.
   let pendingPurged = 0;
-  if (disambiguated.length > 0 && existsSync(PENDING_PATH)) {
+  if (disambiguated.length > 0 && existsSync(pendingPath)) {
     try {
-      const pendingRaw = await readFile(PENDING_PATH, 'utf-8');
+      const pendingRaw = await readFile(pendingPath, 'utf-8');
       const pending = JSON.parse(pendingRaw);
       const disambiguatedIds = new Set(disambiguated.map(d => d.id));
       for (const [state, entry] of Object.entries(pending)) {
@@ -205,9 +209,9 @@ async function main() {
         }
       }
       if (pendingPurged > 0) {
-        await writeFile(PENDING_PATH, JSON.stringify(pending, null, 2), 'utf-8');
+        await writeFile(pendingPath, JSON.stringify(pending, null, 2), 'utf-8');
         if (process.platform !== 'win32') {
-          try { await chmod(PENDING_PATH, 0o600); } catch {}
+          try { await chmod(pendingPath, 0o600); } catch {}
         }
       }
     } catch { /* best-effort — the rotation check at runtime still guards */ }

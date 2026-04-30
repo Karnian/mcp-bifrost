@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, stat, copyFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -15,8 +15,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(__dirname, '..', 'scripts', 'migrate-oauth-clients.mjs');
-const REPO_CONFIG_PATH = join(__dirname, '..', 'config', 'workspaces.json');
-const REPO_BACKUP_PATH = join(__dirname, '..', 'config', 'workspaces.json.pre-10a.bak');
+
+// 2026-05-01 손상 사고 후속 — protectRealConfig() 패턴 제거.
+// 이전 구현은 실제 config/workspaces.json 을 save → fixture 쓰기 → restore
+// 의 패턴이었는데, finally 가 정상 실행되어도 한 번 사고 (process kill 등)
+// 로 fixture 가 잔존하면, 다음 실행에서 protectRealConfig 가 fixture 를
+// "원본" 으로 capture 해 영영 복구되지 않는 sticky bug 였음.
+// 모든 테스트는 이제 mkdtemp + --config=<tmp> 으로 완전 sandbox.
 
 async function runScript(args, { cwd } = {}) {
   return new Promise((resolve, reject) => {
@@ -30,10 +35,8 @@ async function runScript(args, { cwd } = {}) {
 }
 
 async function withTempConfig(fixture, fn) {
-  // The script uses config/workspaces.json relative to the repo root. We
-  // substitute by writing a temp config and passing --config=... override.
-  // We use the real repo path for --apply/--restore so that .pre-10a.bak
-  // lands in the right place — but still sandbox via temp files.
+  // 2026-05-01 사고 후속: --config=<path> override 로 완전 sandbox.
+  // backup 도 sibling tmp 에 생성됨 (backupPathFor 가 sibling 으로 결정).
   const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-'));
   const cfgPath = join(dir, 'workspaces.json');
   await writeFile(cfgPath, JSON.stringify(fixture, null, 2), 'utf-8');
@@ -42,27 +45,7 @@ async function withTempConfig(fixture, fn) {
   }
 }
 
-// We bypass the script's hardcoded BACKUP_PATH via --config override + running
-// from a temp cwd. But the script's BACKUP_PATH is __dirname/../config/... which
-// is always the repo path. So we also save/restore the real file if present.
-async function protectRealConfig(fn) {
-  let savedConfig = null, savedBackup = null;
-  try {
-    const [hasCfg, hasBak] = await Promise.all([
-      stat(REPO_CONFIG_PATH).then(() => true).catch(() => false),
-      stat(REPO_BACKUP_PATH).then(() => true).catch(() => false),
-    ]);
-    if (hasCfg) savedConfig = await readFile(REPO_CONFIG_PATH, 'utf-8');
-    if (hasBak) savedBackup = await readFile(REPO_BACKUP_PATH, 'utf-8');
-    return await fn();
-  } finally {
-    // Restore originals
-    if (savedConfig !== null) await writeFile(REPO_CONFIG_PATH, savedConfig, 'utf-8');
-    else await rm(REPO_CONFIG_PATH, { force: true });
-    if (savedBackup !== null) await writeFile(REPO_BACKUP_PATH, savedBackup, 'utf-8');
-    else await rm(REPO_BACKUP_PATH, { force: true });
-  }
-}
+// (protectRealConfig 제거 — 2026-05-01 데이터 손상 사고 후속)
 
 function fixtureSharedClient() {
   return {
@@ -91,12 +74,12 @@ function fixtureSharedClient() {
 }
 
 test('§4.10a-6: --dry-run reports shared clients + flat-to-nested without writing', async () => {
-  await protectRealConfig(async () => {
-    // Place fixture at the real repo path so the script reads it.
-    await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
-    const before = await readFile(REPO_CONFIG_PATH, 'utf-8');
-    const beforeMtime = (await stat(REPO_CONFIG_PATH)).mtimeMs;
-    const r = await runScript(['--dry-run']);
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-dry-'));
+  try {
+    const cfgPath = join(dir, 'workspaces.json');
+    await writeFile(cfgPath, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
+    const before = await readFile(cfgPath, 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--dry-run']);
     assert.equal(r.code, 0, `exit code 0; stderr=${r.stderr}`);
     const out = JSON.parse(r.stdout);
     assert.equal(out.action, 'dry-run');
@@ -105,114 +88,95 @@ test('§4.10a-6: --dry-run reports shared clients + flat-to-nested without writi
     assert.equal(out.report.sharedClients[0].groupKey, 'https://mcp.notion.com::SHARED_CID');
     assert.deepEqual(out.report.sharedClients[0].workspaces.sort(), ['http-notion-A', 'http-notion-B']);
     // No file change
-    const after = await readFile(REPO_CONFIG_PATH, 'utf-8');
+    const after = await readFile(cfgPath, 'utf-8');
     assert.equal(after, before, 'dry-run must not modify file');
     // No backup created
-    const bakExists = await stat(REPO_BACKUP_PATH).then(() => true).catch(() => false);
+    const bakPath = `${cfgPath}.pre-10a.bak`;
+    const bakExists = await stat(bakPath).then(() => true).catch(() => false);
     assert.equal(bakExists, false, 'dry-run must not create backup');
-  });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('§4.10a-6 (Codex R8): --apply purges pending auth states for disambiguated workspaces', async () => {
-  await protectRealConfig(async () => {
-    // Also protect the pending state file. CI checkouts don't carry the
-    // .ao/state/ directory (it's gitignored runtime state), so create it
-    // on demand and remember to remove it again so the test stays
-    // hermetic regardless of where it ran.
-    const pendingPath = join(__dirname, '..', '.ao', 'state', 'oauth-pending.json');
-    const stateDir = dirname(pendingPath);
-    let savedPending = null;
-    let createdStateDir = false;
-    const hadPending = await stat(pendingPath).then(() => true).catch(() => false);
-    if (hadPending) {
-      savedPending = await readFile(pendingPath, 'utf-8');
-    } else {
-      const dirExisted = await stat(stateDir).then(() => true).catch(() => false);
-      if (!dirExisted) {
-        await mkdir(stateDir, { recursive: true });
-        createdStateDir = true;
-      }
-    }
-    try {
-      // Seed workspaces.json + pending state
-      await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
-      const seedPending = {
-        'state-stale-B': { workspaceId: 'http-notion-B', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
-        'state-keep-A': { workspaceId: 'http-notion-A', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
-      };
-      await writeFile(pendingPath, JSON.stringify(seedPending, null, 2), 'utf-8');
-      const r = await runScript(['--apply']);
-      assert.equal(r.code, 0, `stderr=${r.stderr}`);
-      const out = JSON.parse(r.stdout);
-      assert.equal(out.pendingPurged, 1, 'must purge the disambiguated workspace pending entry only');
-      const afterPending = JSON.parse(await readFile(pendingPath, 'utf-8'));
-      assert.equal(afterPending['state-stale-B'], undefined, 'pending for disambiguated workspace must be purged');
-      assert.ok(afterPending['state-keep-A'], 'pending for retained workspace must be preserved');
-    } finally {
-      // Restore pending state — and the directory if we created it.
-      if (savedPending !== null) {
-        await writeFile(pendingPath, savedPending, 'utf-8');
-      } else {
-        await rm(pendingPath, { force: true });
-        if (createdStateDir) {
-          await rm(stateDir, { recursive: true, force: true });
-        }
-      }
-    }
-  });
+  // 2026-05-01 사고 후속: --pending=<path> 옵션 도입으로 pending state 도 완전
+  // sandbox. 이전엔 .ao/state/oauth-pending.json 을 save → fixture write → restore
+  // 했어서 동일한 sticky 위험 (process kill 시 fixture 잔존).
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-pending-'));
+  try {
+    const cfgPath = join(dir, 'workspaces.json');
+    const pendingPath = join(dir, 'oauth-pending.json');
+    await writeFile(cfgPath, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
+    const seedPending = {
+      'state-stale-B': { workspaceId: 'http-notion-B', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
+      'state-keep-A': { workspaceId: 'http-notion-A', identity: 'default', issuer: 'https://mcp.notion.com', clientId: 'SHARED_CID', authMethod: 'none', verifier: 'v', tokenEndpoint: 'x', resource: null, expiresAt: Date.now() + 60_000 },
+    };
+    await writeFile(pendingPath, JSON.stringify(seedPending, null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, `--pending=${pendingPath}`, '--apply']);
+    assert.equal(r.code, 0, `stderr=${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.pendingPurged, 1, 'must purge the disambiguated workspace pending entry only');
+    const afterPending = JSON.parse(await readFile(pendingPath, 'utf-8'));
+    assert.equal(afterPending['state-stale-B'], undefined, 'pending for disambiguated workspace must be purged');
+    assert.ok(afterPending['state-keep-A'], 'pending for retained workspace must be preserved');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('§4.10a-6: --apply creates .pre-10a.bak (0o600) + disambiguates shared + migrates flat', async () => {
-  await protectRealConfig(async () => {
-    await writeFile(REPO_CONFIG_PATH, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
-    const r = await runScript(['--apply']);
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-apply-'));
+  try {
+    const cfgPath = join(dir, 'workspaces.json');
+    const bakPath = `${cfgPath}.pre-10a.bak`;
+    await writeFile(cfgPath, JSON.stringify(fixtureSharedClient(), null, 2), 'utf-8');
+    const r = await runScript([`--config=${cfgPath}`, '--apply']);
     assert.equal(r.code, 0, `stderr=${r.stderr}`);
     const out = JSON.parse(r.stdout);
     assert.equal(out.action, 'apply');
-    // Backup exists + 0o600 on POSIX
-    const bakStat = await stat(REPO_BACKUP_PATH);
+    // Backup sits next to the config (sibling) + 0o600 on POSIX
+    const bakStat = await stat(bakPath);
     assert.ok(bakStat);
     if (process.platform !== 'win32') {
       assert.equal(bakStat.mode & 0o777, 0o600, 'backup must be chmod 0o600');
     }
-    // Original rewritten
-    const migrated = JSON.parse(await readFile(REPO_CONFIG_PATH, 'utf-8'));
+    const migrated = JSON.parse(await readFile(cfgPath, 'utf-8'));
     const [wsA, wsB] = migrated.workspaces;
-    // wsA keeps client
     assert.ok(wsA.oauth.client);
     assert.equal(wsA.oauth.client.clientId, 'SHARED_CID');
     assert.equal(wsA.oauth.client.source, 'legacy-flat');
-    // wsB stripped + action_needed
     assert.equal(wsB.oauth.client, null);
-    // Phase 11 §3 — flat keys scrubbed entirely (not set to null)
     assert.equal(wsB.oauth.clientId, undefined, 'Phase 11 §3: flat clientId must be scrubbed from config');
     assert.equal(wsB.oauth.clientSecret, undefined, 'Phase 11 §3: flat clientSecret must be scrubbed from config');
     assert.equal(wsB.oauthActionNeeded, true);
     assert.equal(wsB.oauthActionNeededBy.default, true);
     assert.equal(wsB.oauth.byIdentity.default.tokens.accessToken, null);
-    // Report
     assert.equal(out.report.disambiguated.length, 1);
     assert.equal(out.report.disambiguated[0].id, 'http-notion-B');
-  });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('§4.10a-6: --restore replaces config with backup byte-for-byte', async () => {
-  await protectRealConfig(async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-restore-'));
+  try {
+    const cfgPath = join(dir, 'workspaces.json');
     const fixture = fixtureSharedClient();
     const originalJson = JSON.stringify(fixture, null, 2);
-    await writeFile(REPO_CONFIG_PATH, originalJson, 'utf-8');
-    // Apply once
-    const apply = await runScript(['--apply']);
+    await writeFile(cfgPath, originalJson, 'utf-8');
+    const apply = await runScript([`--config=${cfgPath}`, '--apply']);
     assert.equal(apply.code, 0);
-    // Config is now modified; bak should match original.
-    const modified = await readFile(REPO_CONFIG_PATH, 'utf-8');
+    const modified = await readFile(cfgPath, 'utf-8');
     assert.notEqual(modified, originalJson, 'apply must modify file');
-    // Restore
-    const restore = await runScript(['--restore']);
+    const restore = await runScript([`--config=${cfgPath}`, '--restore']);
     assert.equal(restore.code, 0);
-    const restored = await readFile(REPO_CONFIG_PATH, 'utf-8');
+    const restored = await readFile(cfgPath, 'utf-8');
     assert.equal(restored, originalJson, 'restore must replicate original byte-for-byte');
-  });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not repo-global', async () => {
@@ -229,8 +193,11 @@ test('§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not rep
     assert.equal(out.backup, expectedBak);
     const bakStat = await stat(expectedBak);
     assert.ok(bakStat);
-    // Repo-global backup must NOT be created
-    const repoBakExists = await stat(REPO_BACKUP_PATH).then(() => true).catch(() => false);
+    // Repo-global backup must NOT be created (sticky-corruption regression
+    // — see file header). Compute the path locally rather than referencing
+    // a top-level REPO_BACKUP_PATH constant we deleted.
+    const repoBakPath = join(__dirname, '..', 'config', 'workspaces.json.pre-10a.bak');
+    const repoBakExists = await stat(repoBakPath).then(() => true).catch(() => false);
     assert.equal(repoBakExists, false, 'must not create repo-global backup when --config is overridden');
     // --restore should also work with the same override
     const rr = await runScript([`--config=${cfgPath}`, '--restore']);
@@ -243,8 +210,7 @@ test('§4.10a-6 (Codex R2 cleanup): --config=path uses a sibling backup, not rep
 });
 
 test('§4.10a-6: no-op workspace (already migrated or non-OAuth) is safely handled', async () => {
-  // Use temp --config to avoid races with other migration tests that touch
-  // REPO_CONFIG_PATH.
+  // Sandbox via temp --config (consistent with the rest of the file).
   const dir = await mkdtemp(join(tmpdir(), 'phase10a-migration-'));
   try {
     const cfgPath = join(dir, 'my-config.json');

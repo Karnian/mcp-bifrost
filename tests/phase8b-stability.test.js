@@ -168,8 +168,15 @@ describe('Graceful shutdown clears healthInterval', () => {
   // the contract assertions without depending on stop(), we use
   // `server.close()` directly here.
   it('returns healthInterval timer + bound port + close listener', async () => {
+    // 2026-05-01 후속: configDir 미지정 시 실제 config/workspaces.json 을
+    // 사용해서 운영자 데이터를 건드릴 수 있다. mkdtemp 로 sandbox.
+    const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
     const { startServer } = await import('../server/index.js');
-    const { healthInterval, server, port } = await startServer({ port: 0 });
+    const dir = await mkdtemp(join(tmpdir(), 'phase8b-startserver-'));
+    await writeFile(join(dir, 'workspaces.json'), JSON.stringify({ server: { port: 0 }, workspaces: [] }), 'utf-8');
+    const { healthInterval, server, port } = await startServer({ port: 0, configDir: dir });
     try {
       assert.ok(healthInterval, 'healthInterval should be returned');
       assert.ok(port > 0, 'bound port should be exposed in return value');
@@ -180,6 +187,7 @@ describe('Graceful shutdown clears healthInterval', () => {
       // asserted exists, and it clears the interval + watcher itself.
       await new Promise((resolve) => server.close(() => resolve()));
       assert.equal(server.listening, false, 'server.close() should release the bind');
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
