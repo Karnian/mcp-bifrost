@@ -8,6 +8,7 @@ import { createAdminRoutes, handleSlackOAuthCallback } from '../admin/routes.js'
 import { OAuthManager } from './oauth-manager.js';
 import { OAuthMetrics } from './oauth-metrics.js';
 import { SlackOAuthManager } from './slack-oauth-manager.js';
+import { setPublicOriginProvider } from './public-origin.js';
 import { McpTokenManager } from './mcp-token-manager.js';
 import { UsageRecorder } from './usage-recorder.js';
 import { AuditLogger } from './audit-logger.js';
@@ -97,6 +98,12 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   wm.setOAuthManager(oauth);
   wm.setSlackOAuthManager(slackOAuth);
   wm.setAuditLogger?.(audit);
+  // Phase 12 (UX 개선): wire wm-stored publicUrl into the OAuth resolver.
+  // Resolution order at call time: BIFROST_PUBLIC_URL env > wm file value >
+  // localhost fallback. Operators on a fresh checkout get OAuth working
+  // without env vars; teams running in production set the env var to
+  // bypass any UI mistake.
+  setPublicOriginProvider(() => wm.getPublicUrl());
 
   wm.onWorkspaceChange(() => {
     tr.bumpVersion();

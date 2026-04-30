@@ -1304,14 +1304,49 @@ async function loadSlack() {
 
 function renderSlackOrigin(po) {
   const el = $('#slack-origin-status');
+  const input = $('#slack-public-url');
   if (!po) { el.textContent = ''; return; }
-  if (po.valid) {
-    el.innerHTML = `<span class="status-dot" style="background:var(--green)"></span><strong>${esc(po.origin)}</strong> · 정상`;
-  } else if (po.configured) {
-    el.innerHTML = `<span class="status-dot" style="background:var(--red)"></span>설정 오류: <code>${esc(po.reason || '')}</code> — <small>${esc(po.message || '')}</small>`;
-  } else {
-    el.innerHTML = `<span class="status-dot" style="background:var(--orange)"></span><code>BIFROST_PUBLIC_URL</code> 미설정 — install 전에 환경변수를 지정해주세요.`;
+  // Sync the input field. env override takes precedence regardless of
+  // file value, so the input is read-only when source === 'env' so the
+  // operator doesn't think the form save will take effect.
+  if (input) {
+    if (po.source === 'env') {
+      input.value = po.raw || '';
+      input.disabled = true;
+      input.placeholder = 'BIFROST_PUBLIC_URL env override 가 우선합니다';
+    } else if (po.source === 'file') {
+      input.value = po.raw || '';
+      input.disabled = false;
+    } else {
+      // default localhost fallback — leave input blank so operator can
+      // type a real origin.
+      input.value = '';
+      input.disabled = false;
+    }
   }
+  let dot;
+  let body;
+  // Codex R1 REVISE 1: invalid 검사 먼저. env override 가 broken 인데도
+  // green 으로 표시되면 운영자가 잘못된 redirect URI 로 install 시도하게 됨.
+  if (!po.valid) {
+    dot = 'red';
+    const sourceBadge = po.source === 'env' ? '<span class="badge badge-warn">env override</span>'
+      : po.source === 'file' ? '<span class="badge badge-ok">file</span>'
+      : '';
+    body = `${sourceBadge} 설정 오류: <code>${esc(po.reason || '')}</code> — <small>${esc(po.message || '')}</small>`;
+  } else if (po.source === 'env') {
+    dot = 'green';
+    body = `<strong>${esc(po.origin)}</strong> · <span class="badge badge-warn">env override</span> · 정상`;
+  } else if (po.source === 'file') {
+    dot = 'green';
+    body = `<strong>${esc(po.origin)}</strong> · <span class="badge badge-ok">file</span> · 정상`;
+  } else {
+    // default localhost fallback — works for local testing but warn that
+    // external workspace install needs a public origin.
+    dot = 'orange';
+    body = `<strong>${esc(po.origin)}</strong> · <span class="badge">default localhost</span> · 외부 workspace install 받으려면 public HTTPS origin 입력 필요`;
+  }
+  el.innerHTML = `<span class="status-dot" style="background:var(--${dot})"></span>${body}`;
 }
 
 function renderSlackAppForm(data) {
@@ -1328,6 +1363,35 @@ function renderSlackAppForm(data) {
   if (src.clientId === 'none' && src.clientSecret === 'none') badges.push('<span class="badge">미설정</span>');
   $('#slack-app-source').innerHTML = badges.join(' ');
 }
+
+$('#slack-origin-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const value = $('#slack-public-url').value.trim();
+  const errEl = $('#slack-origin-error');
+  errEl.classList.add('hidden');
+  try {
+    const res = await api('PUT', '/api/slack/public-url', { publicUrl: value });
+    if (!res.ok) throw new Error(res.error?.message || 'save failed');
+    await loadSlack();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  }
+});
+
+$('#btn-slack-origin-clear').addEventListener('click', async () => {
+  if (!confirm('Public URL 설정을 비우시겠습니까? 비우면 localhost fallback 으로 동작합니다.')) return;
+  const errEl = $('#slack-origin-error');
+  errEl.classList.add('hidden');
+  try {
+    const res = await api('PUT', '/api/slack/public-url', { publicUrl: '' });
+    if (!res.ok) throw new Error(res.error?.message || 'clear failed');
+    await loadSlack();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  }
+});
 
 $('#slack-app-form').addEventListener('submit', async (e) => {
   e.preventDefault();

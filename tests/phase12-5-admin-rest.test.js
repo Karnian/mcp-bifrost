@@ -129,6 +129,91 @@ test('DELETE /api/slack/app — refuses if dependent OAuth workspace exists', as
   } finally { await teardown(); }
 });
 
+// ─── /api/slack/public-url (Admin UI 저장 path, UX 개선) ───────────
+
+test('PUT /api/slack/public-url — 유효한 HTTPS 저장 + GET 결과에 source=file 반영', async () => {
+  // env 미설정 + file 저장 → resolution 결과 source='file'
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, undefined);
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    const r = await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://stored.test' }),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.data.publicOrigin.source, 'file');
+    assert.equal(body.data.publicOrigin.origin, 'https://stored.test');
+    // GET /api/slack/app reflects same
+    const getRes = await (await fetch(`${baseUrl}/api/slack/app`)).json();
+    assert.equal(getRes.data.publicOrigin.source, 'file');
+  } finally { await teardown(); }
+});
+
+test('PUT /api/slack/public-url — env override 가 file 보다 우선', async () => {
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, 'https://from-env.test');
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    // file 저장은 성공해도 resolved origin 은 env 가 우선
+    const r = await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://stored.test' }),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.data.publicOrigin.source, 'env');
+    assert.equal(body.data.publicOrigin.origin, 'https://from-env.test');
+  } finally { await teardown(); }
+});
+
+test('PUT /api/slack/public-url — 빈 문자열 → file 값 clear (localhost fallback)', async () => {
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, undefined);
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    // 먼저 저장
+    await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'https://stored.test' }),
+    });
+    // 비우기
+    const r = await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicUrl: '' }),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.data.publicOrigin.source, 'default');
+    assert.match(body.data.publicOrigin.origin, /^http:\/\/localhost:\d+$/);
+  } finally { await teardown(); }
+});
+
+test('PUT /api/slack/public-url — invalid (HTTP non-loopback) → 400', async () => {
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, undefined);
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    const r = await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publicUrl: 'http://not-loopback.example' }),
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json();
+    assert.equal(body.error.code, 'PUBLIC_ORIGIN_NOT_HTTPS');
+  } finally { await teardown(); }
+});
+
+test('PUT /api/slack/public-url — body.publicUrl 누락 → 400', async () => {
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    const r = await fetch(`${baseUrl}/api/slack/public-url`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json();
+    assert.equal(body.error.code, 'VALIDATION_ERROR');
+  } finally { await teardown(); }
+});
+
 // ─── /api/slack/install/* ────────────────────────────────────────────
 
 test('POST /api/slack/install/start — initializes flow + status pending', async () => {
@@ -169,7 +254,9 @@ test('POST /api/slack/install/start — 412 when SLACK_APP_NOT_CONFIGURED', asyn
   } finally { await teardown(); }
 });
 
-test('POST /api/slack/install/start — 412 when BIFROST_PUBLIC_URL missing', async () => {
+test('POST /api/slack/install/start — env 미설정 + file 미설정 → localhost fallback (UX 개선)', async () => {
+  // Phase 12 UX 개선: env 미설정이라도 localhost 로 fallback 해서 install 이
+  // 진행됨 (개발자 1인 테스트 시나리오 zero-config).
   setEnv(PUBLIC_ORIGIN_ENV_VAR, undefined);
   const { baseUrl, teardown } = await bootServer({
     slackApp: { clientId: '111.222', clientSecret: 's', tokenRotationEnabled: true },
@@ -180,9 +267,9 @@ test('POST /api/slack/install/start — 412 when BIFROST_PUBLIC_URL missing', as
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
-    assert.equal(r.status, 412);
+    assert.equal(r.status, 200);
     const body = await r.json();
-    assert.equal(body.error.code, 'PUBLIC_ORIGIN_MISSING');
+    assert.match(body.data.authorizationUrl, /redirect_uri=http%3A%2F%2Flocalhost%3A\d+%2Foauth%2Fslack%2Fcallback/);
   } finally { await teardown(); }
 });
 
@@ -211,12 +298,42 @@ test('GET /api/slack/manifest.yaml — stamps redirect_url with canonical origin
   } finally { await teardown(); }
 });
 
-test('GET /api/slack/manifest.yaml — 412 if BIFROST_PUBLIC_URL missing', async () => {
+test('GET /api/slack/manifest.yaml — env 미설정 시 localhost fallback 으로 stamp (UX 개선)', async () => {
+  // Phase 12 UX 개선: manifest 도 fallback localhost 로 redirect URL stamp.
+  // 운영 배포 전 manifest download 가 안 되는 friction 제거.
   setEnv(PUBLIC_ORIGIN_ENV_VAR, undefined);
   const { baseUrl, teardown } = await bootServer();
   try {
     const r = await fetch(`${baseUrl}/api/slack/manifest.yaml`);
+    assert.equal(r.status, 200);
+    const yaml = await r.text();
+    assert.match(yaml, /http:\/\/localhost:\d+\/oauth\/slack\/callback/);
+    return; // legacy assertion below not relevant
+  } finally { await teardown(); }
+});
+
+test('GET /api/slack/manifest.yaml — invalid env preserves PUBLIC_ORIGIN_NOT_HTTPS (Codex UX R1 REVISE 2)', async () => {
+  // env 가 설정됐지만 형식 오류 → 412 + original error code (이전엔
+  // PUBLIC_ORIGIN_MISSING 으로 collapse 되어 운영자가 진짜 원인 모름).
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, 'http://not-loopback.test');
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    const r = await fetch(`${baseUrl}/api/slack/manifest.yaml`);
     assert.equal(r.status, 412);
+    const body = await r.json();
+    assert.equal(body.error.code, 'PUBLIC_ORIGIN_NOT_HTTPS');
+    return;
+  } finally { await teardown(); }
+});
+
+test('GET /api/slack/manifest.yaml — invalid path preserves PUBLIC_ORIGIN_HAS_PATH', async () => {
+  setEnv(PUBLIC_ORIGIN_ENV_VAR, 'https://x.test/admin');
+  const { baseUrl, teardown } = await bootServer();
+  try {
+    const r = await fetch(`${baseUrl}/api/slack/manifest.yaml`);
+    assert.equal(r.status, 412);
+    const body = await r.json();
+    assert.equal(body.error.code, 'PUBLIC_ORIGIN_HAS_PATH');
   } finally { await teardown(); }
 });
 

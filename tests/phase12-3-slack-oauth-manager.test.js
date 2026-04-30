@@ -515,14 +515,14 @@ test('completeInstall: parse failure (is_enterprise_install) revokes fresh acces
   }
 });
 
-test('completeInstall: BIFROST_PUBLIC_URL missing surfaces friendly error', async () => {
+test('completeInstall: BIFROST_PUBLIC_URL missing → localhost fallback works (UX 개선)', async () => {
+  // Phase 12 UX 개선: env 미설정 + file 미설정 시 localhost fallback 으로
+  // initializeInstall 이 정상 진행. throw 안 함.
   setEnv(undefined);
   const { wm, mgr, dir } = await makeManager({ installResponse: validResponse() });
   try {
-    await assert.rejects(
-      () => mgr.initializeInstall({}),
-      err => err.code === 'PUBLIC_ORIGIN_MISSING'
-    );
+    const init = await mgr.initializeInstall({});
+    assert.match(init.authorizationUrl, /redirect_uri=http%3A%2F%2Flocalhost%3A\d+%2Foauth%2Fslack%2Fcallback/);
   } finally {
     await wm.close();
     await rm(dir, { recursive: true, force: true });

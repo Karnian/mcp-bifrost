@@ -538,6 +538,86 @@ test('setSlackApp: rejects malformed payload (Codex R1 REVISE — schema enforce
   }
 });
 
+test('WorkspaceManager.setPublicUrl + getPublicUrl roundtrip + canonicalize', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase12-1-publicurl-'));
+  const wm = new WorkspaceManager({ configDir: dir });
+  await wm.load();
+  try {
+    const canonical = await wm.setPublicUrl('https://stored.test/');
+    assert.equal(canonical, 'https://stored.test'); // trailing slash stripped
+    assert.equal(wm.getPublicUrl(), 'https://stored.test');
+    // Persists to disk
+    const onDisk = JSON.parse(await readFile(join(dir, 'workspaces.json'), 'utf-8'));
+    assert.equal(onDisk.publicUrl, 'https://stored.test');
+  } finally {
+    await wm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('WorkspaceManager.setPublicUrl rejects invalid origin', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase12-1-publicurl-bad-'));
+  const wm = new WorkspaceManager({ configDir: dir });
+  await wm.load();
+  try {
+    await assert.rejects(
+      () => wm.setPublicUrl('http://not-loopback.test'),
+      err => err.code === 'PUBLIC_ORIGIN_NOT_HTTPS'
+    );
+    await assert.rejects(
+      () => wm.setPublicUrl('https://x.test/admin'),
+      err => err.code === 'PUBLIC_ORIGIN_HAS_PATH'
+    );
+  } finally {
+    await wm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('WorkspaceManager.setPublicUrl atomic — disk fail leaves config unchanged (Codex UX R1 REVISE 3)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase12-1-publicurl-atomic-'));
+  const wm = new WorkspaceManager({ configDir: dir });
+  await wm.load();
+  try {
+    await wm.setPublicUrl('https://orig.test');
+    assert.equal(wm.getPublicUrl(), 'https://orig.test');
+    // Inject snapshot save failure
+    const realSnap = wm._saveSnapshot.bind(wm);
+    wm._saveSnapshot = async () => { throw new Error('disk full'); };
+    await assert.rejects(
+      () => wm.setPublicUrl('https://new.test'),
+      err => /disk full/.test(err.message)
+    );
+    // Runtime still on old value
+    assert.equal(wm.getPublicUrl(), 'https://orig.test');
+    // Restore + retry succeeds
+    wm._saveSnapshot = realSnap;
+    await wm.setPublicUrl('https://new.test');
+    assert.equal(wm.getPublicUrl(), 'https://new.test');
+  } finally {
+    await wm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('WorkspaceManager.setPublicUrl empty string clears file value', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'phase12-1-publicurl-clear-'));
+  const wm = new WorkspaceManager({ configDir: dir });
+  await wm.load();
+  try {
+    await wm.setPublicUrl('https://x.test');
+    assert.equal(wm.getPublicUrl(), 'https://x.test');
+    const r = await wm.setPublicUrl('');
+    assert.equal(r, null);
+    assert.equal(wm.getPublicUrl(), null);
+    const onDisk = JSON.parse(await readFile(join(dir, 'workspaces.json'), 'utf-8'));
+    assert.ok(!('publicUrl' in onDisk));
+  } finally {
+    await wm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('getSlackAppRaw: env override beats file', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'phase12-1-envrev-'));
   await writeFile(

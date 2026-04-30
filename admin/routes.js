@@ -925,6 +925,27 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
         return;
       }
 
+      // PUT /api/slack/public-url — admin-configured public origin (file).
+      // env var still wins on resolution; this is the UX path so operators
+      // don't have to set BIFROST_PUBLIC_URL on the host.
+      if (path === '/api/slack/public-url' && method === 'PUT') {
+        const body = await readBody(req).catch(() => null);
+        if (!body || typeof body.publicUrl !== 'string') {
+          sendJson(res, 400, { ok: false, error: { code: 'VALIDATION_ERROR', message: 'body.publicUrl (string) required' } });
+          return;
+        }
+        try {
+          await wm.setPublicUrl(body.publicUrl);
+          // Re-resolve so the response shows the runtime view (env may
+          // be overriding the file value the operator just saved).
+          sendJson(res, 200, { ok: true, data: { publicOrigin: describePublicOrigin() } });
+        } catch (err) {
+          const code = err.code && /^PUBLIC_(ORIGIN|URL)_/.test(err.code) ? err.code : 'PUBLIC_URL_INVALID';
+          sendJson(res, 400, { ok: false, error: { code, message: err.message } });
+        }
+        return;
+      }
+
       // POST /api/slack/app — register / update Slack App credentials
       if (path === '/api/slack/app' && method === 'POST') {
         const body = await readBody(req);
@@ -1009,17 +1030,25 @@ export function createAdminRoutes(wm, tr, sse, oauth, tokenManager = null, extra
 
       // GET /api/slack/manifest.yaml — operator-facing manifest template with
       // BIFROST_PUBLIC_URL stamped redirect_url. Admin token already required.
+      // Codex UX R1 REVISE 2: call getSlackManifestRedirect() in the try
+      // so PUBLIC_ORIGIN_* error codes (NOT_HTTPS / HAS_PATH / INVALID)
+      // surface with their original code, not collapsed to MISSING. With
+      // the localhost fallback in place, the only way this throws is if
+      // env/file value is syntactically broken — operator needs the
+      // specific code to fix it.
       if (path === '/api/slack/manifest.yaml' && method === 'GET') {
-        const origin = getPublicOriginOrNull();
-        if (!origin) {
-          sendJson(res, 412, { ok: false, error: { code: 'PUBLIC_ORIGIN_MISSING', message: 'BIFROST_PUBLIC_URL must be configured before downloading the manifest.' } });
+        let redirect;
+        try {
+          redirect = getSlackManifestRedirect();
+        } catch (err) {
+          const code = err.code && /^PUBLIC_ORIGIN_/.test(err.code) ? err.code : 'PUBLIC_ORIGIN_INVALID';
+          sendJson(res, 412, { ok: false, error: { code, message: err.message } });
           return;
         }
         try {
-          // Phase 12-8 (Codex R1 REVISE 1): use the canonical resolver so
-          // manifest download and runtime redirect_uri come from the same
-          // source — plan §6 "같은 resolver" invariant.
-          const yaml = await renderSlackManifestYaml(getSlackManifestRedirect());
+          // Phase 12-8: single source of truth so manifest download and
+          // runtime redirect_uri can never drift.
+          const yaml = await renderSlackManifestYaml(redirect);
           res.writeHead(200, {
             'Content-Type': 'text/yaml; charset=utf-8',
             'Content-Disposition': 'attachment; filename="bifrost-slack-app-manifest.yaml"',

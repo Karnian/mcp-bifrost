@@ -19,6 +19,8 @@ import {
   getSlackRedirectUri,
   getSlackManifestRedirect,
   describePublicOrigin,
+  setPublicOriginProvider,
+  validatePublicOrigin,
   PUBLIC_ORIGIN_ENV_VAR,
   SLACK_OAUTH_CALLBACK_PATH,
 } from '../server/public-origin.js';
@@ -27,23 +29,36 @@ function withEnv(value, fn) {
   const prev = process.env[PUBLIC_ORIGIN_ENV_VAR];
   if (value === undefined) delete process.env[PUBLIC_ORIGIN_ENV_VAR];
   else process.env[PUBLIC_ORIGIN_ENV_VAR] = value;
+  // Reset file provider so test cases can fully isolate the env path
+  // unless they explicitly set their own provider.
+  setPublicOriginProvider(null);
   try {
     return fn();
   } finally {
     if (prev === undefined) delete process.env[PUBLIC_ORIGIN_ENV_VAR];
     else process.env[PUBLIC_ORIGIN_ENV_VAR] = prev;
+    setPublicOriginProvider(null);
   }
 }
 
-test('getPublicOrigin: missing env throws PUBLIC_ORIGIN_MISSING', () => {
+function withFile(value, fn) {
+  setPublicOriginProvider(() => value);
+  try { return fn(); } finally { setPublicOriginProvider(null); }
+}
+
+test('getPublicOrigin: missing env falls back to localhost (UX 개선)', () => {
   withEnv(undefined, () => {
-    assert.throws(() => getPublicOrigin(), err => err.code === 'PUBLIC_ORIGIN_MISSING');
+    // Phase 12 (UX 개선): env 미설정은 더 이상 throw 가 아님.
+    // localhost fallback 으로 동작 (file provider 도 비어 있을 때).
+    const origin = getPublicOrigin();
+    assert.match(origin, /^http:\/\/localhost:\d+$/);
   });
 });
 
-test('getPublicOrigin: empty string treated as missing', () => {
+test('getPublicOrigin: empty string treated as missing → localhost fallback', () => {
   withEnv('   ', () => {
-    assert.throws(() => getPublicOrigin(), err => err.code === 'PUBLIC_ORIGIN_MISSING');
+    const origin = getPublicOrigin();
+    assert.match(origin, /^http:\/\/localhost:\d+$/);
   });
 });
 
@@ -128,12 +143,16 @@ test('getPublicOrigin: malformed URL → PUBLIC_ORIGIN_INVALID', () => {
   });
 });
 
-test('getPublicOriginOrNull: never throws on invalid', () => {
+test('getPublicOriginOrNull: invalid env still returns null (no throw)', () => {
   withEnv('http://bifrost.example.com', () => {
     assert.equal(getPublicOriginOrNull(), null);
   });
+});
+
+test('getPublicOriginOrNull: missing env returns localhost fallback (UX 개선)', () => {
   withEnv(undefined, () => {
-    assert.equal(getPublicOriginOrNull(), null);
+    const v = getPublicOriginOrNull();
+    assert.match(v, /^http:\/\/localhost:\d+$/);
   });
 });
 
@@ -159,32 +178,107 @@ test('SLACK_OAUTH_CALLBACK_PATH: contract', () => {
   assert.equal(SLACK_OAUTH_CALLBACK_PATH, '/oauth/slack/callback');
 });
 
-test('describePublicOrigin: missing env reports configured=false', () => {
+test('describePublicOrigin: missing env + no file → source=default + localhost fallback', () => {
   withEnv(undefined, () => {
     const d = describePublicOrigin();
     assert.equal(d.configured, false);
-    assert.equal(d.valid, false);
-    assert.equal(d.reason, 'missing');
-    assert.equal(d.origin, null);
+    assert.equal(d.source, 'default');
+    assert.equal(d.valid, true);
+    assert.equal(d.reason, 'dev-fallback');
+    assert.match(d.origin, /^http:\/\/localhost:\d+$/);
+    assert.ok(d.message);
   });
 });
 
-test('describePublicOrigin: valid HTTPS reports {configured,valid}', () => {
+test('describePublicOrigin: valid HTTPS env reports source=env', () => {
   withEnv('https://bifrost.example.com', () => {
     const d = describePublicOrigin();
     assert.equal(d.configured, true);
+    assert.equal(d.source, 'env');
     assert.equal(d.valid, true);
     assert.equal(d.origin, 'https://bifrost.example.com');
   });
 });
 
-test('describePublicOrigin: invalid HTTP reports reason + message', () => {
+test('describePublicOrigin: invalid HTTP env reports source=env + invalid', () => {
   withEnv('http://bifrost.example.com', () => {
     const d = describePublicOrigin();
     assert.equal(d.configured, true);
+    assert.equal(d.source, 'env');
     assert.equal(d.valid, false);
     assert.equal(d.reason, 'PUBLIC_ORIGIN_NOT_HTTPS');
     assert.ok(d.message.includes('HTTPS'));
+  });
+});
+
+// ─── file provider (Admin UI 저장값) ─────────────────────────────────
+
+test('resolution chain: env > file > localhost fallback', () => {
+  // file 만 있으면 file 사용
+  withEnv(undefined, () => {
+    withFile('https://from-file.test', () => {
+      assert.equal(getPublicOrigin(), 'https://from-file.test');
+      const d = describePublicOrigin();
+      assert.equal(d.source, 'file');
+      assert.equal(d.origin, 'https://from-file.test');
+    });
+  });
+  // env + file 둘 다 있으면 env 우선
+  withEnv('https://from-env.test', () => {
+    withFile('https://from-file.test', () => {
+      assert.equal(getPublicOrigin(), 'https://from-env.test');
+      const d = describePublicOrigin();
+      assert.equal(d.source, 'env');
+    });
+  });
+  // env 무효 + file 유효 → env 가 throw 한다 (env 가 우선이므로 file fallback 안 함)
+  withEnv('http://bad.test', () => {
+    withFile('https://from-file.test', () => {
+      assert.throws(() => getPublicOrigin(), err => err.code === 'PUBLIC_ORIGIN_NOT_HTTPS');
+      const d = describePublicOrigin();
+      assert.equal(d.source, 'env');
+      assert.equal(d.valid, false);
+    });
+  });
+  // 둘 다 없으면 default
+  withEnv(undefined, () => {
+    const origin = getPublicOrigin();
+    assert.match(origin, /^http:\/\/localhost:\d+$/);
+    const d = describePublicOrigin();
+    assert.equal(d.source, 'default');
+    assert.equal(d.reason, 'dev-fallback');
+  });
+});
+
+test('file provider: invalid value throws PUBLIC_ORIGIN_*', () => {
+  withEnv(undefined, () => {
+    withFile('http://bad-non-loopback.test', () => {
+      assert.throws(() => getPublicOrigin(), err => err.code === 'PUBLIC_ORIGIN_NOT_HTTPS');
+      const d = describePublicOrigin();
+      assert.equal(d.source, 'file');
+      assert.equal(d.valid, false);
+    });
+  });
+});
+
+test('validatePublicOrigin: same rules as getPublicOrigin', () => {
+  // Re-uses the same validator so file save path can pre-validate.
+  assert.equal(validatePublicOrigin('https://x.test/'), 'https://x.test');
+  assert.throws(() => validatePublicOrigin('http://x.test'), err => err.code === 'PUBLIC_ORIGIN_NOT_HTTPS');
+  assert.throws(() => validatePublicOrigin('https://x.test/admin'), err => err.code === 'PUBLIC_ORIGIN_HAS_PATH');
+  assert.equal(validatePublicOrigin('http://localhost:3100'), 'http://localhost:3100');
+});
+
+test('BIFROST_PORT env tunes localhost fallback', () => {
+  withEnv(undefined, () => {
+    const prev = process.env.BIFROST_PORT;
+    process.env.BIFROST_PORT = '4567';
+    try {
+      assert.equal(getPublicOrigin(), 'http://localhost:4567');
+    } finally {
+      if (prev === undefined) delete process.env.BIFROST_PORT;
+      else process.env.BIFROST_PORT = prev;
+    }
   });
 });
 

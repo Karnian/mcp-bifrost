@@ -105,6 +105,43 @@ test('app.js: selectTemplate branches to Slack screen for slack-oauth flow (wiza
   assert.match(js, /btn-slack-install/);
 });
 
+test('index.html: includes Public Origin form (UX 개선 — UI configurable)', async () => {
+  const html = await readFile(join(PUBLIC_DIR, 'index.html'), 'utf-8');
+  assert.match(html, /id="slack-origin-form"/);
+  assert.match(html, /id="slack-public-url"/);
+  assert.match(html, /id="btn-slack-origin-clear"/);
+});
+
+test('app.js: PUT /api/slack/public-url 호출 + clear 버튼 wiring', async () => {
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  assert.match(js, /'\/api\/slack\/public-url'/);
+  assert.match(js, /publicUrl: value/);
+  assert.match(js, /publicUrl: ''/); // clear path
+});
+
+test('app.js: renderSlackOrigin handles env / file / default sources', async () => {
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  assert.match(js, /po\.source === 'env'/);
+  assert.match(js, /po\.source === 'file'/);
+  // env override should disable the input
+  assert.match(js, /input\.disabled = true/);
+});
+
+test('app.js: renderSlackOrigin shows red dot when invalid (Codex UX R1 REVISE 1)', async () => {
+  // invalid 검사가 dot rendering 의 source 분기보다 먼저 실행되어 invalid env
+  // 가 green/정상 으로 잘못 표시되는 회귀 차단.
+  const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
+  const invalidIdx = js.indexOf('if (!po.valid)');
+  // The rendering branch starts with `dot = 'green'` for env source.
+  // Confirm invalid → red precedes that.
+  const envGreenIdx = js.indexOf("dot = 'green'");
+  assert.ok(invalidIdx > 0, 'invalid branch must exist');
+  assert.ok(envGreenIdx > 0, 'green-dot branch must exist');
+  assert.ok(invalidIdx < envGreenIdx, 'invalid check must precede first green-dot assignment');
+  // Red dot path must reference the reason / message
+  assert.match(js, /dot = 'red'[\s\S]{0,400}설정 오류/);
+});
+
 test('app.js: showSlackBanner clears prior dismiss timer on re-show (Codex R1 NIT)', async () => {
   const js = await readFile(join(PUBLIC_DIR, 'app.js'), 'utf-8');
   assert.match(js, /_slackBannerDismissTimer/);

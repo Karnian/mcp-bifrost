@@ -342,10 +342,20 @@
       <div class="tools-overview-content" id="slack-content">
         <section class="detail-section">
           <h4>Public Origin</h4>
-          <div id="slack-origin-status" class="health-info"></div>
+          <div id="slack-origin-status" class="health-info" style="margin-bottom:10px"></div>
+          <form id="slack-origin-form" class="form-grid">
+            <label for="slack-public-url">Public URL
+              <input type="text" id="slack-public-url" placeholder="https://bifrost.example.com 또는 비워두면 localhost 사용" autocomplete="off">
+            </label>
+            <div id="slack-origin-error" class="error-msg hidden"></div>
+            <div class="drawer-actions">
+              <button type="submit" class="btn btn-primary">저장</button>
+              <button type="button" id="btn-slack-origin-clear" class="btn btn-outline">비우기 (localhost fallback)</button>
+            </div>
+          </form>
           <p class="connect-note">
-            <code>BIFROST_PUBLIC_URL</code> 환경변수가 설정되어 있어야 OAuth 가 작동합니다.
-            (예: <code>https://bifrost.example.com</code>)
+            우선순위: <code>BIFROST_PUBLIC_URL</code> env > Admin 설정 > <code>http://localhost:3100</code> fallback. <br>
+            로컬 테스트만 할 거면 비워두고, 외부 Slack workspace 받으려면 HTTPS 공개 origin 입력.
           </p>
         </section>
         <section class="detail-section">

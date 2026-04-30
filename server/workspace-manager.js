@@ -8,6 +8,7 @@ import { McpClientProvider } from '../providers/mcp-client.js';
 import { sanitize } from './oauth-sanitize.js';
 import { logger } from './logger.js';
 import { validateSlackAppPayload } from './workspace-schema.js';
+import { validatePublicOrigin } from './public-origin.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, '..', 'config');
@@ -576,6 +577,54 @@ export class WorkspaceManager {
     // calls that handle their own errors.
     this._createProvider(this.config.workspaces[idx]);
     return this.config.workspaces[idx];
+  }
+
+  /**
+   * Phase 12 (UX 개선): admin-configured public origin. Lives next to
+   * slackApp at the top level of config/workspaces.json so the OAuth
+   * resolver can pick it up without the operator having to set a
+   * BIFROST_PUBLIC_URL env var. env still wins if both are set —
+   * that's the deploy-time override path.
+   */
+  getPublicUrl() {
+    return this.config.publicUrl || null;
+  }
+
+  async setPublicUrl(value) {
+    if (typeof value !== 'string') {
+      const err = new Error('publicUrl must be a string');
+      err.code = 'PUBLIC_URL_INVALID';
+      throw err;
+    }
+    const trimmed = value.trim();
+
+    // Codex UX R1 REVISE 3: atomic save — write a snapshot to disk FIRST,
+    // commit in-memory only on success. Without this, a write failure
+    // would leave the resolver pointing at the new (or cleared) value
+    // even though the API caller saw an error.
+    let canonical = null;
+    if (trimmed) {
+      try { canonical = validatePublicOrigin(trimmed); }
+      catch (err) {
+        const e = new Error(err.message);
+        e.code = err.code || 'PUBLIC_URL_INVALID';
+        throw e;
+      }
+    }
+    const snapshot = structuredClone(this.config);
+    if (canonical) snapshot.publicUrl = canonical;
+    else delete snapshot.publicUrl;
+    await this._saveSnapshot(snapshot);
+    // Disk write succeeded — publish to runtime.
+    if (canonical) this.config.publicUrl = canonical;
+    else delete this.config.publicUrl;
+    if (canonical) {
+      this.logAudit('public_url_set', null, JSON.stringify({ origin: canonical }));
+    } else {
+      this.logAudit('public_url_cleared', null, '{}');
+    }
+    this._notifyChange();
+    return canonical;
   }
 
   async setSlackApp({ clientId, clientSecret, tokenRotationEnabled }) {
