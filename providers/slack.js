@@ -7,6 +7,20 @@ const SLACK_API = 'https://slack.com/api';
 // Slack's typical Tier 3 rate-limit window.
 const CAPABILITY_COOLDOWN_MS = 60_000;
 
+// Slack Web API canonical body format. JSON body is technically advertised
+// for some methods but search.* (messages/all/files) silently rejects JSON
+// with `invalid_arguments`, and conversations.list silently ignores `limit`
+// when sent as JSON. Slack's official Node SDK uses form-urlencoded for the
+// same reason. Objects/arrays get JSON.stringify'd to match SDK behaviour.
+function encodeSlackParams(params) {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue;
+    form.set(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+  }
+  return form.toString();
+}
+
 export class SlackProvider extends BaseProvider {
   constructor(workspaceConfig) {
     super(workspaceConfig);
@@ -49,7 +63,7 @@ export class SlackProvider extends BaseProvider {
     }
     return {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
     };
   }
 
@@ -59,7 +73,7 @@ export class SlackProvider extends BaseProvider {
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(params),
+      body: encodeSlackParams(params),
     });
     const body = await res.json();
     const scopeHeader = res.headers.get('x-oauth-scopes');
@@ -254,6 +268,8 @@ export class SlackProvider extends BaseProvider {
     } catch (err) {
       if (err.slackError === 'missing_scope') {
         result.scopes.push('missing: channels:read');
+      } else if (err.slackError) {
+        result.scopes.push(`conversations.list error: ${err.slackError}`);
       }
     }
 
@@ -264,6 +280,8 @@ export class SlackProvider extends BaseProvider {
     } catch (err) {
       if (err.slackError === 'missing_scope') {
         result.scopes.push('missing: search:read');
+      } else if (err.slackError) {
+        result.scopes.push(`search.messages error: ${err.slackError}`);
       }
     }
 
