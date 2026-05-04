@@ -93,6 +93,99 @@ test('SlackProvider: token mode missing botToken → SLACK_NO_TOKEN', async () =
   await assert.rejects(() => p._headers(), err => err.code === 'SLACK_NO_TOKEN');
 });
 
+// ─── form-urlencoded body invariant ─────────────────────────────────
+//
+// Slack Web API silently accepts JSON bodies on most endpoints but
+// search.* (messages/all/files) returns invalid_arguments and
+// conversations.list ignores limit when it sees JSON. Slack's official
+// Node SDK uses application/x-www-form-urlencoded for the same reason.
+// These tests pin _fetch to the form contract so the JSON regression
+// can't come back.
+
+test('SlackProvider _fetch: Content-Type is form-urlencoded and body uses URLSearchParams shape', async () => {
+  const seen = {};
+  const fetchImpl = mockFetch(async ({ init }) => {
+    seen.contentType = init.headers['Content-Type'];
+    seen.body = init.body;
+    return { status: 200, body: { ok: true } };
+  });
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    await p._fetch('search.messages', { query: 'hello world', count: 5 });
+  });
+  assert.match(seen.contentType, /^application\/x-www-form-urlencoded(;|$)/);
+  assert.equal(typeof seen.body, 'string');
+  assert.match(seen.body, /(^|&)query=hello\+world(&|$)/);
+  assert.match(seen.body, /(^|&)count=5(&|$)/);
+});
+
+test('SlackProvider _fetch: skips null/undefined params and JSON-stringifies objects', async () => {
+  const seen = {};
+  const fetchImpl = mockFetch(async ({ init }) => {
+    seen.body = init.body;
+    return { status: 200, body: { ok: true } };
+  });
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    await p._fetch('chat.postMessage', {
+      channel: 'C1',
+      text: 'hi',
+      thread_ts: undefined,
+      icon_url: null,
+      blocks: [{ type: 'section' }],
+    });
+  });
+  // Scalars present, null/undefined dropped, object JSON-stringified.
+  assert.match(seen.body, /(^|&)channel=C1(&|$)/);
+  assert.match(seen.body, /(^|&)text=hi(&|$)/);
+  assert.doesNotMatch(seen.body, /thread_ts=/);
+  assert.doesNotMatch(seen.body, /icon_url=/);
+  // URLSearchParams percent-encodes the JSON-stringified object.
+  assert.match(seen.body, /blocks=%5B%7B%22type%22%3A%22section%22%7D%5D/);
+});
+
+test('SlackProvider list_channels: limit param reaches Slack (regression — JSON body silently dropped it)', async () => {
+  const seen = [];
+  const fetchImpl = mockFetch(async ({ url, init }) => {
+    if (url.endsWith('/conversations.list')) seen.push(init.body);
+    return { status: 200, body: { ok: true, channels: [] } };
+  });
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    await p.callTool('list_channels', { limit: 7 });
+  });
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /(^|&)limit=7(&|$)/);
+});
+
+// ─── capabilityCheck error reporting ────────────────────────────────
+
+test('SlackProvider capabilityCheck: surfaces non-missing_scope error reasons (was silent swallow)', async () => {
+  const fetchImpl = mockFetch(async ({ url }) => {
+    if (url.endsWith('/auth.test')) {
+      return { status: 200, headers: { 'x-oauth-scopes': 'channels:read,search:read' }, body: { ok: true, team_id: 'T1', team: 'X' } };
+    }
+    if (url.endsWith('/conversations.list')) {
+      return { status: 200, body: { ok: false, error: 'invalid_arguments' } };
+    }
+    if (url.endsWith('/search.messages')) {
+      return { status: 200, body: { ok: false, error: 'invalid_arguments' } };
+    }
+    return { status: 200, body: { ok: true } };
+  });
+  let cap;
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    cap = await p.capabilityCheck();
+  });
+  // Both diagnostic strings should appear so operators can debug
+  // without diffing JSON-vs-form transport bugs.
+  assert.ok(cap.scopes.some(s => /conversations\.list error: invalid_arguments/.test(s)),
+    `expected conversations.list diagnostic, got ${JSON.stringify(cap.scopes)}`);
+  assert.ok(cap.scopes.some(s => /search\.messages error: invalid_arguments/.test(s)),
+    `expected search.messages diagnostic, got ${JSON.stringify(cap.scopes)}`);
+});
+
 // ─── capability cooldown ────────────────────────────────────────────
 
 test('SlackProvider: capabilityCheck cooldown — second call within 60s returns cache', async () => {
