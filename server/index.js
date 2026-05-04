@@ -242,6 +242,26 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
       return;
     }
 
+    // RFC 7231 §6.5.5 — preflight HEAD probes (e.g. Palantir M4-a worker
+    // spawn check) need a defined response on POST-only / SSE endpoints.
+    // POST-only `/mcp` answers 405 + Allow so the probe can decide
+    // "endpoint live, method known"; `/sse` advertises SSE availability
+    // (200 + Allow) without opening a long-lived stream session — note
+    // that real GET /sse can be 401 when MCP auth is configured, so this
+    // is not strict GET mirroring. Auth is intentionally skipped: the
+    // probe response reveals nothing beyond what's already documented at
+    // /admin and the spec.
+    if (req.method === 'HEAD' && path === '/mcp') {
+      res.writeHead(405, { Allow: 'POST' });
+      res.end();
+      return;
+    }
+    if (req.method === 'HEAD' && path === '/sse') {
+      res.writeHead(200, { Allow: 'GET, HEAD, POST' });
+      res.end();
+      return;
+    }
+
     if (path === '/mcp' && req.method === 'POST') {
       const identity = await authenticateMcp(req, res, url);
       if (identity === false) return;
