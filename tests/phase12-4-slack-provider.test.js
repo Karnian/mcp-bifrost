@@ -115,8 +115,14 @@ test('SlackProvider _fetch: Content-Type is form-urlencoded and body uses URLSea
   });
   assert.match(seen.contentType, /^application\/x-www-form-urlencoded(;|$)/);
   assert.equal(typeof seen.body, 'string');
-  assert.match(seen.body, /(^|&)query=hello\+world(&|$)/);
-  assert.match(seen.body, /(^|&)count=5(&|$)/);
+  // Codex follow-up: parse via URLSearchParams instead of pinning the
+  // `+`/`%20` literal — both are valid form encodings for a space, and
+  // the official Slack Node SDK uses qsStringify (`%20`) while Node's
+  // URLSearchParams emits `+`. Test the contract (Slack receives the
+  // intended string), not the encoding flavour.
+  const parsed = new URLSearchParams(seen.body);
+  assert.equal(parsed.get('query'), 'hello world');
+  assert.equal(parsed.get('count'), '5');
 });
 
 test('SlackProvider _fetch: skips null/undefined params and JSON-stringifies objects', async () => {
@@ -155,7 +161,46 @@ test('SlackProvider list_channels: limit param reaches Slack (regression — JSO
     await p.callTool('list_channels', { limit: 7 });
   });
   assert.equal(seen.length, 1);
-  assert.match(seen[0], /(^|&)limit=7(&|$)/);
+  assert.equal(new URLSearchParams(seen[0]).get('limit'), '7');
+});
+
+test('SlackProvider read_channel: channel + limit reach Slack as form params', async () => {
+  const seen = [];
+  const fetchImpl = mockFetch(async ({ url, init }) => {
+    if (url.endsWith('/conversations.history')) {
+      seen.push({ ct: init.headers['Content-Type'], body: init.body });
+    }
+    return { status: 200, body: { ok: true, messages: [] } };
+  });
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    await p.callTool('read_channel', { channel: 'C123', limit: 50 });
+  });
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].ct, /^application\/x-www-form-urlencoded(;|$)/);
+  const parsed = new URLSearchParams(seen[0].body);
+  assert.equal(parsed.get('channel'), 'C123');
+  assert.equal(parsed.get('limit'), '50');
+});
+
+test('SlackProvider _fetch: OAuth-mode requests also send form-urlencoded body (per-token-provider parity)', async () => {
+  const seen = {};
+  const fetchImpl = mockFetch(async ({ init }) => {
+    seen.ct = init.headers['Content-Type'];
+    seen.auth = init.headers.Authorization;
+    seen.body = init.body;
+    return { status: 200, body: { ok: true } };
+  });
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({
+      id: 'w', namespace: 'w', authMode: 'oauth',
+      _tokenProvider: async () => 'xoxe.xoxp-rotated',
+    });
+    await p._fetch('search.messages', { query: 'q' });
+  });
+  assert.match(seen.ct, /^application\/x-www-form-urlencoded(;|$)/);
+  assert.equal(seen.auth, 'Bearer xoxe.xoxp-rotated');
+  assert.equal(new URLSearchParams(seen.body).get('query'), 'q');
 });
 
 // ─── capabilityCheck error reporting ────────────────────────────────
@@ -184,6 +229,41 @@ test('SlackProvider capabilityCheck: surfaces non-missing_scope error reasons (w
     `expected conversations.list diagnostic, got ${JSON.stringify(cap.scopes)}`);
   assert.ok(cap.scopes.some(s => /search\.messages error: invalid_arguments/.test(s)),
     `expected search.messages diagnostic, got ${JSON.stringify(cap.scopes)}`);
+  // tools[].reason must reflect the actual error too (admin UI's primary
+  // surface). Previously hardcoded "scope missing" even when the cause
+  // was invalid_arguments / ratelimited / etc.
+  const searchTool = cap.tools.find(t => t.name === 'search_messages');
+  const listTool = cap.tools.find(t => t.name === 'list_channels');
+  assert.equal(searchTool?.usable, 'unavailable');
+  assert.match(searchTool?.reason || '', /search\.messages error: invalid_arguments/);
+  assert.equal(listTool?.usable, 'unavailable');
+  assert.match(listTool?.reason || '', /conversations\.list error: invalid_arguments/);
+});
+
+test('SlackProvider capabilityCheck: rejects junk slackError chars (whitelist guard)', async () => {
+  // Defense-in-depth: even if a future Slack response or a fault-injection
+  // proxy stamps junk into body.error, capability surfaces must not pass
+  // arbitrary text through to audit logs / admin UI.
+  const fetchImpl = mockFetch(async ({ url }) => {
+    if (url.endsWith('/auth.test')) {
+      return { status: 200, headers: { 'x-oauth-scopes': 'channels:read,search:read' }, body: { ok: true, team_id: 'T1', team: 'X' } };
+    }
+    if (url.endsWith('/search.messages')) {
+      return { status: 200, body: { ok: false, error: '<script>alert(1)</script>' } };
+    }
+    return { status: 200, body: { ok: true, channels: [] } };
+  });
+  let cap;
+  await withFetch(fetchImpl, async () => {
+    const p = new SlackProvider({ id: 'w', namespace: 'w', credentials: { botToken: 'xoxb-1' } });
+    cap = await p.capabilityCheck();
+  });
+  // Whitelist strips non-[a-zA-Z0-9_] — `scriptalert1script` is the
+  // expected residual. Crucially, the angle brackets / parens never
+  // reach scopes[] or tools[].reason.
+  for (const entry of [...cap.scopes, ...(cap.tools.map(t => t.reason || ''))]) {
+    assert.doesNotMatch(entry, /[<>()]/, `unsafe chars in: ${entry}`);
+  }
 });
 
 // ─── capability cooldown ────────────────────────────────────────────
