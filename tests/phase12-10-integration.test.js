@@ -63,9 +63,12 @@ function makeFakeSlack({ teams = ['T01'], tokenSeed = 1, slackHandlers } = {}) {
       // Phase 12-10 (Codex R2 BLOCKER): record Authorization header so
       // rotation tests can assert the Slack Web API call carries the
       // *rotated* access token, not the original.
+      // Codex follow-up: also record Content-Type so e2e form-body
+      // invariant can be asserted alongside body parsing.
       calls.push({
         url,
         body: init?.body,
+        contentType: init?.headers?.['Content-Type'] || init?.headers?.['content-type'] || null,
         authorization: init?.headers?.Authorization || init?.headers?.authorization || null,
       });
       const body = String(init?.body || '');
@@ -387,6 +390,20 @@ test('integration: provider callTool drives OAuth refresh + uses rotated token (
       // The Authorization must equal whatever raw config now stores.
       const rawAfterCall = srv.wm.getRawWorkspace(slack.id).slackOAuth.tokens.accessToken;
       assert.equal(searchCall.authorization, `Bearer ${rawAfterCall}`);
+
+      // Codex R2 follow-up: integration-level form-body invariant. Slack's
+      // search.* require application/x-www-form-urlencoded; a unit-test-only
+      // assertion can't catch a regression that flips _fetch back to JSON
+      // because OAuth-mode might rewrite headers downstream. Assert both
+      // Content-Type and the parsed body so the e2e contract is locked.
+      assert.equal(typeof searchCall.body, 'string', 'search.messages body must be a string');
+      assert.match(
+        searchCall.contentType || '',
+        /^application\/x-www-form-urlencoded(;|$)/,
+        'OAuth-mode search.messages must keep form Content-Type after rotation',
+      );
+      const searchParams = new URLSearchParams(searchCall.body);
+      assert.equal(searchParams.get('query'), 'hi', 'query param must round-trip via form encoding');
 
       // 3. raw config has the rotated token
       const raw = srv.wm.getRawWorkspace(slack.id).slackOAuth.tokens;

@@ -7,6 +7,46 @@ const SLACK_API = 'https://slack.com/api';
 // Slack's typical Tier 3 rate-limit window.
 const CAPABILITY_COOLDOWN_MS = 60_000;
 
+// Slack Web API canonical body format. JSON body is technically advertised
+// for some methods but search.* (messages/all/files) silently rejects JSON
+// with `invalid_arguments`, and conversations.list silently ignores `limit`
+// when sent as JSON. Slack's official Node SDK uses form-urlencoded for the
+// same reason. Objects/arrays get JSON.stringify'd to match SDK behaviour.
+function encodeSlackParams(params) {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue;
+    form.set(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+  }
+  return form.toString();
+}
+
+// Whitelist Slack machine error codes before placing them into capability
+// surfaces (scopes[] / tools[].reason). Slack errors are documented as
+// snake_case identifiers (`missing_scope`, `invalid_arguments`, …) so a
+// strict alphanumeric+underscore filter is a sufficient guard against any
+// stray content getting reflected into audit logs or admin UI.
+//
+// Codex follow-up: validate-or-reject (not strip-and-pass). Stripping
+// junk like `<script>alert(1)</script>` to `scriptalert1script` would
+// produce a meaningless string presented as if it were a real Slack
+// error code. Rejecting and letting the caller fall back to a generic
+// "unavailable" reason is cleaner.
+function safeSlackErrorCode(code) {
+  if (!code) return null;
+  const raw = String(code).slice(0, 64);
+  return /^[A-Za-z0-9_]+$/.test(raw) ? raw : null;
+}
+
+// Build the user-facing capability reason string. Centralized so the
+// list_channels / read_channel / search_messages branches all stay in
+// sync if the format ever changes.
+function capabilityReason(method, scopeLabel, errCode) {
+  if (errCode === 'missing_scope') return `${scopeLabel} scope missing`;
+  if (errCode) return `${method} error: ${errCode}`;
+  return `${scopeLabel} unavailable`;
+}
+
 export class SlackProvider extends BaseProvider {
   constructor(workspaceConfig) {
     super(workspaceConfig);
@@ -49,7 +89,7 @@ export class SlackProvider extends BaseProvider {
     }
     return {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
     };
   }
 
@@ -59,7 +99,7 @@ export class SlackProvider extends BaseProvider {
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(params),
+      body: encodeSlackParams(params),
     });
     const body = await res.json();
     const scopeHeader = res.headers.get('x-oauth-scopes');
@@ -242,6 +282,7 @@ export class SlackProvider extends BaseProvider {
     }
 
     let hasChannelsRead = false;
+    let channelsErr = null;
     try {
       const channels = await this._fetch('conversations.list', { limit: 3 });
       result.resources.count = channels.channels?.length || 0;
@@ -252,18 +293,25 @@ export class SlackProvider extends BaseProvider {
       }));
       hasChannelsRead = true;
     } catch (err) {
-      if (err.slackError === 'missing_scope') {
+      channelsErr = safeSlackErrorCode(err.slackError);
+      if (channelsErr === 'missing_scope') {
         result.scopes.push('missing: channels:read');
+      } else if (channelsErr) {
+        result.scopes.push(`conversations.list error: ${channelsErr}`);
       }
     }
 
     let hasSearchAccess = false;
+    let searchErr = null;
     try {
       await this._fetch('search.messages', { query: 'test', count: 1 });
       hasSearchAccess = true;
     } catch (err) {
-      if (err.slackError === 'missing_scope') {
+      searchErr = safeSlackErrorCode(err.slackError);
+      if (searchErr === 'missing_scope') {
         result.scopes.push('missing: search:read');
+      } else if (searchErr) {
+        result.scopes.push(`search.messages error: ${searchErr}`);
       }
     }
 
@@ -273,13 +321,17 @@ export class SlackProvider extends BaseProvider {
         result.tools.push({
           name: tool.name,
           usable: hasChannelsRead ? 'usable' : 'unavailable',
-          reason: hasChannelsRead ? undefined : 'channels:read scope missing',
+          reason: hasChannelsRead
+            ? undefined
+            : capabilityReason('conversations.list', 'channels:read', channelsErr),
         });
       } else if (tool.name === 'search_messages') {
         result.tools.push({
           name: tool.name,
           usable: hasSearchAccess ? 'usable' : 'unavailable',
-          reason: hasSearchAccess ? undefined : 'search:read scope missing',
+          reason: hasSearchAccess
+            ? undefined
+            : capabilityReason('search.messages', 'search:read', searchErr),
         });
       }
     }
