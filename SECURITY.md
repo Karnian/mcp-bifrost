@@ -54,6 +54,8 @@ If you are running `mcp-bifrost` in production:
 - Keep `config/workspaces.json` at `chmod 0600` (POSIX) — Bifrost will warn
   via `GET /api/oauth/security` if it cannot enforce this
 - Do not expose the admin UI publicly; `BIFROST_ADMIN_EXPOSE` is opt-in only
+  (and has no effect for remote peers unless an admin token is set, via
+  `BIFROST_ADMIN_TOKEN` or `server.adminToken`)
 - Rotate provider tokens via the Admin UI Detail panel rather than editing
   the JSON directly
 - Subscribe to repository releases / security advisories on GitHub

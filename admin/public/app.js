@@ -114,6 +114,7 @@ async function api(method, path, body) {
 function logout() {
   state.token = '';
   sessionStorage.removeItem('bifrost_token');
+  $('#admin-token').value = '';
   showScreen('login');
 }
 
@@ -137,6 +138,7 @@ $('#login-form').addEventListener('submit', async (e) => {
     if (data.ok) {
       state.token = token;
       sessionStorage.setItem('bifrost_token', token);
+      $('#admin-token').value = '';
       await enterDashboard();
     } else {
       err.textContent = data.error?.message || 'Authentication failed';

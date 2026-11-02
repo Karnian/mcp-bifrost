@@ -1,7 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { join, dirname, extname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars } from './auth.js';
+import { authenticateAdmin, sendJson, readBody, isCommandAllowed, safeTokenCompare, validateEnvVars, isLocalRequest, sendAdminTokenRequired } from './auth.js';
 import { RateLimiter, getClientIp } from '../server/rate-limiter.js';
 import { matchPattern } from '../server/mcp-token-manager.js';
 import { validateWorkspacePayload, validateSlackAppPayload } from '../server/workspace-schema.js';
@@ -1241,9 +1241,7 @@ async function renderSlackManifestYaml(redirectUrl) {
 
 function _checkExposure(req, res) {
   if (process.env.BIFROST_ADMIN_EXPOSE === '1') return true;
-  const addr = req.socket?.remoteAddress || '';
-  const isLocal = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-  if (!isLocal) {
+  if (!isLocalRequest(req)) {
     sendJson(res, 403, { ok: false, error: { code: 'ADMIN_LOCAL_ONLY', message: 'Admin API is restricted to localhost. Set BIFROST_ADMIN_EXPOSE=1 to allow remote access.' } });
     return false;
   }
@@ -1264,13 +1262,13 @@ async function handleLogin(req, res, wm) {
   const adminToken = wm.getAdminToken();
 
   if (!adminToken) {
+    // Dev mode is loopback-only, even with BIFROST_ADMIN_EXPOSE=1.
+    if (!isLocalRequest(req)) return sendAdminTokenRequired(res);
     sendJson(res, 200, { ok: true, data: { message: 'No admin token configured' } });
     return;
   }
 
-  if (adminToken && safeTokenCompare(body.token || '', adminToken)) {
-    sendJson(res, 200, { ok: true, data: { message: 'Authenticated' } });
-  } else if (!adminToken) {
+  if (safeTokenCompare(body.token || '', adminToken)) {
     sendJson(res, 200, { ok: true, data: { message: 'Authenticated' } });
   } else {
     sendJson(res, 401, { ok: false, error: { code: 'INVALID_TOKEN', message: '토큰이 일치하지 않습니다' } });
