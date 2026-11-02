@@ -8,7 +8,8 @@ import { createAdminRoutes, handleSlackOAuthCallback } from '../admin/routes.js'
 import { OAuthManager } from './oauth-manager.js';
 import { OAuthMetrics } from './oauth-metrics.js';
 import { SlackOAuthManager } from './slack-oauth-manager.js';
-import { setPublicOriginProvider } from './public-origin.js';
+import { setPublicOriginProvider, getPublicOriginOrNull } from './public-origin.js';
+import { createHostGuard } from './host-guard.js';
 import { McpTokenManager } from './mcp-token-manager.js';
 import { UsageRecorder } from './usage-recorder.js';
 import { AuditLogger } from './audit-logger.js';
@@ -38,6 +39,61 @@ function jsonResponse(res, statusCode, data) {
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+/**
+ * Normalize a host setting into a de-duplicated, non-empty list.
+ * Accepts a comma-separated string ("127.0.0.1,100.64.0.1") or an array.
+ */
+export function parseHosts(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  const list = [...new Set(raw.map(h => String(h).trim()).filter(Boolean))];
+  return list.length ? list : ['127.0.0.1'];
+}
+
+// Per-server close promise, shared by every caller (direct server.close(),
+// stop(), bind-failure cleanup). `listening` flips to false as soon as close()
+// is called — long before active connections drain — so it can't be used to
+// tell "closed" from "closing".
+const closeState = new WeakMap();
+
+/**
+ * Begin closing one server (idempotent). Resolves on the server's 'close'
+ * event, i.e. after every connection has ended. A server that never listened
+ * resolves immediately.
+ */
+export function beginClose(srv) {
+  const existing = closeState.get(srv);
+  if (existing) return existing;
+  if (!srv.listening) return Promise.resolve();
+  // Forget the entry once fully closed: later close() calls then get node's
+  // native ERR_SERVER_NOT_RUNNING, and later closeServers() resolve at once.
+  const done = new Promise((resolve) => srv.once('close', () => { closeState.delete(srv); resolve(); }));
+  closeState.set(srv, done);
+  (srv._bifrostNativeClose || srv.close).call(srv);
+  srv.closeIdleConnections?.();
+  return done;
+}
+
+/**
+ * Close several http.Servers together. Closing starts on every listener up
+ * front so none keeps accepting while another drains; long-lived sockets
+ * (SSE streams never end on their own) are force-closed after `graceMs`.
+ * Also waits for servers whose close was already in progress.
+ */
+export async function closeServers(servers, { graceMs = 5000 } = {}) {
+  const pending = servers.map(beginClose);
+  let timer;
+  const force = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      for (const srv of servers) srv.closeAllConnections?.();
+      resolve();
+    }, graceMs);
+    timer.unref?.();
+  });
+  await Promise.race([Promise.all(pending), force]);
+  clearTimeout(timer);
+  await Promise.all(pending);
 }
 
 function isLocalhost(req) {
@@ -230,11 +286,34 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     }
   }
 
-  const server = createServer(async (req, res) => {
+  const hostGuard = createHostGuard({ getPublicOrigin: getPublicOriginOrNull });
+
+  const handleRequest = async (req, res) => {
     applySecurityHeaders(res, req);
 
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    // Parse against a fixed base: nothing below reads url.host/origin, and an
+    // unparsable Host header (e.g. "[") used to throw here — before auth —
+    // as an unhandled rejection that terminated the whole process.
+    let url;
+    try {
+      url = new URL(req.url, 'http://localhost');
+    } catch {
+      jsonResponse(res, 400, { error: 'Bad Request' });
+      return;
+    }
     const path = url.pathname;
+
+    // DNS-rebinding defense (MCP 2025-03-26 transport security): reject
+    // foreign Origins everywhere; admin paths also require a known Host since
+    // same-origin GETs carry no Origin.
+    if (!hostGuard.originAllowed(req.headers.origin)) {
+      jsonResponse(res, 403, { error: 'Forbidden', code: 'ORIGIN_NOT_ALLOWED' });
+      return;
+    }
+    if ((path.startsWith('/api/') || path.startsWith('/admin')) && !hostGuard.hostAllowed(req.headers.host)) {
+      jsonResponse(res, 403, { error: 'Forbidden', code: 'HOST_NOT_ALLOWED' });
+      return;
+    }
 
     if (req.method === 'OPTIONS' && process.env.BIFROST_CORS_ORIGIN) {
       res.writeHead(204);
@@ -364,58 +443,109 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     }
 
     jsonResponse(res, 404, { error: 'Not Found' });
-  });
+  };
 
-  server.headersTimeout = HEADERS_TIMEOUT;
-  server.requestTimeout = REQUEST_TIMEOUT;
+  // Last line of defense: node:http does not catch a rejected async request
+  // listener, so any throw escaping a route would otherwise crash the hub.
+  const requestHandler = (req, res) => {
+    handleRequest(req, res).catch((err) => {
+      logger.error(`[Bifrost] Unhandled request error on ${req.method} ${String(req.url).slice(0, 200)}: ${err?.message || err}`);
+      if (!res.headersSent) {
+        try { jsonResponse(res, 500, { error: 'Internal Server Error' }); } catch { res.destroy(); }
+      } else {
+        res.destroy();
+      }
+    });
+  };
+
+  let servers = [];
+  const makeServer = ({ primary = false } = {}) => {
+    const srv = createServer(requestHandler);
+    srv.headersTimeout = HEADERS_TIMEOUT;
+    srv.requestTimeout = REQUEST_TIMEOUT;
+    // Keep node's close() contract (callback, ERR_SERVER_NOT_RUNNING) but
+    // route it through the shared close promise. Closing the primary — the
+    // legacy `server` handle — starts closing every extra listener at call
+    // time, not on 'close' (which waits for the primary's SSE clients).
+    const nativeClose = srv.close;
+    srv._bifrostNativeClose = nativeClose;
+    srv.close = function close(cb) {
+      if (!closeState.has(srv) && !srv.listening) return nativeClose.call(srv, cb);
+      beginClose(srv);
+      if (primary) closeServers(servers.slice(1)).catch(() => { /* best effort */ });
+      // Same as native: cb is a one-shot 'close' listener (this === srv).
+      if (typeof cb === 'function') srv.once('close', cb);
+      return srv;
+    };
+    return srv;
+  };
+  const server = makeServer({ primary: true });
 
   const port = portOverride ?? wm.getServerConfig().port ?? 3100;
-  const host = hostOverride ?? process.env.BIFROST_HOST ?? wm.getServerConfig().host ?? '127.0.0.1';
+  // BIFROST_HOST / server.host accept a comma-separated list (or an array) so
+  // the hub can bind several specific interfaces (e.g. loopback + a Tailscale
+  // address) without falling back to 0.0.0.0. The first entry is the primary
+  // listener returned as `server`; extras share the same request handler.
+  const hosts = parseHosts(hostOverride ?? process.env.BIFROST_HOST ?? wm.getServerConfig().host);
+  const host = hosts[0];
+  servers = [server, ...hosts.slice(1).map(() => makeServer())];
+
+  const listenOn = (srv, listenPort, listenHost) => new Promise((resolve, reject) => {
+    const onError = (err) => {
+      srv.removeListener('listening', onListen);
+      reject(err);
+    };
+    const onListen = () => {
+      srv.removeListener('error', onError);
+      const addr = srv.address();
+      resolve(typeof addr === 'object' && addr ? addr.port : listenPort);
+    };
+    srv.once('error', onError);
+    srv.once('listening', onListen);
+    srv.listen(listenPort, listenHost);
+  });
 
   let boundPort = null;
   try {
-    await new Promise((resolve, reject) => {
-      const onError = (err) => {
-        server.removeListener('listening', onListen);
-        reject(err);
-      };
-      const onListen = () => {
-        server.removeListener('error', onError);
-        const addr = server.address();
-        boundPort = typeof addr === 'object' && addr ? addr.port : port;
-        const base = `http://${host}:${boundPort}`;
-        const exposed = host === '0.0.0.0' || host === '::';
-        logger.info(`[Bifrost] Server running on ${base}`);
-        logger.info(`[Bifrost] MCP endpoint: POST ${base}/mcp`);
-        logger.info(`[Bifrost] SSE endpoint: GET ${base}/sse`);
-        logger.info(`[Bifrost] Admin UI: ${base}/admin/`);
-        logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
-        if (exposed) {
-          logger.warn('');
-          logger.warn('[Bifrost] ⚠️  Server is bound to a public interface.');
-          if (!tokenManager.isConfigured()) {
-            logger.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
-          }
-          if (!wm.getAdminToken()) {
-            logger.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
-          }
-          logger.warn('');
-        }
-        resolve();
-      };
-      server.once('error', onError);
-      server.once('listening', onListen);
-      server.listen(port, host);
-    });
+    boundPort = await listenOn(server, port, host);
+    // Extras reuse the primary's bound port so port 0 (tests) stays consistent.
+    for (let i = 1; i < hosts.length; i++) {
+      await listenOn(servers[i], boundPort, hosts[i]);
+    }
   } catch (err) {
     // listen() failed — clean up partially-built state so we don't leak
-    // the healthInterval timer, file watcher, or provider handles.
+    // the healthInterval timer, file watcher, provider handles, or any
+    // listener that did bind before the failure.
+    await closeServers(servers, { graceMs: 0 });
     clearInterval(healthInterval);
     try { await wm.close?.(); } catch { /* best effort */ }
     for (const [, provider] of wm.providers ?? []) {
       try { await provider.shutdown?.(); } catch { /* best effort */ }
     }
     throw err;
+  }
+
+  const fmtHost = (h) => (h.includes(':') ? `[${h}]` : h);
+  for (const h of hosts) {
+    const base = `http://${fmtHost(h)}:${boundPort}`;
+    logger.info(`[Bifrost] Server running on ${base}`);
+    logger.info(`[Bifrost] MCP endpoint: POST ${base}/mcp`);
+    logger.info(`[Bifrost] SSE endpoint: GET ${base}/sse`);
+  }
+  logger.info(`[Bifrost] Admin UI: http://${fmtHost(host)}:${boundPort}/admin/ (loopback clients only unless BIFROST_ADMIN_EXPOSE=1)`);
+  logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
+  const isLoopbackHost = (h) => h === 'localhost' || h === '::1' || /^127\./.test(h);
+  const nonLoopback = hosts.filter(h => !isLoopbackHost(h));
+  if (nonLoopback.length > 0) {
+    logger.warn('');
+    logger.warn(`[Bifrost] ⚠️  Server is bound to a non-loopback interface: ${nonLoopback.join(', ')}`);
+    if (!tokenManager.isConfigured()) {
+      logger.warn('[Bifrost] ⚠️  No MCP tokens configured — MCP endpoint is OPEN. Issue a token via Admin UI or set BIFROST_MCP_TOKEN.');
+    }
+    if (!wm.getAdminToken()) {
+      logger.warn('[Bifrost] ⚠️  BIFROST_ADMIN_TOKEN not set — Admin UI/API is UNPROTECTED on the network!');
+    }
+    logger.warn('');
   }
 
   server.on('close', () => {
@@ -432,9 +562,7 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     // tearing down providers so any pending hot-reload debounce timer
     // can't fire into a half-shut-down state. wm.close() is idempotent.
     try { await wm.close?.(); } catch { /* best effort */ }
-    if (server.listening) {
-      await new Promise((resolve) => server.close(() => resolve()));
-    }
+    await closeServers(servers);
     for (const [, provider] of wm.providers ?? []) {
       try { await provider.shutdown?.(); } catch { /* best effort */ }
     }
@@ -442,7 +570,7 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     try { await audit.flush?.(); } catch { /* best effort */ }
   }
 
-  return { wm, tr, mcp, sse, oauth, slackOAuth, tokenManager, usage, audit, server, healthInterval, port: boundPort, host, stop };
+  return { wm, tr, mcp, sse, oauth, slackOAuth, tokenManager, usage, audit, server, servers, healthInterval, port: boundPort, host, hosts, stop };
 }
 
 // Auto-start only when executed as the entry point (not when imported).
