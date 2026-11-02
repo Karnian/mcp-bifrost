@@ -11,6 +11,8 @@ export class SseManager {
 
   createSession(res) {
     const sessionId = randomUUID();
+    // Long-lived by design: graceful shutdown must not wait for it to finish.
+    res.bifrostLongLived = true;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -46,7 +48,18 @@ export class SseManager {
     return sessionId;
   }
 
-  getSession(sessionId) {
+  /** End every open SSE stream (graceful shutdown). Returns how many were closed. */
+  closeAll() {
+    let n = 0;
+    for (const [id, { res }] of this.sessions) {
+      try { res.end(); } catch { try { res.destroy(); } catch { /* ignore */ } }
+      this.sessions.delete(id);
+      n++;
+    }
+    return n;
+  }
+
+    getSession(sessionId) {
     return this.sessions.get(sessionId);
   }
 

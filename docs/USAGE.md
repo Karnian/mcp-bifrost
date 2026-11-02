@@ -65,6 +65,7 @@ BIFROST_HOST=0.0.0.0 npm start
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
 | `BIFROST_HOST` | `127.0.0.1` | listen 인터페이스. 쉼표로 여러 개 지정 가능(`127.0.0.1,100.x.y.z`; `workspaces.json` 의 `server.host` 는 배열도 허용). 빈 값은 `127.0.0.1`. 하나라도 bind 실패 시 서버 기동 전체 실패. 외부 전체 노출은 `0.0.0.0` |
+| `BIFROST_HOST_OPTIONAL` | (없음) | best-effort listen 주소(콤마 구분). bind 실패(주소 없음·포트 점유)해도 `BIFROST_HOST` 리스너는 계속 동작하고, 실패 주소만 backoff(30s → 최대 10분)로 재시도. DHCP·Tailscale 처럼 바뀌거나 늦게 생기는 주소용 |
 | `BIFROST_ADMIN_TOKEN` | (없음) | Admin UI/API 인증 토큰. 미설정 시 토큰 검사 생략 |
 | `BIFROST_MCP_TOKEN` | (없음) | MCP 클라이언트 인증 토큰. 미설정(그리고 Admin 에서 발급한 토큰도 없음) 시 **모든 listen 주소에서** 인증 생략 — loopback 외 주소에 bind 할 때는 반드시 설정 |
 | `BIFROST_ADMIN_EXPOSE` | `0` | `1` 로 설정 시 Admin API 가 외부에서도 접근 가능 |
@@ -93,7 +94,8 @@ BIFROST_HOST=127.0.0.1,127.0.1.1,100.83.124.113 npm start
 ```
 
 - Admin API 는 peer 주소가 `127.0.0.1`/`::1` 일 때만 허용된다(Host 헤더가 아님). tailnet 주소로 들어온 요청은 유효한 Admin 토큰이 있어도 `403 ADMIN_LOCAL_ONLY`.
-- 모든 주소가 필수다. Tailscale 처럼 부팅 시 늦게 생기는 주소를 넣으면 생길 때까지 기동이 실패하므로 systemd `Restart=on-failure` 로 재시도시킨다.
+- `BIFROST_HOST` 의 주소는 모두 필수다(하나라도 실패하면 기동 실패). Tailscale·DHCP 처럼 늦게 생기거나 바뀌는 주소는 `BIFROST_HOST_OPTIONAL` 로 넘긴다 — 실패해도 loopback 리스너는 살아 있고 backoff 재시도한다. 주소 자체가 **바뀐** 경우(새 IP)는 프로세스가 모르므로, 기동 래퍼가 현재 IP 를 계산해 넘기고 IP 변경 시 재시작하는 감시(예: systemd timer)를 둔다.
+- `SIGTERM`/`SIGINT` 는 graceful shutdown 이다: 신규 연결 차단 → 진행 중 요청 처리·응답 전송 완료 대기(최대 10초) → SSE 스트림 종료(진행 중이던 `POST /sse` 결과는 전달된 뒤) → 소켓 half-close(느린 수신자도 남은 바이트를 받음, 기한 초과분만 강제 종료) → provider 종료 → health check·OAuth refresh/rotation 체인 완료 대기(최소 3초) → 설정 쓰기 flush → usage/audit flush. 20초 watchdog 을 넘기거나 신호가 한 번 더 오면 exit(1). systemd 는 `TimeoutStopSec` 을 30초 이상으로 둔다.
 
 ---
 

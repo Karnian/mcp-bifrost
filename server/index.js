@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { Server as NetServer } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { WorkspaceManager } from './workspace-manager.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -46,9 +47,14 @@ function jsonResponse(res, statusCode, data) {
  * Accepts a comma-separated string ("127.0.0.1,100.64.0.1") or an array.
  */
 export function parseHosts(value) {
-  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
-  const list = [...new Set(raw.map(h => String(h).trim()).filter(Boolean))];
+  const list = parseHostList(value);
   return list.length ? list : ['127.0.0.1'];
+}
+
+/** Like parseHosts but an empty input stays empty (used for optional hosts). */
+export function parseHostList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return [...new Set(raw.map(h => String(h).trim()).filter(Boolean))];
 }
 
 // Per-server close promise, shared by every caller (direct server.close(),
@@ -70,9 +76,41 @@ export function beginClose(srv) {
   // native ERR_SERVER_NOT_RUNNING, and later closeServers() resolve at once.
   const done = new Promise((resolve) => srv.once('close', () => { closeState.delete(srv); resolve(); }));
   closeState.set(srv, done);
-  (srv._bifrostNativeClose || srv.close).call(srv);
-  srv.closeIdleConnections?.();
+  if (srv._bifrostSockets) {
+    // Stop listening WITHOUT http.Server.close()'s closeIdleConnections():
+    // node counts a socket as idle as soon as res.end() was called, even
+    // while the response bytes are still buffered — destroying it truncates
+    // the response for a slow reader. Instead half-close only sockets that
+    // have no response in progress; busy ones are ended by stop() (or the
+    // caller's grace period) once they are done.
+    NetServer.prototype.close.call(srv);
+    clearHttpConnectionsTimer(srv);
+    endQuietSockets(srv._bifrostSockets);
+  } else {
+    (srv._bifrostNativeClose || srv.close).call(srv);
+    srv.closeIdleConnections?.();
+  }
   return done;
+}
+
+/**
+ * http.Server.close() clears its request-timeout checking interval; we bypass
+ * it (to skip the idle sweep), so clear it here. The symbol is internal —
+ * looked up by description, no-op if node renames it.
+ */
+function clearHttpConnectionsTimer(srv) {
+  const sym = Object.getOwnPropertySymbols(srv).find(s => s.description === 'http.server.connectionsCheckingInterval');
+  if (sym && srv[sym]) clearInterval(srv[sym]);
+}
+
+/** Half-close (FIN after buffered bytes) sockets that have no response in progress. */
+function endQuietSockets(socks) {
+  for (const sock of socks) {
+    const res = sock._httpMessage; // current ServerResponse, if any (long-standing node internal)
+    if (!res || (res.writableFinished && sock.writableLength === 0)) {
+      try { sock.end(); } catch { /* ignore */ }
+    }
+  }
 }
 
 /**
@@ -128,7 +166,7 @@ function oauthCspHeaders(nonce) {
  * auto-start — callers (CLI entry or tests) must invoke startServer() and are
  * responsible for tearing the returned server down via `server.close()`.
  */
-async function startServer({ port: portOverride, host: hostOverride, configDir } = {}) {
+async function startServer({ port: portOverride, host: hostOverride, optionalHosts: optionalOverride, configDir, optionalRetry = {} } = {}) {
   // Phase 12-4 §4.2 — configDir override so tests can boot a complete
   // server (including SlackOAuthManager wiring) against a tmpdir without
   // touching the real config/workspaces.json.
@@ -170,10 +208,18 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
 
   oauth.purgeStalePending().catch(() => {});
 
-  wm.testAll().catch(err => logger.error('[Bifrost] Initial health check failed:', err.message));
+  // Background work that may write state (health checks can refresh tokens);
+  // stop() waits for it so a signal can't cut a rotation/save in half.
+  const background = new Set();
+  const trackBackground = (p) => {
+    background.add(p);
+    p.finally(() => background.delete(p)).catch(() => {});
+    return p;
+  };
+  trackBackground(wm.testAll().catch(err => logger.error('[Bifrost] Initial health check failed:', err.message)));
 
   const healthInterval = setInterval(() => {
-    wm.testAll().catch(err => logger.error('[Bifrost] Background health check failed:', err.message));
+    trackBackground(wm.testAll().catch(err => logger.error('[Bifrost] Background health check failed:', err.message)));
   }, HEALTH_CHECK_INTERVAL_MS);
   // Don't keep the event loop alive solely for this timer — the listening
   // server handle is the one that holds the process open in production.
@@ -447,8 +493,33 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
 
   // Last line of defense: node:http does not catch a rejected async request
   // listener, so any throw escaping a route would otherwise crash the hub.
+  // In-flight request bodies (tool calls, OAuth exchanges, admin writes) —
+  // stop() waits for these, not just for sockets to close.
+  const inflight = new Set();
+  const responseFlushed = (res) => {
+    // SSE streams are long-lived by design — never wait for them here.
+    if (res.bifrostLongLived || res.writableFinished || res.destroyed) return Promise.resolve();
+    return new Promise((resolve) => { res.once('finish', resolve); res.once('close', resolve); });
+  };
   const requestHandler = (req, res) => {
-    handleRequest(req, res).catch((err) => {
+    if (shuttingDown) {
+      // e.g. a pipelined request on a connection accepted before stop():
+      // don't start new work while draining.
+      res.shouldKeepAlive = false;
+      jsonResponse(res, 503, { error: 'Service Unavailable', code: 'SHUTTING_DOWN' });
+      // Track until flushed: a pipelined 503 queued behind an in-flight
+      // response must not be cut off by the final FIN.
+      const flushed = responseFlushed(res);
+      inflight.add(flushed);
+      flushed.then(() => inflight.delete(flushed));
+      return;
+    }
+    const p = handleRequest(req, res);
+    // Tracked until the handler is done AND its response is flushed.
+    const tracked = p.then(() => responseFlushed(res), () => responseFlushed(res));
+    inflight.add(tracked);
+    tracked.then(() => inflight.delete(tracked));
+    p.catch((err) => {
       logger.error(`[Bifrost] Unhandled request error on ${req.method} ${String(req.url).slice(0, 200)}: ${err?.message || err}`);
       if (!res.headersSent) {
         try { jsonResponse(res, 500, { error: 'Internal Server Error' }); } catch { res.destroy(); }
@@ -459,8 +530,18 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   };
 
   let servers = [];
+  let shuttingDown = false;
+  // Every accepted socket, so stop() can half-close (FIN) them gracefully —
+  // destroy() would cut off responses a slow reader hasn't received yet.
+  const sockets = new Set();
   const makeServer = ({ primary = false } = {}) => {
     const srv = createServer(requestHandler);
+    srv._bifrostSockets = new Set();
+    srv.on('connection', (sock) => {
+      sockets.add(sock);
+      srv._bifrostSockets.add(sock);
+      sock.once('close', () => { sockets.delete(sock); srv._bifrostSockets.delete(sock); });
+    });
     srv.headersTimeout = HEADERS_TIMEOUT;
     srv.requestTimeout = REQUEST_TIMEOUT;
     // Keep node's close() contract (callback, ERR_SERVER_NOT_RUNNING) but
@@ -472,7 +553,11 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     srv.close = function close(cb) {
       if (!closeState.has(srv) && !srv.listening) return nativeClose.call(srv, cb);
       beginClose(srv);
-      if (primary) closeServers(servers.slice(1)).catch(() => { /* best effort */ });
+      if (primary) {
+        shuttingDown = true;
+        clearOptionalRetries();
+        closeServers(servers.slice(1)).catch(() => { /* best effort */ });
+      }
       // Same as native: cb is a one-shot 'close' listener (this === srv).
       if (typeof cb === 'function') srv.once('close', cb);
       return srv;
@@ -488,6 +573,18 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   // listener returned as `server`; extras share the same request handler.
   const hosts = parseHosts(hostOverride ?? process.env.BIFROST_HOST ?? wm.getServerConfig().host);
   const host = hosts[0];
+  // Optional hosts (BIFROST_HOST_OPTIONAL) are best-effort: a bind failure —
+  // e.g. a DHCP/Tailscale address that is gone or whose port is taken — is
+  // logged and retried with backoff instead of taking the required (loopback)
+  // listeners down with it.
+  const optionalHosts = parseHostList(optionalOverride ?? process.env.BIFROST_HOST_OPTIONAL)
+    .filter(h => !hosts.includes(h));
+  const optionalStatus = new Map(optionalHosts.map(h => [h, { bound: false, attempts: 0, lastError: null }]));
+  const optionalTimers = new Set();
+  function clearOptionalRetries() {
+    for (const t of optionalTimers) clearTimeout(t);
+    optionalTimers.clear();
+  }
   servers = [server, ...hosts.slice(1).map(() => makeServer())];
 
   const listenOn = (srv, listenPort, listenHost) => new Promise((resolve, reject) => {
@@ -526,6 +623,34 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   }
 
   const fmtHost = (h) => (h.includes(':') ? `[${h}]` : h);
+  const retryBaseMs = optionalRetry.baseMs ?? 30_000;
+  const retryMaxMs = optionalRetry.maxMs ?? 600_000;
+  async function tryOptional(h) {
+    if (shuttingDown) return;
+    const st = optionalStatus.get(h);
+    st.attempts++;
+    const srv = makeServer();
+    try {
+      await listenOn(srv, boundPort, h);
+    } catch (err) {
+      st.lastError = err.code || err.message;
+      const delay = Math.min(retryBaseMs * 2 ** (st.attempts - 1), retryMaxMs);
+      logger.warn(`[Bifrost] ⚠️  Optional host ${h}:${boundPort} bind failed (${st.lastError}); retry in ${Math.round(delay / 1000)}s`);
+      if (!shuttingDown) {
+        const t = setTimeout(() => { optionalTimers.delete(t); tryOptional(h).catch(() => {}); }, delay);
+        t.unref?.();
+        optionalTimers.add(t);
+      }
+      return;
+    }
+    if (shuttingDown) { await closeServers([srv], { graceMs: 0 }); return; }
+    servers.push(srv);
+    st.bound = true;
+    st.lastError = null;
+    logger.info(`[Bifrost] Optional host bound: http://${fmtHost(h)}:${boundPort}/mcp`);
+  }
+  await Promise.all(optionalHosts.map(h => tryOptional(h)));
+
   for (const h of hosts) {
     const base = `http://${fmtHost(h)}:${boundPort}`;
     logger.info(`[Bifrost] Server running on ${base}`);
@@ -535,7 +660,7 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
   logger.info(`[Bifrost] Admin UI: http://${fmtHost(host)}:${boundPort}/admin/ (loopback clients only unless BIFROST_ADMIN_EXPOSE=1)`);
   logger.info(`[Bifrost] Workspaces loaded: ${wm.getWorkspaces().length}`);
   const isLoopbackHost = (h) => h === 'localhost' || h === '::1' || /^127\./.test(h);
-  const nonLoopback = hosts.filter(h => !isLoopbackHost(h));
+  const nonLoopback = [...hosts, ...optionalHosts].filter(h => !isLoopbackHost(h));
   if (nonLoopback.length > 0) {
     logger.warn('');
     logger.warn(`[Bifrost] ⚠️  Server is bound to a non-loopback interface: ${nonLoopback.join(', ')}`);
@@ -556,26 +681,113 @@ async function startServer({ port: portOverride, host: hostOverride, configDir }
     Promise.resolve(wm.close?.()).catch(() => { /* best effort */ });
   });
 
-  async function stop() {
+  /**
+   * Graceful stop (all waits share one deadline of `drainMs`, plus a short
+   * tail for background state work):
+   *   stop accepting → in-flight handlers finish and their responses flush →
+   *   close SSE streams (after handlers, so POST /sse results are still
+   *   delivered) and leftover idle sockets → shut providers down
+   *   (no new stream-triggered refreshes) → drain health checks + OAuth mutex
+   *   chains → flush queued config writes → flush usage/audit.
+   */
+  async function stop({ drainMs = 10_000, backgroundTailMs = 3_000 } = {}) {
+    shuttingDown = true;
+    clearOptionalRetries();
     clearInterval(healthInterval);
-    // Phase 11-9 (post-OSS-publish) — close the file watcher BEFORE
-    // tearing down providers so any pending hot-reload debounce timer
-    // can't fire into a half-shut-down state. wm.close() is idempotent.
+    const deadline = Date.now() + drainMs;
+    const left = () => Math.max(0, deadline - Date.now());
+    const within = async (p, ms) => {
+      let timer;
+      const t = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), ms); timer.unref?.(); });
+      const r = await Promise.race([p.then(() => 'done', () => 'done'), t]);
+      clearTimeout(timer);
+      return r;
+    };
+
+    // File watcher first, so a pending hot-reload can't fire mid-shutdown.
     try { await wm.close?.(); } catch { /* best effort */ }
-    await closeServers(servers);
+    const closing = servers.map(beginClose);   // no new connections from here on
+    const allClosed = Promise.all(closing);
+
+    // Loop: the set can change while we wait (anything admitted just before
+    // shuttingDown flipped); new requests are rejected by requestHandler.
+    while (inflight.size > 0) {
+      if (await within(Promise.allSettled([...inflight]), left()) === 'timeout') {
+        logger.warn(`[Bifrost] stop(): ${inflight.size} request(s) still running after ${drainMs}ms`);
+        break;
+      }
+    }
+    // Handlers are done and their responses handed to the socket. End SSE
+    // streams, then half-close every socket (FIN after buffered bytes) and
+    // give slow readers until the deadline before destroying what's left.
+    try { sse.closeAll?.(); } catch { /* best effort */ }
+    for (const sock of sockets) { try { sock.end(); } catch { /* ignore */ } }
+    while (sockets.size > 0 && left() > 0) await new Promise((r) => setTimeout(r, 20));
+    if (sockets.size > 0) logger.warn(`[Bifrost] stop(): ${sockets.size} connection(s) still open at deadline — destroying`);
+    for (const srv of servers) srv.closeAllConnections?.();
+    for (const sock of sockets) { try { sock.destroy(); } catch { /* ignore */ } }
+    await allClosed;
+
     for (const [, provider] of wm.providers ?? []) {
       try { await provider.shutdown?.(); } catch { /* best effort */ }
     }
+    // No request handlers are left that might legitimately need a refresh;
+    // from here on refuse new OAuth work (late 401s on fire-and-forget calls)
+    // and only finish what is already queued.
+    try { oauth.close?.(); } catch { /* best effort */ }
+    try { slackOAuth?.close?.(); } catch { /* best effort */ }
+    const bg = (async () => {
+      await Promise.allSettled([...background]);
+      await Promise.allSettled([oauth.drain?.(), slackOAuth?.drain?.()]);
+    })();
+    if (await within(bg, Math.max(left(), backgroundTailMs)) === 'timeout') {
+      logger.warn('[Bifrost] stop(): background OAuth/health work still running — state written so far is flushed');
+    }
+    try { await wm.flushWrites?.(); } catch { /* best effort */ }
     try { await usage.flush?.(); } catch { /* best effort */ }
     try { await audit.flush?.(); } catch { /* best effort */ }
   }
 
-  return { wm, tr, mcp, sse, oauth, slackOAuth, tokenManager, usage, audit, server, servers, healthInterval, port: boundPort, host, hosts, stop };
+  return { wm, tr, mcp, sse, oauth, slackOAuth, tokenManager, usage, audit, server, servers, healthInterval, port: boundPort, host, hosts, optionalHosts,
+    getOptionalStatus: () => Object.fromEntries([...optionalStatus].map(([h, st]) => [h, { ...st }])), stop };
 }
 
 // Auto-start only when executed as the entry point (not when imported).
+/**
+ * SIGTERM/SIGINT → stop(): stop accepting, let in-flight requests finish
+ * (SSE force-closed after the grace period), shut providers down and flush
+ * usage/audit — instead of node's default immediate exit. A second signal or
+ * the watchdog timeout (20s, > stop()'s 10s drain) forces exit(1).
+ */
+export function installSignalHandlers(app, { proc = process, timeoutMs = 20_000, log = logger } = {}) {
+  let stopping = false;
+  const onSignal = (sig) => {
+    if (stopping) {
+      log.warn(`[Bifrost] ${sig} again — forcing exit`);
+      proc.exit(1);
+      return;
+    }
+    stopping = true;
+    log.info(`[Bifrost] ${sig} received — graceful shutdown`);
+    // Deliberately NOT unref'd: it must keep the loop alive so a stop() that
+    // hangs on a handle-less promise ends in exit(1), not a silent exit(0).
+    const watchdog = setTimeout(() => {
+      log.error(`[Bifrost] graceful shutdown exceeded ${timeoutMs}ms — forcing exit`);
+      proc.exit(1);
+    }, timeoutMs);
+    Promise.resolve()
+      .then(() => app.stop())
+      .then(() => { clearTimeout(watchdog); proc.exit(0); },
+        (err) => { clearTimeout(watchdog); log.error(`[Bifrost] shutdown error: ${err?.message || err}`); proc.exit(1); });
+  };
+  proc.on('SIGTERM', onSignal);
+  proc.on('SIGINT', onSignal);
+  return onSignal;
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
-  await startServer();
+  const app = await startServer();
+  installSignalHandlers(app);
 }
 
 export { startServer, renderOAuthResultPage };
