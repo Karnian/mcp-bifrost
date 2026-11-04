@@ -13,13 +13,21 @@ const PATTERNS = [
   { re: /(access_token=)[^&\s"'<>]+/gi, repl: '$1***' },
   { re: /(refresh_token=)[^&\s"'<>]+/gi, repl: '$1***' },
   { re: /(client_secret=)[^&\s"'<>]+/gi, repl: '$1***' },
+  // client_id is not a secret, but raw IDs are kept out of logs/audit
+  // (cf. maskClientId) — an AS may echo the request body in its errors.
+  { re: /(client_id=)([^&\s"'<>]+)/gi, repl: (_, k, v) => k + maskId(v) },
   { re: /(code=)[A-Za-z0-9._\-~+/=]{12,}/g, repl: '$1***' },
   { re: /(code_verifier=)[^&\s"'<>]+/gi, repl: '$1***' },
   // JSON-style fields
   { re: /("access_token"\s*:\s*")[^"]+(")/gi, repl: '$1***$2' },
   { re: /("refresh_token"\s*:\s*")[^"]+(")/gi, repl: '$1***$2' },
   { re: /("client_secret"\s*:\s*")[^"]+(")/gi, repl: '$1***$2' },
+  { re: /("client_id"\s*:\s*")([^"]+)(")/gi, repl: (_, a, v, b) => a + maskId(v) + b },
 ];
+
+function maskId(v) {
+  return v.length <= 8 ? '***' : `${v.slice(0, 4)}***${v.slice(-4)}`;
+}
 
 export function sanitize(input) {
   if (input == null) return input;
