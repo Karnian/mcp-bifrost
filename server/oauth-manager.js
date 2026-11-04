@@ -22,6 +22,10 @@ import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { sanitize, tokenPrefix } from './oauth-sanitize.js';
 import { dcrStatusBucket } from './oauth-metrics.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// Marks code running inside a mutex-guarded op (graceful-shutdown nesting).
+const lockContext = new AsyncLocalStorage();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(__dirname, '..', '.ao', 'state');
@@ -1114,10 +1118,39 @@ export class OAuthManager {
    * exclusive (coalescing would have piggy-backed markAuthFailed onto an
    * in-flight refresh and lost the action_needed write).
    */
+  /**
+   * Graceful-shutdown helper: wait until every FIFO mutex chain (refresh,
+   * markAuthFailed, rotation, completeAuthorization) has settled, including
+   * ops chained on while waiting. Callers bound this with their own deadline.
+   */
+  /**
+   * Graceful shutdown: reject new mutex-guarded work (refresh, markAuthFailed,
+   * rotation, install) from here on — e.g. a late 401 on a fire-and-forget
+   * upstream request — then drain() the chains already queued.
+   */
+  close() {
+    this._closed = true;
+  }
+
+  async drain() {
+    let prev = null;
+    for (;;) {
+      const tails = [this._identityMutex, this._workspaceMutex].flatMap(m => [...m.values()]);
+      if (tails.length === 0) return;
+      // No progress (a settled tail was never removed) → stop instead of spinning.
+      if (prev && tails.length === prev.length && tails.every((t, i) => t === prev[i])) return;
+      prev = tails;
+      await Promise.allSettled(tails);
+    }
+  }
+
   _withIdentityMutex(workspaceId, identity, fn) {
+    // After close(): refuse NEW work, but let work that is already running
+    // take nested locks (e.g. completeAuthorization: workspace → identity).
+    if (this._closed && !lockContext.getStore()) return Promise.reject(Object.assign(new Error('oauth manager is shutting down'), { code: 'SHUTTING_DOWN' }));
     const key = `${workspaceId}::${identity}`;
     const prev = this._identityMutex.get(key) || Promise.resolve();
-    const next = prev.catch(() => {}).then(() => fn());
+    const next = prev.catch(() => {}).then(() => lockContext.run(true, fn));
     this._identityMutex.set(key, next);
     // Cleanup tail when this call is the last in the chain — prevents leaking
     // the Map entry for never-refreshed identities.
@@ -1143,9 +1176,12 @@ export class OAuthManager {
    * workspace-level coordination.
    */
   _withWorkspaceMutex(workspaceId, fn) {
+    // After close(): refuse NEW work, but let work that is already running
+    // take nested locks (e.g. completeAuthorization: workspace → identity).
+    if (this._closed && !lockContext.getStore()) return Promise.reject(Object.assign(new Error('oauth manager is shutting down'), { code: 'SHUTTING_DOWN' }));
     const key = workspaceId;
     const prev = this._workspaceMutex.get(key) || Promise.resolve();
-    const next = prev.catch(() => {}).then(() => fn());
+    const next = prev.catch(() => {}).then(() => lockContext.run(true, fn));
     this._workspaceMutex.set(key, next);
     next.finally(() => {
       if (this._workspaceMutex.get(key) === next) this._workspaceMutex.delete(key);

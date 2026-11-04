@@ -1118,6 +1118,18 @@ export class WorkspaceManager {
    * timer don't survive past process shutdown. One-off scripts and
    * non-server tests don't need to call this.
    */
+  /**
+   * Wait for every queued config write (incl. fire-and-forget OAuth token
+   * saves, which go through the same _writeLock chain) to settle.
+   */
+  async flushWrites() {
+    let last;
+    do {
+      last = this._writeLock;
+      try { await last; } catch { /* a failed write was already surfaced to its caller */ }
+    } while (last !== this._writeLock);
+  }
+
   async close() {
     this._stopped = true;
     if (this._reloadTimer) {
