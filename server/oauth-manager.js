@@ -56,6 +56,34 @@ export function maskClientId(clientId) {
   return `${clientId.slice(0, 4)}***${clientId.slice(-4)}`;
 }
 
+/**
+ * True only for an AS that refused a Basic-authenticated token request
+ * because the form body lacked client_id (MCP Python SDK ClientAuthenticator:
+ * 401 {"error":"unauthorized_client","error_description":"Missing client_id"}).
+ * Deliberately narrow — anything else (invalid_grant, other 4xx, 5xx) is
+ * surfaced as-is and never retried.
+ */
+export function isMissingClientIdError(status, bodyText) {
+  if (status !== 400 && status !== 401) return false;
+  let json;
+  try { json = JSON.parse(bodyText); } catch { return false; }
+  if (!json || typeof json !== 'object') return false;
+  if (!['unauthorized_client', 'invalid_client', 'invalid_request'].includes(json.error)) return false;
+  return typeof json.error_description === 'string' && /^missing client_id$/i.test(json.error_description.trim());
+}
+
+/**
+ * Replace every occurrence of a known client_id with its masked form. A very
+ * short ID cannot be replaced without mangling unrelated text, so a body that
+ * contains one is dropped instead.
+ */
+function redactClientId(text, clientId) {
+  if (!text || !clientId || typeof clientId !== 'string') return text;
+  if (!text.includes(clientId)) return text;
+  if (clientId.length < 4) return '[response body omitted: contains client_id]';
+  return text.split(clientId).join(maskClientId(clientId));
+}
+
 function parseRetryAfterMs(header) {
   if (!header) return null;
   const s = String(header).trim();
@@ -110,6 +138,10 @@ export class OAuthManager {
     this.fetch = fetchImpl;
     this._redirectPort = redirectPort;
     this._refreshTimeoutMs = refreshTimeoutMs;
+    // `${tokenEndpoint}::${clientId}` of client_secret_basic clients whose AS
+    // demands client_id in the form body too (see _tokenRequest). In-memory:
+    // after a restart the quirk is re-learned with one extra request.
+    this._basicBodyClientId = new Set();
     // Phase 11-4 §6-OBS.2 — optional OAuthMetrics recorder (in-memory).
     // When null, all _metric(...) calls are no-ops so tests/legacy callers
     // that construct OAuthManager without a recorder are unaffected.
@@ -965,9 +997,46 @@ export class OAuthManager {
   }
 
   async _tokenRequest(entry, params, kind, { signal } = {}) {
+    const basic = entry.authMethod === 'client_secret_basic' && !!entry.clientSecret;
+    const quirkKey = basic ? `${entry.tokenEndpoint}::${entry.clientId}` : null;
+    const knownQuirk = basic && this._basicBodyClientId.has(quirkKey);
+
+    let { res, body } = await this._postToken(entry, params, { signal, basicBodyClientId: knownQuirk });
+    // Basic-only is the default: some ASes (e.g. Cloudflare workers-oauth-provider)
+    // reject Basic + body client_id as two auth methods. Others look the client
+    // up from the form first — the MCP Python SDK ClientAuthenticator answers a
+    // Basic-only request with "Missing client_id" before touching the grant
+    // (seen on mcp 1.30.0). Only that unambiguous pre-grant rejection triggers
+    // one retry with client_id in the body, so a code / refresh token is never
+    // presented twice after the AS may have processed it.
+    if (basic && !knownQuirk && isMissingClientIdError(res.status, body)) {
+      this._basicBodyClientId.add(quirkKey);
+      ({ res, body } = await this._postToken(entry, params, { signal, basicBodyClientId: true }));
+    }
+    if (!res.ok) {
+      const safeBody = redactClientId(sanitize(body), entry.clientId);
+      const err = new Error(`token_endpoint_${kind}_failed: ${res.status} ${safeBody.slice(0, 200)}`);
+      err.code = 'TOKEN_ENDPOINT_ERROR';
+      err.status = res.status;
+      throw err;
+    }
+    let json;
+    try { json = JSON.parse(body); } catch {
+      throw new Error(`token_endpoint_${kind}_invalid_json`);
+    }
+    if (!json.access_token) {
+      throw new Error(`token_endpoint_${kind}_missing_access_token`);
+    }
+    return json;
+  }
+
+  async _postToken(entry, baseParams, { signal, basicBodyClientId = false } = {}) {
+    const params = new URLSearchParams(baseParams); // per-attempt copy
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' };
     if (entry.authMethod === 'client_secret_basic' && entry.clientSecret) {
       headers['Authorization'] = 'Basic ' + Buffer.from(`${entry.clientId}:${entry.clientSecret}`).toString('base64');
+      // Identifier only — the secret stays in the header.
+      if (basicBodyClientId) params.set('client_id', entry.clientId);
     } else if (entry.authMethod === 'client_secret_post' && entry.clientSecret) {
       params.set('client_id', entry.clientId);
       params.set('client_secret', entry.clientSecret);
@@ -985,20 +1054,7 @@ export class OAuthManager {
     if (signal) fetchInit.signal = signal;
     const res = await this.fetch(entry.tokenEndpoint, fetchInit);
     const body = await res.text();
-    if (!res.ok) {
-      const err = new Error(`token_endpoint_${kind}_failed: ${res.status} ${sanitize(body).slice(0, 200)}`);
-      err.code = 'TOKEN_ENDPOINT_ERROR';
-      err.status = res.status;
-      throw err;
-    }
-    let json;
-    try { json = JSON.parse(body); } catch {
-      throw new Error(`token_endpoint_${kind}_invalid_json`);
-    }
-    if (!json.access_token) {
-      throw new Error(`token_endpoint_${kind}_missing_access_token`);
-    }
-    return json;
+    return { res, body };
   }
 
   /**
