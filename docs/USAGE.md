@@ -64,10 +64,12 @@ BIFROST_HOST=0.0.0.0 npm start
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `BIFROST_HOST` | `127.0.0.1` | listen 인터페이스. 외부 노출 시 `0.0.0.0` |
+| `BIFROST_HOST` | `127.0.0.1` | listen 인터페이스. 쉼표로 여러 개 지정 가능(`127.0.0.1,100.x.y.z`; `workspaces.json` 의 `server.host` 는 배열도 허용). 빈 값은 `127.0.0.1`. 하나라도 bind 실패 시 서버 기동 전체 실패. 외부 전체 노출은 `0.0.0.0` |
 | `BIFROST_ADMIN_TOKEN` | (없음) | Admin UI/API 인증 토큰. 미설정 시 토큰 검사 생략 |
-| `BIFROST_MCP_TOKEN` | (없음) | MCP 클라이언트 인증 토큰. 미설정 시 인증 생략 |
+| `BIFROST_MCP_TOKEN` | (없음) | MCP 클라이언트 인증 토큰. 미설정(그리고 Admin 에서 발급한 토큰도 없음) 시 **모든 listen 주소에서** 인증 생략 — loopback 외 주소에 bind 할 때는 반드시 설정 |
 | `BIFROST_ADMIN_EXPOSE` | `0` | `1` 로 설정 시 Admin API 가 외부에서도 접근 가능 |
+| `BIFROST_ALLOWED_HOSTS` | (없음) | DNS rebinding 방어용 추가 허용 hostname(콤마 구분, 포트 없이). Admin 경로(`/admin`, `/api/*`)는 Host 가 IP 리터럴(임의 IP 허용 — 목적지 IP 는 rebinding 불가)·`localhost`·이 머신 hostname·public URL host·이 목록일 때만 허용. `*` 는 검사 해제 |
+| `BIFROST_ALLOWED_ORIGINS` | (없음) | 추가 허용 Origin(콤마 구분, `https://host[:port]`). 모든 경로에서 `Origin` 헤더가 있으면 이 목록·`BIFROST_CORS_ORIGIN` 에 있거나, hostname 이 `localhost`·머신 hostname·public URL host·`BIFROST_ALLOWED_HOSTS` 이거나, **IP 인 경우 loopback 또는 이 머신 인터페이스 주소**여야 함(Host 와 달리 임의 IP 는 거부, `null` 거부). 인터페이스에 없는 IP(예: NAT 뒤 공인 IP)를 출처로 쓰려면 이 목록에 명시. Origin 이 없는 CLI 클라이언트는 영향 없음. `*` 는 검사 해제 |
 | `BIFROST_ALLOWED_COMMANDS` | (없음) | stdio command 화이트리스트 (콤마 구분: `npx,node,uvx,python3`). 미설정 시 모든 명령 허용 |
 
 ### 권장 운영 설정
@@ -80,6 +82,18 @@ export BIFROST_ALLOWED_COMMANDS="npx,node,uvx,python3"
 # export BIFROST_ADMIN_EXPOSE=1
 BIFROST_HOST=0.0.0.0 npm start
 ```
+
+### 특정 인터페이스만 노출 (예: loopback + Tailscale)
+
+`0.0.0.0` 은 LAN·docker bridge 까지 열린다. 필요한 주소만 열려면 쉼표로 나열한다.
+
+```bash
+# 127.0.1.1 = Debian/Ubuntu 에서 /etc/hosts 의 호스트명이 가리키는 주소
+BIFROST_HOST=127.0.0.1,127.0.1.1,100.83.124.113 npm start
+```
+
+- Admin API 는 peer 주소가 `127.0.0.1`/`::1` 일 때만 허용된다(Host 헤더가 아님). tailnet 주소로 들어온 요청은 유효한 Admin 토큰이 있어도 `403 ADMIN_LOCAL_ONLY`.
+- 모든 주소가 필수다. Tailscale 처럼 부팅 시 늦게 생기는 주소를 넣으면 생길 때까지 기동이 실패하므로 systemd `Restart=on-failure` 로 재시도시킨다.
 
 ---
 

@@ -23,6 +23,10 @@ export class ToolRegistry {
 
   bumpVersion() {
     this.toolsVersion++;
+    // Drop the name → workspace map so tools/call can't keep resolving a tool
+    // that a toolFilter change (or disable/delete) just removed; the next
+    // resolve() rebuilds it from current config.
+    this._reverseMap = new Map();
   }
 
   /**
@@ -133,6 +137,10 @@ export class ToolRegistry {
       entry = this._reverseMap.get(mcpToolName);
     }
     if (!entry || !entry.workspaceId) return null;
+    // Defense in depth: re-check the live workspace config — the map may have
+    // been built before a filter/enabled change landed.
+    const ws = this.wm.getEnabledWorkspaces().find(w => w.id === entry.workspaceId);
+    if (!ws || !this._passesFilter(ws, entry.originalName)) return null;
     return {
       type: 'workspace',
       workspaceId: entry.workspaceId,

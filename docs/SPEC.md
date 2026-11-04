@@ -333,8 +333,9 @@ Admin 인증과 MCP 클라이언트 인증을 **분리**한다:
 | **MCP Token** | MCP 엔드포인트 접근 | `BIFROST_MCP_TOKEN` | 도구 호출만 (tools/list, tools/call) |
 
 - MCP 클라이언트는 `Authorization: Bearer <MCP_TOKEN>` 헤더로 인증
-- MCP Token이 설정되지 않으면 → 로컬 전용 모드 (localhost만 허용, Tunnel 비활성화)
+- MCP Token이 설정되지 않으면(환경변수·발급 토큰 모두 없음) → MCP 인증을 생략한다. **peer 주소로 제한하지 않으므로** loopback 외 주소(`BIFROST_HOST`)에 bind 하거나 Tunnel 을 쓸 때는 반드시 토큰을 설정한다 (loopback 외 주소에 bind 하면 기동 시 경고 출력)
 - MCP Token으로는 Admin API에 접근 불가 (워크스페이스 수정, 토큰 조회 등 차단)
+- DNS rebinding 방어 (MCP 2025-03-26 transport security): `Origin` 헤더가 있으면 허용 hostname(`localhost`, 머신 hostname, public URL host, `BIFROST_ALLOWED_HOSTS`), loopback·자기 인터페이스 IP, 또는 `BIFROST_ALLOWED_ORIGINS`/`BIFROST_CORS_ORIGIN` 일 때만 처리하고 아니면 403 `ORIGIN_NOT_ALLOWED` (출처 IP 는 공격자 페이지일 수 있어 임의 IP 불허). Admin 경로는 같은 출처 GET 에 Origin 이 없으므로 `Host` 도 검사하며, 목적지 IP 는 rebinding 될 수 없어 IP 리터럴은 모두 허용 (403 `HOST_NOT_ALLOWED`)
 - SSE: 연결 시 Bearer 검증 → 연결 유지
 - Streamable HTTP: 매 요청마다 Bearer 검증 (stateless)
 
