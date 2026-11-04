@@ -66,9 +66,9 @@ BIFROST_HOST=0.0.0.0 npm start
 |------|--------|------|
 | `BIFROST_HOST` | `127.0.0.1` | listen 인터페이스. 쉼표로 여러 개 지정 가능(`127.0.0.1,100.x.y.z`; `workspaces.json` 의 `server.host` 는 배열도 허용). 빈 값은 `127.0.0.1`. 하나라도 bind 실패 시 서버 기동 전체 실패. 외부 전체 노출은 `0.0.0.0` |
 | `BIFROST_HOST_OPTIONAL` | (없음) | best-effort listen 주소(콤마 구분). bind 실패(주소 없음·포트 점유)해도 `BIFROST_HOST` 리스너는 계속 동작하고, 실패 주소만 backoff(30s → 최대 10분)로 재시도. DHCP·Tailscale 처럼 바뀌거나 늦게 생기는 주소용 |
-| `BIFROST_ADMIN_TOKEN` | (없음) | Admin UI/API 인증 토큰. 미설정 시 토큰 검사 생략 |
+| `BIFROST_ADMIN_TOKEN` | (없음) | Admin UI/API 인증 토큰. 미설정 시 토큰 검사 생략 — 이때 Admin API 는 **loopback peer 만** 허용(`BIFROST_ADMIN_EXPOSE=1` 이어도 원격은 403 `ADMIN_TOKEN_REQUIRED`). 판정은 env 또는 `workspaces.json` 의 `server.adminToken` 중 유효한 토큰 기준 |
 | `BIFROST_MCP_TOKEN` | (없음) | MCP 클라이언트 인증 토큰. 미설정(그리고 Admin 에서 발급한 토큰도 없음) 시 **모든 listen 주소에서** 인증 생략 — loopback 외 주소에 bind 할 때는 반드시 설정 |
-| `BIFROST_ADMIN_EXPOSE` | `0` | `1` 로 설정 시 Admin API 가 외부에서도 접근 가능 |
+| `BIFROST_ADMIN_EXPOSE` | `0` | `1` 로 설정 시 Admin API 가 외부(listen 중인 모든 주소)에서도 접근 가능. Admin 토큰(env `BIFROST_ADMIN_TOKEN` 또는 `server.adminToken`)이 있어야 원격 접근이 열린다 |
 | `BIFROST_ALLOWED_HOSTS` | (없음) | DNS rebinding 방어용 추가 허용 hostname(콤마 구분, 포트 없이). Admin 경로(`/admin`, `/api/*`)는 Host 가 IP 리터럴(임의 IP 허용 — 목적지 IP 는 rebinding 불가)·`localhost`·이 머신 hostname·public URL host·이 목록일 때만 허용. `*` 는 검사 해제 |
 | `BIFROST_ALLOWED_ORIGINS` | (없음) | 추가 허용 Origin(콤마 구분, `https://host[:port]`). 모든 경로에서 `Origin` 헤더가 있으면 이 목록·`BIFROST_CORS_ORIGIN` 에 있거나, hostname 이 `localhost`·머신 hostname·public URL host·`BIFROST_ALLOWED_HOSTS` 이거나, **IP 인 경우 loopback 또는 이 머신 인터페이스 주소**여야 함(Host 와 달리 임의 IP 는 거부, `null` 거부). 인터페이스에 없는 IP(예: NAT 뒤 공인 IP)를 출처로 쓰려면 이 목록에 명시. Origin 이 없는 CLI 클라이언트는 영향 없음. `*` 는 검사 해제 |
 | `BIFROST_ALLOWED_COMMANDS` | (없음) | stdio command 화이트리스트 (콤마 구분: `npx,node,uvx,python3`). 미설정 시 모든 명령 허용 |
@@ -457,7 +457,8 @@ npm run tunnel
 |------|------|----------|
 | `/health` | 없음 | 항상 가능 |
 | `/mcp`, `/sse` | `BIFROST_MCP_TOKEN` (있을 때) | `BIFROST_HOST=0.0.0.0` 시 가능 |
-| `/api/*`, `/admin/*` | `BIFROST_ADMIN_TOKEN` (있을 때) | `BIFROST_ADMIN_EXPOSE=1` 명시 필요 |
+| `/api/*` | Admin 토큰 (있을 때) | `BIFROST_ADMIN_EXPOSE=1` + Admin 토큰(env 또는 `server.adminToken`) 둘 다 필요 |
+| `/admin/*` (정적 화면) | 없음 | 항상 가능 — 화면만 뜨고 데이터는 `/api/*` 조건을 따른다 |
 | stdio 자식 프로세스 spawn | `BIFROST_ALLOWED_COMMANDS` 화이트리스트 (선택) | — |
 
 > ⚠️ Admin API는 임의 명령(stdio command)을 등록할 수 있으므로 RCE 표면입니다. 가능하면 localhost 전용 + command 화이트리스트 사용.

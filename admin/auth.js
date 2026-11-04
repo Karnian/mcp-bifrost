@@ -5,6 +5,8 @@ import { timingSafeEqual } from 'node:crypto';
  * - Admin API is localhost-only by default (even with Bearer token) for safety,
  *   because it can configure stdio commands (RCE surface).
  * - Set BIFROST_ADMIN_EXPOSE=1 to allow remote Admin API access.
+ * - Without an admin token ("dev mode") only loopback peers are let in,
+ *   even with BIFROST_ADMIN_EXPOSE=1 — exposure never means unauthenticated.
  */
 export function authenticateAdmin(req, res, wm) {
   // Admin exposure guard
@@ -22,7 +24,11 @@ export function authenticateAdmin(req, res, wm) {
 
   const adminToken = wm.getAdminToken();
   if (!adminToken) {
-    // No admin token configured — allow access (dev mode, localhost only due to above guard)
+    // No admin token configured — dev mode, loopback peers only.
+    if (!isLocalRequest(req)) {
+      sendAdminTokenRequired(res);
+      return false;
+    }
     return true;
   }
 
@@ -48,7 +54,17 @@ export function safeTokenCompare(input, expected) {
   return timingSafeEqual(a, b);
 }
 
-function isLocalRequest(req) {
+export function sendAdminTokenRequired(res) {
+  sendJson(res, 403, {
+    ok: false,
+    error: {
+      code: 'ADMIN_TOKEN_REQUIRED',
+      message: 'Remote Admin API access requires BIFROST_ADMIN_TOKEN to be set.',
+    },
+  });
+}
+
+export function isLocalRequest(req) {
   const addr = req.socket?.remoteAddress || '';
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
